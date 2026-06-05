@@ -45,8 +45,10 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_TensorCore.cu",
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
+    KUIPER_DIST / "Klas_GEMM_Naive3.cu",
     KUIPER_DIST / "Klas_Softmax.cu",
     KUIPER_DIST / "Klas_LogSoftmax.cu",
+    KUIPER_DIST / "Klas_RowSoftmax.cu",
     KUIPER_DIST / "Klas_HReduce.cu",
     KUIPER_DIST / "Klas_RowScale.cu",
 ]

@@ -8,12 +8,6 @@
 //      Kuiper launches on its own fresh stream.
 //   3. Calls the Kuiper top-level host function (which itself internally
 //      does cudaDeviceSynchronize() after the launch).
-//
-// All Kuiper kernels in dist/ take device pointers, work row-major (rrr),
-// and operate in-place on C for GEMM (C = alpha*A*B + beta*C). The
-// `g_matmul_*` variants overwrite C; the f16 TensorCore `g_gemm_*` variants
-// LOAD C into the accumulator, so C MUST be zero-initialised by the caller
-// when the desired semantics is C := A*B.
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
@@ -30,8 +24,10 @@
 #include "Klas_GEMM_TensorCore.h"
 #include "Klas_GEMM_TensorCore2D.h"
 #include "Klas_GEMM_Batched.h"
+#include "Klas_GEMM_Naive3.h"
 #include "Klas_Softmax.h"
 #include "Klas_LogSoftmax.h"
+#include "Klas_RowSoftmax.h"
 #include "Klas_HReduce.h"
 #include "Klas_RowScale.h"
 
@@ -145,8 +141,7 @@ torch::Tensor kuiper_matmul_f16(torch::Tensor A, torch::Tensor B) {
 
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
-    // MUST zero-init: TensorCore kernel loads C into the accumulator.
-    auto C = torch::zeros({M, N}, A.options());
+    auto C = torch::empty({M, N}, A.options());
 
     at::cuda::CUDAGuard guard(A.device());
     sync_current_stream();
@@ -204,6 +199,34 @@ torch::Tensor kuiper_matmul_bf16_to_f32(torch::Tensor A, torch::Tensor B) {
         reinterpret_cast<__nv_bfloat16*>(Bc.data_ptr()),
         C.data_ptr<float>());
     return C;
+}
+
+torch::Tensor kuiper_matmul_bf16_to_bf16_no_tile(torch::Tensor A, torch::Tensor B) {
+    TORCH_CHECK(A.is_cuda() && B.is_cuda(),
+                "kuiper_matmul_bf16_to_f32: tensors must be CUDA");
+    TORCH_CHECK(A.scalar_type() == torch::kBFloat16
+                && B.scalar_type() == torch::kBFloat16,
+                "kuiper_matmul_bf16_to_f32: dtype must be bfloat16");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2,
+                "kuiper_matmul_bf16_to_f32: rank 2 only");
+    TORCH_CHECK(A.size(1) == B.size(0),
+                "kuiper_matmul_bf16_to_f32: contracting dim mismatch");
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+    auto C = torch::empty({M, N}, A.options());
+    auto Cc = C.contiguous();
+
+    at::cuda::CUDAGuard guard(A.device());
+    sync_current_stream();
+
+    Klas_GEMM_Naive3_g_matmul_bf16_rrr(
+        (uint32_t)M, (uint32_t)K, (uint32_t)N,
+        reinterpret_cast<__nv_bfloat16*>(Ac.data_ptr()),
+        reinterpret_cast<__nv_bfloat16*>(Bc.data_ptr()),
+        reinterpret_cast<__nv_bfloat16*>(Cc.data_ptr()));
+    return Cc;
 }
 
 // =============================================================================
@@ -269,9 +292,7 @@ void kuiper_softmax_last_f32_(torch::Tensor x) {
     sync_current_stream();
 
     float* p = x.data_ptr<float>();
-    for (int64_t i = 0; i < outer; ++i) {
-        Klas_Softmax_softmax_f32((uint32_t)N, p + i*N);
-    }
+    Klas_RowSoftmax_row_softmax_rm_f32(outer, N, p);
 }
 
 void kuiper_softmax_last_f16_(torch::Tensor x) {
@@ -373,6 +394,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "C(f32) = A(bf16) @ B(bf16) via Klas_GEMM_TensorCore2D bf16->f32 "
           "(64x64x64 2x2 tile, M,N,K %64==0). "
           "f32 accumulator is HW-mandated; caller may cast f32->bf16 after.");
+    m.def("matmul_bf16_to_bf16_no_tile", &kuiper_matmul_bf16_to_bf16_no_tile,
+          "Naive3");
     m.def("bmm_f32",    &kuiper_bmm_f32,
           "Batched f32 matmul (loops Klas_GEMM_BlockTiling1D over batch)");
     m.def("softmax_last_f32_",     &kuiper_softmax_last_f32_,
