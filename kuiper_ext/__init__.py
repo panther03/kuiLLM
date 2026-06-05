@@ -1,28 +1,3 @@
-"""kuiper_ext — verified Kuiper GPU kernels exposed as PyTorch ops.
-
-This module JIT-builds a CUDA extension on first import that links against a
-curated subset of the verified kernels in /home/julien/work/kuiper/dist.
-
-Public surface:
-
-    kuiper_ext.matmul_f32(A, B)       -> Tensor       (f32, M,N,K % 32 == 0)
-    kuiper_ext.gemm_f32_(a, b, A, B, C)               (C := a*A*B + b*C, in-place)
-    kuiper_ext.matmul_f16(A, B)       -> Tensor       (f16, M,N,K % 64 == 0)
-    kuiper_ext.bmm_f32(A, B)          -> Tensor       (rank-3, f32)
-
-    kuiper_ext.softmax_last_f32_(x)   in-place        (NOT numerically stable)
-    kuiper_ext.softmax_last_f16_(x)   in-place
-    kuiper_ext.log_softmax_last_f32_(x) in-place
-
-    kuiper_ext.row_sum_last_f32(x, nth)               (slow, mostly for tests)
-    kuiper_ext.row_scale_f32_(mat, scales)            in-place
-
-    kuiper_ext.is_available() -> bool                 (True iff build worked)
-
-For high-level usage (replace nn.Linear, monkey-patch torch.matmul / softmax),
-see `kuiper_ext.integration`.
-"""
-
 import os
 import sys
 from pathlib import Path
@@ -40,17 +15,8 @@ _CSRC        = _HERE / "csrc"
 
 # Kuiper .cu sources we need to link in (one per wrapped op family).
 _KUIPER_SOURCES = [
-    KUIPER_DIST / "Klas_GEMM_BlockTiling1D.cu",
-    KUIPER_DIST / "Klas_GEMM_SHMem.cu",
-    KUIPER_DIST / "Klas_GEMM_TensorCore.cu",
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
-    KUIPER_DIST / "Klas_GEMM_Naive3.cu",
-    KUIPER_DIST / "Klas_Softmax.cu",
-    KUIPER_DIST / "Klas_LogSoftmax.cu",
-    KUIPER_DIST / "Klas_RowSoftmax.cu",
-    KUIPER_DIST / "Klas_HReduce.cu",
-    KUIPER_DIST / "Klas_RowScale.cu",
 ]
 _WRAPPER_SOURCES = [_CSRC / "ops.cu"]
 
