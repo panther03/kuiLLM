@@ -1,6 +1,12 @@
 """
 Profile Qwen2.5-0.5B forward pass.
 
+Variant of profile_ops.py that additionally emits ``KERNELS2.md`` — a
+Markdown checklist with one row per distinct ``(aten_op, input_dtype_sig,
+output_dtype_sig)`` combination observed in the call tree, restricted to
+aten ops that directly launch a CUDA kernel. Useful for scoping which
+verified Kuiper kernel implementations still need to be written.
+
 By default, routes compatible nn.Linear layers through Kuiper-verified GEMM
 kernels (matches the configuration used by infer.py). Set the env var
 KUIPER=0 to profile the unmodified PyTorch baseline for comparison.
@@ -9,6 +15,7 @@ Outputs:
   trace.json       — Chrome/Perfetto trace (open at https://ui.perfetto.dev)
   call_tree.txt    — ASCII call tree (parent/child, self+total times, call counts)
   call_tree.png    — Icicle/flame chart of the call tree
+  KERNELS2.md      — Markdown table: one row per kernel signature combination
   op_graph.png     — Operator DAG from torch.fx symbolic trace
 """
 
@@ -629,6 +636,66 @@ def _print_call_tree(forest, total_root_us, out, max_depth=12, min_pct=0.2):
     walk(forest, 0)
 
 
+# ── Markdown kernel checklist ────────────────────────────────────────────────
+
+def _emit_kernel_checklist(forest, out):
+    """Write a Markdown table to ``out`` with one row per distinct
+    ``(aten_op, input_dtype_sig, output_dtype_sig)`` combination observed
+    in the tree.
+
+    Only aten ops that **directly** launch a CUDA kernel (i.e. have a direct
+    ``⟦cuda⟧ …`` child node) are included. Composite ops like ``aten::linear``
+    / ``aten::matmul`` are excluded because their CUDA work is attributed to
+    their leaf children (``aten::mm``, ``aten::addmm``, …). The intent is to
+    enumerate the exact set of kernel signatures that still need a verified
+    Kuiper implementation.
+    """
+
+    combos = defaultdict(int)   # (op_name, in_sig, out_sig) -> total_calls
+
+    def walk(nodes):
+        for n in nodes.values():
+            name = n["name"]
+            if name.startswith("aten::"):
+                # Does this node directly launch a CUDA kernel?
+                has_cuda_child = any(
+                    c["name"].startswith("⟦cuda⟧")
+                    for c in n["children"].values()
+                )
+                if has_cuda_child:
+                    if n["io_sigs"]:
+                        for (in_sig, out_sig), c in n["io_sigs"].items():
+                            combos[(name, in_sig, out_sig)] += c
+                    else:
+                        # Op with no recorded dtype info; still emit a stub
+                        # row so it doesn't silently drop out of the list.
+                        combos[(name, "", "")] += n["count"]
+            walk(n["children"])
+
+    walk(forest)
+
+    rows = sorted(combos.items(), key=lambda kv: (kv[0][0], -kv[1]))
+
+    print("# Kernel implementation checklist", file=out)
+    print("", file=out)
+    print("Each row is a distinct `(aten op, input dtype signature, output dtype "
+          "signature)` combination observed during the profiled forward pass. "
+          "Only aten ops that **directly** launch a CUDA kernel are listed — "
+          "composite ops like `aten::linear` / `aten::matmul` are excluded "
+          "because their CUDA work is attributed to leaf children "
+          "(`aten::mm`, `aten::addmm`, …).", file=out)
+    print("", file=out)
+    print("Tick the *Implemented* column when a verified Kuiper kernel for that "
+          "exact `(op, in → out)` signature is wired up via `kuiper_ext`.", file=out)
+    print("", file=out)
+    print("| Op | Input dtypes | Output dtype | Calls | Implemented |", file=out)
+    print("| --- | --- | --- | ---: | :---: |", file=out)
+    for (op, in_sig, out_sig), cnt in rows:
+        in_disp  = in_sig  or "—"
+        out_disp = out_sig or "?"
+        print(f"| `{op}` | `{in_disp}` | `{out_disp}` | {cnt} | [ ] |", file=out)
+
+
 # ── Icicle / flame chart renderer ─────────────────────────────────────────────
 
 def _node_color(name: str) -> str:
@@ -768,6 +835,13 @@ with calltree_path.open("w") as f:
     f.write(f"Total inclusive {TIME_LABEL} time at roots: {_fmt_us(root_total).strip()}\n\n")
     _print_call_tree(forest, root_total, f, max_depth=15, min_pct=0.05)
 print(f"\nFull tree saved → {calltree_path}")
+
+# Markdown kernel checklist (one row per distinct (op, in_sig, out_sig) tuple
+# for aten ops that directly launch CUDA kernels).
+kernels_md_path = OUT_DIR / "KERNELS2.md"
+with kernels_md_path.open("w") as f:
+    _emit_kernel_checklist(forest, f)
+print(f"Kernel checklist saved → {kernels_md_path}")
 
 # Icicle / flame chart
 _render_icicle(
