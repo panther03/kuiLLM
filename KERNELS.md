@@ -1,7 +1,7 @@
 # Kernel implementation checklist
 
-| Op | Input dtypes | Output dtype | Calls | kuiper impl. |
-| --- | --- | --- | ---: | :---: |
+| Op | Input dtypes | Output dtype | Calls | kuiper impl. | connected ? | 
+| --- | --- | --- | ---: | :---: | --- |
 | `aten::scaled_dot_product_attention` | `bf16,bf16,bf16` | `bf16` | 24 |  |
 | `aten::is_nonzero` | `b8` | `?` | 1 | |
 | `aten::add`        | `bf16,bf16` | `bf16` | 96 |  |
@@ -10,7 +10,7 @@
 | `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (need to add extraction + ext. output cast) |
 | `aten::all`        | `b8` | `b8` | 1 |  |
 | `aten::arange`     | `long int` | `?` | 1 | |
-| `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched |
+| `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |
 | `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | |
 | `aten::to`         | `bf16,f32` | `?` | 51 | |
 | `aten::to`         | `f32,bf16` | `?` | 49 | |
@@ -20,7 +20,7 @@
 | `aten::cos`        | `f32` | `f32` | 1 | |
 | `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | |
 | `aten::mean`       | `f32` | `f32` | 49 | |
-| `aten::mm`         | `bf16,bf16` | `bf16` | 97 | Klas_GEMM_TensorCore2D (output cast req.) |
+| `aten::mm`         | `bf16,bf16` | `bf16` | 97 | Klas_GEMM_TensorCore2D (output cast req.) | yes |
 | `aten::mul`        | `bf16,bf16` | `bf16` | 169 | |
 | `aten::mul`        | `f32,f32` | `f32` | 49 | |
 | `aten::mul`        | `f32,f64` | `?` | 2 | |

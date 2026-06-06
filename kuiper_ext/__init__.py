@@ -92,4 +92,111 @@ def is_available() -> bool:
 def __getattr__(name):
     if name in {"_ext", "_build_error", "__path__"}:
         raise AttributeError(name)
+    if name == "KuiperMode":
+        return _KuiperMode_cls()
     return getattr(_get(), name)
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher integration
+# ---------------------------------------------------------------------------
+#
+# We want the Kuiper kernels to be picked up *automatically* when PyTorch
+# dispatches aten::mm / aten::addmm / aten::bmm on CUDA tensors of the right
+# dtype + shape, with no model-side code changes beyond entering a context
+# manager.
+#
+# We can't register at (aten::mm, CUDA) because that key already has a kernel,
+# and re-registration is rejected by the dispatcher. PrivateUse1 would force a
+# new device with its own alloc/copy/etc. Instead we hook in *above* the
+# dispatcher with a TorchDispatchMode: the mode sees every aten call on the
+# current thread, and we forward the matching ones to our typed C++ entry
+# points. Everything else falls through to the regular CUDA kernel.
+
+# =============================================================================
+# mm
+# =============================================================================
+
+def _supports_kuiper_mm_common(A, B):
+    if not (A.is_cuda and B.is_cuda):
+        return False
+    if A.dim() != 2 or B.dim() != 2:
+        return False
+    M, K = A.shape
+    K2, N = B.shape
+    if K != K2:
+        return False
+
+def _supports_kuiper_mm_bf16(A, B):
+    if A.dtype != _torch().bfloat16 or B.dtype != _torch().bfloat16:
+        return False
+    M, K = A.shape
+    K2, N = B.shape
+    return (M % 64 == 0) and (N % 64 == 0) and (K % 64 == 0)
+
+# =============================================================================
+# bmm
+# =============================================================================
+
+def _supports_kuiper_bmm_common(A, B):
+    if not (A.is_cuda and B.is_cuda):
+        return False
+    if A.dim() != 3 or B.dim() != 3:
+        return False
+    return A.shape[0] == B.shape[0] and A.shape[2] == B.shape[1]
+
+def _supports_kuiper_bmm_f32(A, B):
+    if A.dtype != _torch().float32 or B.dtype != _torch().float32:
+        return False
+
+def _torch():
+    import torch
+    return torch
+
+
+_KuiperMode_class = None
+
+
+def _KuiperMode_cls():
+    global _KuiperMode_class
+    if _KuiperMode_class is not None:
+        return _KuiperMode_class
+
+    import torch
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    ext = _get()  # force build so we fail loudly outside the mode
+
+    aten = torch.ops.aten
+
+    class KuiperMode(TorchDispatchMode):
+        """Re-route eligible aten op calls to Kuiper kernels.
+
+        Use as:
+            with kuiper_ext.KuiperMode():
+                model(...)
+        """
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+
+            # aten::mm(Tensor self, Tensor mat2) -> Tensor
+            if func is aten.mm.default and len(args) == 2:
+                A, B = args
+                if not _supports_kuiper_mm_common(A, B):
+                    pass
+                elif _supports_kuiper_mm_bf16(A, B):
+                    return ext.mm_bf16xbf16_bf16(A, B)
+
+            # aten::bmm(Tensor self, Tensor mat2) -> Tensor
+            elif func is aten.bmm.default and len(args) == 2:
+                A, B = args
+                if not _supports_kuiper_bmm_common(A, B):
+                    pass
+                elif _supports_kuiper_bmm_f32(A, B):
+                    return ext.bmm_f32xf32_f32(A, B)
+
+            return func(*args, **kwargs)
+
+    _KuiperMode_class = KuiperMode
+    return _KuiperMode_class
