@@ -126,6 +126,7 @@ def _supports_kuiper_mm_common(A, B):
     K2, N = B.shape
     if K != K2:
         return False
+    return True
 
 def _supports_kuiper_mm_bf16(A, B):
     if A.dtype != _torch().bfloat16 or B.dtype != _torch().bfloat16:
@@ -146,8 +147,7 @@ def _supports_kuiper_bmm_common(A, B):
     return A.shape[0] == B.shape[0] and A.shape[2] == B.shape[1]
 
 def _supports_kuiper_bmm_f32(A, B):
-    if A.dtype != _torch().float32 or B.dtype != _torch().float32:
-        return False
+    return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
 def _torch():
     import torch
@@ -183,18 +183,16 @@ def _KuiperMode_cls():
             # aten::mm(Tensor self, Tensor mat2) -> Tensor
             if func is aten.mm.default and len(args) == 2:
                 A, B = args
-                if not _supports_kuiper_mm_common(A, B):
-                    pass
-                elif _supports_kuiper_mm_bf16(A, B):
-                    return ext.mm_bf16xbf16_bf16(A, B)
+                if _supports_kuiper_mm_common(A, B):
+                    if _supports_kuiper_mm_bf16(A, B):
+                        return ext.mm_bf16xbf16_bf16(A, B)
 
             # aten::bmm(Tensor self, Tensor mat2) -> Tensor
             elif func is aten.bmm.default and len(args) == 2:
                 A, B = args
-                if not _supports_kuiper_bmm_common(A, B):
-                    pass
-                elif _supports_kuiper_bmm_f32(A, B):
-                    return ext.bmm_f32xf32_f32(A, B)
+                if _supports_kuiper_bmm_common(A, B):
+                    if _supports_kuiper_bmm_f32(A, B):
+                        return ext.bmm_f32xf32_f32(A, B)
 
             return func(*args, **kwargs)
 
