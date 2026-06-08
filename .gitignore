@@ -30,7 +30,7 @@ env/
 # Built into ~/.cache/torch_extensions by default; only matters if someone
 # overrides TORCH_EXTENSIONS_DIR into the repo.
 torch_extensions/
-kuiper_ext/build/
+kuiper_ext/.build/
 
 # ── HuggingFace download cache (if user redirects HF_HOME here) ───────────────
 .cache/

@@ -1,28 +1,3 @@
-"""kuiper_ext — verified Kuiper GPU kernels exposed as PyTorch ops.
-
-This module JIT-builds a CUDA extension on first import that links against a
-curated subset of the verified kernels in /home/julien/work/kuiper/dist.
-
-Public surface:
-
-    kuiper_ext.matmul_f32(A, B)       -> Tensor       (f32, M,N,K % 32 == 0)
-    kuiper_ext.gemm_f32_(a, b, A, B, C)               (C := a*A*B + b*C, in-place)
-    kuiper_ext.matmul_f16(A, B)       -> Tensor       (f16, M,N,K % 64 == 0)
-    kuiper_ext.bmm_f32(A, B)          -> Tensor       (rank-3, f32)
-
-    kuiper_ext.softmax_last_f32_(x)   in-place        (NOT numerically stable)
-    kuiper_ext.softmax_last_f16_(x)   in-place
-    kuiper_ext.log_softmax_last_f32_(x) in-place
-
-    kuiper_ext.row_sum_last_f32(x, nth)               (slow, mostly for tests)
-    kuiper_ext.row_scale_f32_(mat, scales)            in-place
-
-    kuiper_ext.is_available() -> bool                 (True iff build worked)
-
-For high-level usage (replace nn.Linear, monkey-patch torch.matmul / softmax),
-see `kuiper_ext.integration`.
-"""
-
 import os
 import sys
 from pathlib import Path
@@ -40,15 +15,9 @@ _CSRC        = _HERE / "csrc"
 
 # Kuiper .cu sources we need to link in (one per wrapped op family).
 _KUIPER_SOURCES = [
-    KUIPER_DIST / "Klas_GEMM_BlockTiling1D.cu",
-    KUIPER_DIST / "Klas_GEMM_SHMem.cu",
-    KUIPER_DIST / "Klas_GEMM_TensorCore.cu",
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
+    KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
-    KUIPER_DIST / "Klas_Softmax.cu",
-    KUIPER_DIST / "Klas_LogSoftmax.cu",
-    KUIPER_DIST / "Klas_HReduce.cu",
-    KUIPER_DIST / "Klas_RowScale.cu",
 ]
 _WRAPPER_SOURCES = [_CSRC / "ops.cu"]
 
@@ -124,4 +93,160 @@ def is_available() -> bool:
 def __getattr__(name):
     if name in {"_ext", "_build_error", "__path__"}:
         raise AttributeError(name)
+    if name == "KuiperMode":
+        return _KuiperMode_cls()
     return getattr(_get(), name)
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher integration
+# ---------------------------------------------------------------------------
+#
+# We want the Kuiper kernels to be picked up *automatically* when PyTorch
+# dispatches aten::mm / aten::addmm / aten::bmm on CUDA tensors of the right
+# dtype + shape, with no model-side code changes beyond entering a context
+# manager.
+#
+# We can't register at (aten::mm, CUDA) because that key already has a kernel,
+# and re-registration is rejected by the dispatcher. PrivateUse1 would force a
+# new device with its own alloc/copy/etc. Instead we hook in *above* the
+# dispatcher with a TorchDispatchMode: the mode sees every aten call on the
+# current thread, and we forward the matching ones to our typed C++ entry
+# points. Everything else falls through to the regular CUDA kernel.
+
+# =============================================================================
+# addmm
+# =============================================================================
+
+def _supports_kuiper_addmm_common(bias, mat1, mat2, beta, alpha):
+    if not (bias.is_cuda and mat1.is_cuda and mat2.is_cuda):
+        return False
+    if mat1.dim() != 2 or mat2.dim() != 2:
+        return False
+    # Bias may be 1D [N] (nn.Linear default) or 2D [M, N]. Anything else is
+    # broadcastable in stock aten but we can't reshape it cleanly for Kuiper.
+    if bias.dim() not in (1, 2):
+        return False
+    M, K = mat1.shape
+    K2, N = mat2.shape
+    if K != K2:
+        return False
+    if bias.dim() == 1:
+        if bias.shape[0] != N:
+            return False
+    else:  # 2D
+        if tuple(bias.shape) != (M, N):
+            return False
+    if not (isinstance(beta, (int, float)) and isinstance(alpha, (int, float))):
+        return False
+    return True
+
+def _supports_kuiper_addmm_bf16(bias, mat1, mat2, beta, alpha):
+    if (mat1.dtype != _torch().bfloat16 or mat2.dtype != _torch().bfloat16
+            or bias.dtype != _torch().bfloat16):
+        return False
+    M, K = mat1.shape
+    _,  N = mat2.shape
+    return (M % 32 == 0) and (N % 32 == 0) and (K % 32 == 0)
+
+# =============================================================================
+# mm
+# =============================================================================
+
+def _supports_kuiper_mm_common(A, B):
+    if not (A.is_cuda and B.is_cuda):
+        return False
+    if A.dim() != 2 or B.dim() != 2:
+        return False
+    return A.shape[1] == B.shape[0]
+
+def _supports_kuiper_mm_bf16(A, B):
+    if A.dtype != _torch().bfloat16 or B.dtype != _torch().bfloat16:
+        return False
+    M, K = A.shape
+    K2, N = B.shape
+    return (M % 64 == 0) and (N % 64 == 0) and (K % 64 == 0)
+
+# =============================================================================
+# bmm
+# =============================================================================
+
+def _supports_kuiper_bmm_common(A, B):
+    if not (A.is_cuda and B.is_cuda):
+        return False
+    if A.dim() != 3 or B.dim() != 3:
+        return False
+    return A.shape[0] == B.shape[0] and A.shape[2] == B.shape[1]
+
+def _supports_kuiper_bmm_f32(A, B):
+    return A.dtype == _torch().float32 and B.dtype == _torch().float32
+
+def _torch():
+    import torch
+    return torch
+
+
+_KuiperMode_class = None
+
+
+def _KuiperMode_cls():
+    global _KuiperMode_class
+    if _KuiperMode_class is not None:
+        return _KuiperMode_class
+
+    import torch
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    ext = _get()  # force build so we fail loudly outside the mode
+
+    aten = torch.ops.aten
+
+    class KuiperMode(TorchDispatchMode):
+        """Re-route eligible aten op calls to Kuiper kernels.
+
+        Use as:
+            with kuiper_ext.KuiperMode():
+                model(...)
+        """
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+
+            # aten::addmm(Tensor self, Tensor mat1, Tensor mat2, *,
+            #             Scalar beta=1, Scalar alpha=1) -> Tensor
+            # NOTE: __torch_dispatch__ does NOT fill in schema defaults, so
+            # `beta`/`alpha` are absent from kwargs whenever the caller omits
+            # them (the common case, including nn.Linear). Default to 1.
+            if func is aten.addmm.default and len(args) == 3:
+                bias, mat1, mat2 = args
+                beta  = kwargs.get("beta",  1)
+                alpha = kwargs.get("alpha", 1)
+                if _supports_kuiper_addmm_common(bias, mat1, mat2, beta, alpha):
+                    if _supports_kuiper_addmm_bf16(bias, mat1, mat2, beta, alpha):
+                        # Kuiper's addmm wants a (M, N) bias buffer. nn.Linear
+                        # ships a 1D [N] bias relying on broadcasting; expand
+                        # and let the C++ wrapper clone it into a writable
+                        # contiguous buffer.
+                        M, N = mat1.shape[0], mat2.shape[1]
+                        bias2d = bias.expand(M, N) if bias.dim() == 1 else bias
+                        return ext.addmm_bf16xbf16xbf16_bf16(
+                            mat1, mat2, bias2d, float(beta), float(alpha))
+
+            # aten::mm(Tensor A, Tensor B) -> Tensor
+            elif func is aten.mm.default and len(args) == 2:
+                A, B = args
+                if _supports_kuiper_mm_common(A, B):
+                    if _supports_kuiper_mm_bf16(A, B):
+                        return ext.mm_bf16xbf16_bf16(A, B)
+
+            # aten::bmm(Tensor self, Tensor mat2) -> Tensor
+            elif func is aten.bmm.default and len(args) == 2:
+                A, B = args
+                if _supports_kuiper_bmm_common(A, B):
+                    if _supports_kuiper_bmm_f32(A, B):
+                        return ext.bmm_f32xf32_f32(A, B)
+
+            return func(*args, **kwargs)
+
+    _KuiperMode_class = KuiperMode
+    return _KuiperMode_class
