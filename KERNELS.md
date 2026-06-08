@@ -7,7 +7,7 @@
 | `aten::add`        | `bf16,bf16` | `bf16` | 96 |  |
 | `aten::add`        | `f32,f64` | `?` | 49 | |
 | `aten::add`        | `long int,long int` | `?` | 1 | |
-| `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (need to add extraction + ext. output cast) |
+| `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (doesn't handle 1D case though? to review)| yes |
 | `aten::all`        | `b8` | `b8` | 1 |  |
 | `aten::arange`     | `long int` | `?` | 1 | |
 | `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |

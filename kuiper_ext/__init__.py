@@ -16,6 +16,7 @@ _CSRC        = _HERE / "csrc"
 # Kuiper .cu sources we need to link in (one per wrapped op family).
 _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
+    KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
 ]
 _WRAPPER_SOURCES = [_CSRC / "ops.cu"]
@@ -114,6 +115,41 @@ def __getattr__(name):
 # points. Everything else falls through to the regular CUDA kernel.
 
 # =============================================================================
+# addmm
+# =============================================================================
+
+def _supports_kuiper_addmm_common(bias, mat1, mat2, beta, alpha):
+    if not (bias.is_cuda and mat1.is_cuda and mat2.is_cuda):
+        return False
+    if mat1.dim() != 2 or mat2.dim() != 2:
+        return False
+    # Bias may be 1D [N] (nn.Linear default) or 2D [M, N]. Anything else is
+    # broadcastable in stock aten but we can't reshape it cleanly for Kuiper.
+    if bias.dim() not in (1, 2):
+        return False
+    M, K = mat1.shape
+    K2, N = mat2.shape
+    if K != K2:
+        return False
+    if bias.dim() == 1:
+        if bias.shape[0] != N:
+            return False
+    else:  # 2D
+        if tuple(bias.shape) != (M, N):
+            return False
+    if not (isinstance(beta, (int, float)) and isinstance(alpha, (int, float))):
+        return False
+    return True
+
+def _supports_kuiper_addmm_bf16(bias, mat1, mat2, beta, alpha):
+    if (mat1.dtype != _torch().bfloat16 or mat2.dtype != _torch().bfloat16
+            or bias.dtype != _torch().bfloat16):
+        return False
+    M, K = mat1.shape
+    _,  N = mat2.shape
+    return (M % 32 == 0) and (N % 32 == 0) and (K % 32 == 0)
+
+# =============================================================================
 # mm
 # =============================================================================
 
@@ -122,11 +158,7 @@ def _supports_kuiper_mm_common(A, B):
         return False
     if A.dim() != 2 or B.dim() != 2:
         return False
-    M, K = A.shape
-    K2, N = B.shape
-    if K != K2:
-        return False
-    return True
+    return A.shape[1] == B.shape[0]
 
 def _supports_kuiper_mm_bf16(A, B):
     if A.dtype != _torch().bfloat16 or B.dtype != _torch().bfloat16:
@@ -180,8 +212,28 @@ def _KuiperMode_cls():
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
 
-            # aten::mm(Tensor self, Tensor mat2) -> Tensor
-            if func is aten.mm.default and len(args) == 2:
+            # aten::addmm(Tensor self, Tensor mat1, Tensor mat2, *,
+            #             Scalar beta=1, Scalar alpha=1) -> Tensor
+            # NOTE: __torch_dispatch__ does NOT fill in schema defaults, so
+            # `beta`/`alpha` are absent from kwargs whenever the caller omits
+            # them (the common case, including nn.Linear). Default to 1.
+            if func is aten.addmm.default and len(args) == 3:
+                bias, mat1, mat2 = args
+                beta  = kwargs.get("beta",  1)
+                alpha = kwargs.get("alpha", 1)
+                if _supports_kuiper_addmm_common(bias, mat1, mat2, beta, alpha):
+                    if _supports_kuiper_addmm_bf16(bias, mat1, mat2, beta, alpha):
+                        # Kuiper's addmm wants a (M, N) bias buffer. nn.Linear
+                        # ships a 1D [N] bias relying on broadcasting; expand
+                        # and let the C++ wrapper clone it into a writable
+                        # contiguous buffer.
+                        M, N = mat1.shape[0], mat2.shape[1]
+                        bias2d = bias.expand(M, N) if bias.dim() == 1 else bias
+                        return ext.addmm_bf16xbf16xbf16_bf16(
+                            mat1, mat2, bias2d, float(beta), float(alpha))
+
+            # aten::mm(Tensor A, Tensor B) -> Tensor
+            elif func is aten.mm.default and len(args) == 2:
                 A, B = args
                 if _supports_kuiper_mm_common(A, B):
                     if _supports_kuiper_mm_bf16(A, B):

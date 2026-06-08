@@ -20,6 +20,7 @@
 // Kuiper headers are C++ (they use templates via <kuiper.h>) so they must
 // NOT be wrapped in extern "C".
 #include "Klas_GEMM_BlockTiling1D.h"
+#include "Klas_GEMM_BlockTiling2D.h"
 #include "Klas_GEMM_SHMem.h"
 #include "Klas_GEMM_TensorCore.h"
 #include "Klas_GEMM_TensorCore2D.h"
@@ -53,6 +54,46 @@ inline void sync_current_stream() {
 inline bool divisible(int64_t x, int64_t d) { return x % d == 0 && x > 0; }
 
 }  // namespace
+
+// =============================================================================
+// addmm
+// =============================================================================
+
+torch::Tensor kuiper_addmm_bf16xbf16xbf16_bf16(torch::Tensor A, torch::Tensor B, torch::Tensor C,
+        double beta, double alpha) {
+    TORCH_CHECK(A.is_cuda() && B.is_cuda() && C.is_cuda(), "kuiper_addmm: tensors must be CUDA");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2 && C.dim() == 2, "kuiper_addmm: rank 2 only");
+    TORCH_CHECK(A.size(1) == B.size(0) && A.size(0) == C.size(0) && B.size(1) == C.size(1), "kuiper_addmm: dim mismatch");
+    TORCH_CHECK(A.scalar_type() == torch::kBFloat16 && B.scalar_type() == torch::kBFloat16
+                && C.scalar_type() == torch::kBFloat16,
+                "kuiper_addmm_bf16xbf16xbf16_bf16: dtype must be bfloat16");
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+    TORCH_CHECK(divisible(M, 32) && divisible(N, 32) && divisible(K, 32),
+                "kuiper_addmm_bf16xbf16xbf16_bf16: M,N,K must all be divisible by 32 (got ",
+                M, ",", N, ",", K, ")");
+
+    const __nv_bfloat16 alpha_bf = __float2bfloat16(static_cast<float>(alpha));
+    const __nv_bfloat16 beta_bf  = __float2bfloat16(static_cast<float>(beta));
+
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+    // Kuiper kernel does an in-place GEMM-add: C <- alpha * (A @ B) + beta * C.
+    // We must not stomp the caller's bias tensor, and the buffer must be
+    // contiguous regardless of whether `C` was (e.g. an expanded 1D bias).
+    auto Cout = C.contiguous().clone();
+
+    at::cuda::CUDAGuard guard(A.device());
+    sync_current_stream();
+
+    Klas_GEMM_BlockTiling2D_g_gemm_bf16_32x32x32_16x16(
+        alpha_bf, beta_bf,
+        (uint32_t)M, (uint32_t)K, (uint32_t)N,
+        reinterpret_cast<__nv_bfloat16*>(Ac.data_ptr()),
+        reinterpret_cast<__nv_bfloat16*>(Bc.data_ptr()),
+        reinterpret_cast<__nv_bfloat16*>(Cout.data_ptr()));
+
+    return Cout;
+}
 
 // =============================================================================
 // mm
@@ -121,6 +162,7 @@ torch::Tensor kuiper_bmm_f32xf32_f32(torch::Tensor A, torch::Tensor B) {
 // =============================================================================
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("addmm_bf16xbf16xbf16_bf16", &kuiper_addmm_bf16xbf16xbf16_bf16, "Klas_GEMM_BlockTiling2D_g_gemm_bf16_32x32x32_16x16");
     m.def("mm_bf16xbf16_bf16", &kuiper_mm_bf16xbf16_bf16, "Klas_GEMM_TensorCore2D_g_gemm_bf16_f32_64x64x64_16x16x16_2x2");
     m.def("bmm_f32xf32_f32", &kuiper_bmm_f32xf32_f32, "Klas_GEMM_Batched_batched_gemm_f32");
 }
