@@ -55,6 +55,8 @@ inline bool divisible(int64_t x, int64_t d) { return x % d == 0 && x > 0; }
 
 }  // namespace
 
+void register_elementwise(pybind11::module& m);
+
 // =============================================================================
 // addmm
 // =============================================================================
@@ -147,7 +149,7 @@ torch::Tensor kuiper_bmm_f32xf32_f32(torch::Tensor A, torch::Tensor B) {
     at::cuda::CUDAGuard guard(A.device());
     sync_current_stream();
 
-    float* pC = Klas_GEMM_Batched_batched_gemm_f32(
+    float* pC = Klas_GEMM_Batched_batched_matmul_f32(
         (uint32_t)Batch, (uint32_t)M, (uint32_t)K, (uint32_t)N,
         reinterpret_cast<float*>(Ac.data_ptr()),
         reinterpret_cast<float*>(Bc.data_ptr()));
@@ -164,7 +166,8 @@ torch::Tensor kuiper_bmm_f32xf32_f32(torch::Tensor A, torch::Tensor B) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("addmm_bf16xbf16xbf16_bf16", &kuiper_addmm_bf16xbf16xbf16_bf16, "Klas_GEMM_BlockTiling2D_g_gemm_bf16_32x32x32_16x16");
     m.def("mm_bf16xbf16_bf16", &kuiper_mm_bf16xbf16_bf16, "Klas_GEMM_TensorCore2D_g_gemm_bf16_f32_64x64x64_16x16x16_2x2");
-    m.def("bmm_f32xf32_f32", &kuiper_bmm_f32xf32_f32, "Klas_GEMM_Batched_batched_gemm_f32");
+    m.def("bmm_f32xf32_f32", &kuiper_bmm_f32xf32_f32, "Klas_GEMM_Batched_batched_matmul_f32");
+    register_elementwise(m);
 }
 
 // note: integration with dispatcher happens in __init__.py

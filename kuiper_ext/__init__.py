@@ -18,8 +18,9 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
     KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
+    KUIPER_DIST / "Klas_Elementwise.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu"]
 
 
 _ext = None
@@ -181,6 +182,41 @@ def _supports_kuiper_bmm_common(A, B):
 def _supports_kuiper_bmm_f32(A, B):
     return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
+
+# =============================================================================
+# elementwise
+# =============================================================================
+
+_MAX_ELEMENTWISE_NUMEL = 2097152 * 1024
+
+
+def _supports_kuiper_unary(X, dtype):
+    return (X.is_cuda and X.dtype == dtype and 0 < X.numel() <= _MAX_ELEMENTWISE_NUMEL)
+
+
+def _supports_kuiper_binary(A, B, dtype):
+    return (A.is_cuda and B.is_cuda and A.dtype == dtype and B.dtype == dtype
+            and tuple(A.shape) == tuple(B.shape)
+            and 0 < A.numel() <= _MAX_ELEMENTWISE_NUMEL)
+
+
+def _scalar_value(x):
+    if isinstance(x, (int, float)):
+        return float(x)
+    torch = _torch()
+    if isinstance(x, torch.Tensor) and x.dim() == 0 and x.dtype == torch.float64:
+        return float(x.item())
+    return None
+
+
+def _is_square_exponent(x):
+    if isinstance(x, int):
+        return x == 2
+    if isinstance(x, float):
+        return x == 2.0
+    return False
+
+
 def _torch():
     import torch
     return torch
@@ -245,6 +281,64 @@ def _KuiperMode_cls():
                 if _supports_kuiper_bmm_common(A, B):
                     if _supports_kuiper_bmm_f32(A, B):
                         return ext.bmm_f32xf32_f32(A, B)
+
+            # unary elementwise
+            elif func is aten.silu.default and len(args) == 1:
+                (X,) = args
+                if _supports_kuiper_unary(X, torch.bfloat16):
+                    return ext.silu_bf16(X)
+            elif func is aten.neg.default and len(args) == 1:
+                (X,) = args
+                if _supports_kuiper_unary(X, torch.bfloat16):
+                    return ext.neg_bf16(X)
+            elif func is aten.rsqrt.default and len(args) == 1:
+                (X,) = args
+                if _supports_kuiper_unary(X, torch.float32):
+                    return ext.rsqrt_f32(X)
+            elif func is aten.cos.default and len(args) == 1:
+                (X,) = args
+                if _supports_kuiper_unary(X, torch.float32):
+                    return ext.cos_f32(X)
+            elif func is aten.sin.default and len(args) == 1:
+                (X,) = args
+                if _supports_kuiper_unary(X, torch.float32):
+                    return ext.sin_f32(X)
+            elif func is aten.pow.Tensor_Scalar and len(args) == 2:
+                X, exponent = args
+                if _is_square_exponent(exponent) and _supports_kuiper_unary(X, torch.float32):
+                    return ext.square_f32(X)
+
+            # binary and scalar-broadcast elementwise
+            elif func is aten.add.Tensor and len(args) >= 2:
+                A, B = args[:2]
+                alpha = kwargs.get("alpha", 1)
+                if alpha == 1:
+                    if isinstance(B, torch.Tensor) and _supports_kuiper_binary(A, B, torch.bfloat16):
+                        return ext.add_bf16(A, B)
+                    c = _scalar_value(B)
+                    if c is not None and _supports_kuiper_unary(A, torch.float32):
+                        return ext.add_const_f32(A, c)
+            elif func is aten.add.Scalar and len(args) >= 2:
+                A, B = args[:2]
+                alpha = kwargs.get("alpha", 1)
+                c = _scalar_value(B)
+                if alpha == 1 and c is not None and _supports_kuiper_unary(A, torch.float32):
+                    return ext.add_const_f32(A, c)
+            elif func is aten.mul.Tensor and len(args) >= 2:
+                A, B = args[:2]
+                if isinstance(B, torch.Tensor):
+                    if _supports_kuiper_binary(A, B, torch.bfloat16):
+                        return ext.mul_bf16(A, B)
+                    if _supports_kuiper_binary(A, B, torch.float32):
+                        return ext.mul_f32(A, B)
+                    c = _scalar_value(B)
+                    if c is not None and _supports_kuiper_unary(A, torch.float32):
+                        return ext.mul_const_f32(A, c)
+            elif func is aten.mul.Scalar and len(args) >= 2:
+                A, B = args[:2]
+                c = _scalar_value(B)
+                if c is not None and _supports_kuiper_unary(A, torch.float32):
+                    return ext.mul_const_f32(A, c)
 
             return func(*args, **kwargs)
 
