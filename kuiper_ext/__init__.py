@@ -21,8 +21,9 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_Elementwise.cu",
     KUIPER_DIST / "Klas_Reduce.cu",
     KUIPER_DIST / "Klas_CatCast.cu",
+    KUIPER_DIST / "Klas_Misc.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu", _CSRC / "ops_reduce.cu", _CSRC / "ops_catcast.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu", _CSRC / "ops_reduce.cu", _CSRC / "ops_catcast.cu", _CSRC / "ops_misc.cu"]
 
 
 _ext = None
@@ -42,7 +43,11 @@ def _build():
         ninja = Path(sys.executable).parent / "ninja"
         if ninja.exists():
             os.environ["PATH"] = f"{ninja.parent}{os.pathsep}{os.environ.get('PATH', '')}"
-
+    try:
+        import ninja
+        os.environ["PATH"] = str(Path(ninja.BIN_DIR)) + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
     from torch.utils.cpp_extension import load
     # torch.cpp_extension shells out to `ninja` by name. When tests are run via
     # an absolute venv python, the venv's bin dir is not necessarily on PATH.
@@ -197,7 +202,6 @@ def _supports_kuiper_bmm_f32(A, B):
     return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
 # =============================================================================
-# =============================================================================
 # elementwise
 # =============================================================================
 
@@ -288,6 +292,16 @@ def _supports_kuiper_to_copy(x, dtype):
     return (x.is_cuda and x.is_contiguous() and x.numel() > 0 and
             ((x.dtype == torch.bfloat16 and dtype in (torch.float32, torch.bfloat16)) or
              (x.dtype == torch.float32 and dtype == torch.bfloat16)))
+
+
+# =============================================================================
+# misc: arange / gather
+# =============================================================================
+
+def _supports_kuiper_gather_bf16(src, dim, idx):
+    import torch
+    return (src.is_cuda and idx.is_cuda and src.dim() == 1 and idx.dim() == 1
+            and dim == 0 and src.dtype == torch.bfloat16 and idx.dtype == torch.int64)
 
 def _torch():
     import torch
@@ -442,6 +456,19 @@ def _KuiperMode_cls():
                         return ext.cast_f32_to_bf16(x)
                     if x.dtype == torch.bfloat16 and dtype == torch.bfloat16:
                         return ext.cast_bf16_to_bf16(x)
+
+            elif func is aten.arange.default and len(args) == 1:
+                n = args[0]
+                if isinstance(n, int) and kwargs.get("device", None) is not None:
+                    device = kwargs.get("device")
+                    dtype = kwargs.get("dtype", torch.int64)
+                    if str(device).startswith("cuda") and dtype is torch.int64:
+                        return ext.arange_i64(int(n))
+
+            elif func is aten.gather.default and len(args) == 3:
+                src, dim, idx = args
+                if _supports_kuiper_gather_bf16(src, dim, idx):
+                    return ext.gather_bf16(src, idx)
 
             return func(*args, **kwargs)
 

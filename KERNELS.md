@@ -9,7 +9,7 @@
 | `aten::add`        | `long int,long int` | `?` | 1 | skipped (low-priority i64 add not wired) | no |
 | `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (doesn't handle 1D case though? to review)| yes |
 | `aten::all`        | `b8` | `b8` | 1 | skipped: single low-priority config check; fall through to aten | no |
-| `aten::arange`     | `long int` | `?` | 1 | |
+| `aten::arange`     | `long int` | `?` | 1 | Klas_Misc / misc CUDA wrapper | yes |
 | `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |
 | `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | native cat2 bf16 last-dim wrapper (F* cat stub only) | yes, guarded |
 | `aten::to`         | `bf16,f32` | `?` | 51 | Klas_CatCast cast_bf16_to_f32 | yes |
@@ -18,7 +18,7 @@
 | `aten::to`         | `b8,long int` | `?` | 1 | skipped: no Kuiper bool-to-i64 cast primitive | no |
 | `aten::to`         | `f32,long int` | `?` | 1 | skipped: no Kuiper f32-to-i64 cast primitive | no |
 | `aten::cos`        | `f32` | `f32` | 1 | Klas_Elementwise_cos_fw_f32 | yes |
-| `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | |
+| `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | Klas_Misc / misc CUDA wrapper | yes |
 | `aten::mean`       | `f32` | `f32` | 49 | Klas_Reduce_mean_fw_f32_row | yes |
 | `aten::mm`         | `bf16,bf16` | `bf16` | 97 | Klas_GEMM_TensorCore2D (output cast req.) | yes |
 | `aten::mul`        | `bf16,bf16` | `bf16` | 169 | Klas_Elementwise_mul_fw_bf16 | yes |

@@ -56,6 +56,7 @@ inline bool divisible(int64_t x, int64_t d) { return x % d == 0 && x > 0; }
 }  // namespace
 
 void register_elementwise(pybind11::module& m);
+void register_misc(pybind11::module& m);
 
 // =============================================================================
 // addmm
@@ -173,6 +174,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_elementwise(m);
     register_reduce(m);
     register_catcast(m);
+    register_misc(m);
 }
 
 // note: integration with dispatcher happens in __init__.py
