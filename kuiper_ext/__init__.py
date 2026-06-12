@@ -19,8 +19,9 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
     KUIPER_DIST / "Klas_Elementwise.cu",
+    KUIPER_DIST / "Klas_Reduce.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu", _CSRC / "ops_reduce.cu"]
 
 
 _ext = None
@@ -31,6 +32,15 @@ def _build():
     global _ext, _build_error
     if _ext is not None or _build_error is not None:
         return
+
+    # torch.cpp_extension shells out to `ninja`; when this package is used with
+    # an unactivated venv, the console script lives next to sys.executable but is
+    # not necessarily on PATH.
+    import shutil
+    if shutil.which("ninja") is None:
+        ninja = Path(sys.executable).parent / "ninja"
+        if ninja.exists():
+            os.environ["PATH"] = f"{ninja.parent}{os.pathsep}{os.environ.get('PATH', '')}"
 
     from torch.utils.cpp_extension import load
 
@@ -182,7 +192,6 @@ def _supports_kuiper_bmm_common(A, B):
 def _supports_kuiper_bmm_f32(A, B):
     return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
-
 # =============================================================================
 # elementwise
 # =============================================================================
@@ -216,6 +225,33 @@ def _is_square_exponent(x):
         return x == 2.0
     return False
 
+
+# =============================================================================
+# mean
+# =============================================================================
+
+def _normalize_single_dim(dim, ndim):
+    if isinstance(dim, int):
+        d = dim
+    elif isinstance(dim, (list, tuple)) and len(dim) == 1:
+        d = dim[0]
+    else:
+        return None
+    if d < 0:
+        d += ndim
+    return d if 0 <= d < ndim else None
+
+def _supports_kuiper_mean_f32_lastdim(X, dim, keepdim, dtype):
+    if not (X.is_cuda and X.dtype == _torch().float32 and X.is_contiguous()):
+        return False
+    if dtype is not None or keepdim is not True or X.dim() < 1:
+        return False
+    if _normalize_single_dim(dim, X.dim()) != X.dim() - 1:
+        return False
+    if X.numel() == 0 or X.shape[-1] == 0:
+        return False
+    rows = X.numel() // X.shape[-1]
+    return 0 < rows <= 2097152
 
 def _torch():
     import torch
@@ -339,6 +375,18 @@ def _KuiperMode_cls():
                 c = _scalar_value(B)
                 if c is not None and _supports_kuiper_unary(A, torch.float32):
                     return ext.mul_const_f32(A, c)
+
+            # aten::mean.dim(Tensor self, int[]? dim, bool keepdim=False, *,
+            #                ScalarType? dtype=None) -> Tensor
+            elif func is aten.mean.dim and len(args) >= 2:
+                X, dim = args[0], args[1]
+                keepdim = args[2] if len(args) >= 3 else kwargs.get("keepdim", False)
+                dtype = args[3] if len(args) >= 4 else kwargs.get("dtype", None)
+                if _supports_kuiper_mean_f32_lastdim(X, dim, keepdim, dtype):
+                    cols = X.shape[-1]
+                    flat = X.reshape(-1, cols)
+                    out = ext.mean_f32_lastdim(flat)
+                    return out.reshape(*X.shape[:-1], 1)
 
             return func(*args, **kwargs)
 
