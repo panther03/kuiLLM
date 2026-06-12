@@ -3,12 +3,12 @@
 | Op | Input dtypes | Output dtype | Calls | kuiper impl. | connected ? | 
 | --- | --- | --- | ---: | :---: | --- |
 | `aten::scaled_dot_product_attention` | `bf16,bf16,bf16` | `bf16` | 24 |  |
-| `aten::is_nonzero` | `b8` | `?` | 1 | |
+| `aten::is_nonzero` | `b8` | `?` | 1 | skipped: aten already performs required D→H scalar sync | no |
 | `aten::add`        | `bf16,bf16` | `bf16` | 96 |  |
 | `aten::add`        | `f32,f64` | `?` | 49 | |
 | `aten::add`        | `long int,long int` | `?` | 1 | |
 | `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (doesn't handle 1D case though? to review)| yes |
-| `aten::all`        | `b8` | `b8` | 1 |  |
+| `aten::all`        | `b8` | `b8` | 1 | skipped: single low-priority config check; fall through to aten | no |
 | `aten::arange`     | `long int` | `?` | 1 | |
 | `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |
 | `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | |
@@ -19,7 +19,7 @@
 | `aten::to`         | `f32,long int` | `?` | 1 | |
 | `aten::cos`        | `f32` | `f32` | 1 | |
 | `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | |
-| `aten::mean`       | `f32` | `f32` | 49 | |
+| `aten::mean`       | `f32` | `f32` | 49 | Klas_Reduce_mean_fw_f32_row | yes |
 | `aten::mm`         | `bf16,bf16` | `bf16` | 97 | Klas_GEMM_TensorCore2D (output cast req.) | yes |
 | `aten::mul`        | `bf16,bf16` | `bf16` | 169 | |
 | `aten::mul`        | `f32,f32` | `f32` | 49 | |

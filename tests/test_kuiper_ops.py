@@ -113,6 +113,22 @@ def test_addmm_bf16():
             f"addmm wrapper mutated the bias tensor at {M}x{K}x{N}"
 
 
+def test_mean_f32_lastdim():
+    print("[test_mean_f32_lastdim]")
+    torch.manual_seed(0)
+    for shape in [(4, 16), (3, 5, 3584), (2, 7, 32)]:
+        Xr = torch.randn(*shape, device="cpu", dtype=torch.float32)
+        X = Xr.to(device=_DEVICE).contiguous()
+        ref = Xr.mean(dim=-1, keepdim=True)
+
+        direct = kuiper_ext.mean_f32_lastdim(X.reshape(-1, shape[-1])).reshape(*shape[:-1], 1)
+        _assert_close(f"mean_f32 direct {shape}", direct.cpu(), ref, atol=1e-5, rtol=1e-5)
+
+        with kuiper_ext.KuiperMode():
+            res = X.mean(dim=-1, keepdim=True)
+        _assert_close(f"mean_f32 mode {shape}", res.cpu(), ref, atol=1e-5, rtol=1e-5)
+
+
 def main():
     _need_cuda()
     print(f"Using device: {_DEVICE}")
