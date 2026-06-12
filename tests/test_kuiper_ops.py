@@ -113,6 +113,87 @@ def test_addmm_bf16():
             f"addmm wrapper mutated the bias tensor at {M}x{K}x{N}"
 
 
+def test_elementwise_direct_wrappers():
+    print("[test_elementwise_direct_wrappers]")
+    torch.manual_seed(0)
+    X_bf = torch.randn(513, 7, device=_DEVICE, dtype=torch.bfloat16)
+    Y_bf = torch.randn(513, 7, device=_DEVICE, dtype=torch.bfloat16)
+    X_f = torch.rand(513, 7, device=_DEVICE, dtype=torch.float32) + 0.25
+    Y_f = torch.randn(513, 7, device=_DEVICE, dtype=torch.float32)
+
+    _assert_close("silu_bf16", kuiper_ext.silu_bf16(X_bf).float().cpu(),
+                  torch.nn.functional.silu(X_bf).float().cpu(), atol=2e-2, rtol=2e-2)
+    _assert_close("neg_bf16", kuiper_ext.neg_bf16(X_bf).float().cpu(),
+                  (-X_bf).float().cpu(), atol=0, rtol=0)
+    _assert_close("add_bf16", kuiper_ext.add_bf16(X_bf, Y_bf).float().cpu(),
+                  (X_bf + Y_bf).float().cpu(), atol=0, rtol=0)
+    _assert_close("mul_bf16", kuiper_ext.mul_bf16(X_bf, Y_bf).float().cpu(),
+                  (X_bf * Y_bf).float().cpu(), atol=0, rtol=0)
+    _assert_close("rsqrt_f32", kuiper_ext.rsqrt_f32(X_f).cpu(), torch.rsqrt(X_f).cpu(),
+                  atol=1e-6, rtol=1e-6)
+    _assert_close("square_f32", kuiper_ext.square_f32(Y_f).cpu(), (Y_f * Y_f).cpu(),
+                  atol=1e-6, rtol=1e-6)
+    _assert_close("sin_f32", kuiper_ext.sin_f32(Y_f).cpu(), torch.sin(Y_f).cpu(),
+                  atol=1e-6, rtol=1e-6)
+    _assert_close("cos_f32", kuiper_ext.cos_f32(Y_f).cpu(), torch.cos(Y_f).cpu(),
+                  atol=1e-6, rtol=1e-6)
+    _assert_close("mul_f32", kuiper_ext.mul_f32(X_f, Y_f).cpu(), (X_f * Y_f).cpu(),
+                  atol=1e-6, rtol=1e-6)
+    _assert_close("add_const_f32", kuiper_ext.add_const_f32(X_f, 1e-5).cpu(),
+                  (X_f + 1e-5).cpu(), atol=1e-6, rtol=1e-6)
+    _assert_close("mul_const_f32", kuiper_ext.mul_const_f32(X_f, 0.5).cpu(),
+                  (X_f * 0.5).cpu(), atol=1e-6, rtol=1e-6)
+
+    X_keep = X_bf.clone()
+    _ = kuiper_ext.silu_bf16(X_bf)
+    assert torch.equal(X_bf, X_keep), "elementwise wrapper mutated input"
+
+
+def test_elementwise_dispatch_mode():
+    print("[test_elementwise_dispatch_mode]")
+    torch.manual_seed(1)
+    X_bf = torch.randn(37, 19, device=_DEVICE, dtype=torch.bfloat16)
+    Y_bf = torch.randn(37, 19, device=_DEVICE, dtype=torch.bfloat16)
+    X_f = torch.rand(37, 19, device=_DEVICE, dtype=torch.float32) + 0.25
+    Y_f = torch.randn(37, 19, device=_DEVICE, dtype=torch.float32)
+    eps = torch.tensor(1e-5, device=_DEVICE, dtype=torch.float64)
+
+    with kuiper_ext.KuiperMode():
+        got = [
+            torch.nn.functional.silu(X_bf),
+            torch.neg(X_bf),
+            torch.add(X_bf, Y_bf),
+            torch.mul(X_bf, Y_bf),
+            torch.rsqrt(X_f),
+            torch.pow(Y_f, 2),
+            torch.cos(Y_f),
+            torch.sin(Y_f),
+            torch.mul(X_f, Y_f),
+            torch.add(X_f, eps),
+            torch.mul(X_f, eps),
+        ]
+
+    ref = [
+        torch.nn.functional.silu(X_bf),
+        torch.neg(X_bf),
+        torch.add(X_bf, Y_bf),
+        torch.mul(X_bf, Y_bf),
+        torch.rsqrt(X_f),
+        torch.pow(Y_f, 2),
+        torch.cos(Y_f),
+        torch.sin(Y_f),
+        torch.mul(X_f, Y_f),
+        torch.add(X_f, eps),
+        torch.mul(X_f, eps),
+    ]
+    names = ["silu", "neg", "add_bf16", "mul_bf16", "rsqrt", "pow2",
+             "cos", "sin", "mul_f32", "add_const", "mul_const"]
+    for name, g, r in zip(names, got, ref):
+        _assert_close(f"dispatch {name}", g.float().cpu(), r.float().cpu(),
+                      atol=2e-2 if g.dtype == torch.bfloat16 else 1e-6,
+                      rtol=2e-2 if g.dtype == torch.bfloat16 else 1e-6)
+
+
 def main():
     _need_cuda()
     print(f"Using device: {_DEVICE}")
