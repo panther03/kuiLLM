@@ -113,6 +113,25 @@ def test_addmm_bf16():
             f"addmm wrapper mutated the bias tensor at {M}x{K}x{N}"
 
 
+def test_misc_arange_gather():
+    print("[test_misc_arange_gather]")
+    for n in [1, 17, 4096]:
+        got = kuiper_ext.arange_i64(n).cpu()
+        ref = torch.arange(n, dtype=torch.int64)
+        assert torch.equal(got, ref)
+
+    src_r = torch.randn(1024, device="cpu", dtype=torch.bfloat16)
+    idx_r = torch.tensor([0, 7, 13, 1023, 511, 4, 4, 900], dtype=torch.int64)
+    src = src_r.to(device=_DEVICE)
+    idx = idx_r.to(device=_DEVICE)
+    got = kuiper_ext.gather_bf16(src, idx).cpu()
+    assert torch.equal(got, src_r[idx_r])
+
+    with kuiper_ext.KuiperMode():
+        got_mode = torch.gather(src, 0, idx).cpu()
+    assert torch.equal(got_mode, src_r[idx_r])
+
+
 def main():
     _need_cuda()
     print(f"Using device: {_DEVICE}")

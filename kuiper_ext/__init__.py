@@ -18,8 +18,9 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
     KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
+    KUIPER_DIST / "Klas_Misc.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_misc.cu"]
 
 
 _ext = None
@@ -31,6 +32,11 @@ def _build():
     if _ext is not None or _build_error is not None:
         return
 
+    try:
+        import ninja
+        os.environ["PATH"] = str(Path(ninja.BIN_DIR)) + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
     from torch.utils.cpp_extension import load
 
     sources = [str(p) for p in _WRAPPER_SOURCES + _KUIPER_SOURCES]
@@ -181,6 +187,11 @@ def _supports_kuiper_bmm_common(A, B):
 def _supports_kuiper_bmm_f32(A, B):
     return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
+def _supports_kuiper_gather_bf16(src, dim, idx):
+    import torch
+    return (src.is_cuda and idx.is_cuda and src.dim() == 1 and idx.dim() == 1
+            and dim == 0 and src.dtype == torch.bfloat16 and idx.dtype == torch.int64)
+
 def _torch():
     import torch
     return torch
@@ -245,6 +256,19 @@ def _KuiperMode_cls():
                 if _supports_kuiper_bmm_common(A, B):
                     if _supports_kuiper_bmm_f32(A, B):
                         return ext.bmm_f32xf32_f32(A, B)
+
+            elif func is aten.arange.default and len(args) == 1:
+                n = args[0]
+                if isinstance(n, int) and kwargs.get("device", None) is not None:
+                    device = kwargs.get("device")
+                    dtype = kwargs.get("dtype", torch.int64)
+                    if str(device).startswith("cuda") and dtype is torch.int64:
+                        return ext.arange_i64(int(n))
+
+            elif func is aten.gather.default and len(args) == 3:
+                src, dim, idx = args
+                if _supports_kuiper_gather_bf16(src, dim, idx):
+                    return ext.gather_bf16(src, idx)
 
             return func(*args, **kwargs)
 
