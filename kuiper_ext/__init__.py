@@ -18,8 +18,9 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_GEMM_TensorCore2D.cu",
     KUIPER_DIST / "Klas_GEMM_BlockTiling2D.cu",
     KUIPER_DIST / "Klas_GEMM_Batched.cu",
+    KUIPER_DIST / "Klas_CatCast.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_catcast.cu"]
 
 
 _ext = None
@@ -32,6 +33,9 @@ def _build():
         return
 
     from torch.utils.cpp_extension import load
+    # torch.cpp_extension shells out to `ninja` by name. When tests are run via
+    # an absolute venv python, the venv's bin dir is not necessarily on PATH.
+    os.environ["PATH"] = f"{Path(sys.prefix) / 'bin'}:{Path(sys.executable).resolve().parent}:{os.environ.get('PATH', '')}"
 
     sources = [str(p) for p in _WRAPPER_SOURCES + _KUIPER_SOURCES]
     extra_include_paths = [str(KUIPER_INCS), str(KUIPER_DIST)]
@@ -181,6 +185,36 @@ def _supports_kuiper_bmm_common(A, B):
 def _supports_kuiper_bmm_f32(A, B):
     return A.dtype == _torch().float32 and B.dtype == _torch().float32
 
+# =============================================================================
+# cat / cast
+# =============================================================================
+
+def _normalize_dim(dim, rank):
+    return dim + rank if dim < 0 else dim
+
+def _supports_kuiper_cat2_bf16_lastdim(tensors, dim):
+    if len(tensors) != 2:
+        return False
+    a, b = tensors
+    torch = _torch()
+    if not (a.is_cuda and b.is_cuda):
+        return False
+    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
+        return False
+    if a.dim() == 0 or b.dim() != a.dim():
+        return False
+    if tuple(a.shape) != tuple(b.shape):
+        return False
+    if not (a.is_contiguous() and b.is_contiguous()):
+        return False
+    return _normalize_dim(dim, a.dim()) == a.dim() - 1
+
+def _supports_kuiper_to_copy(x, dtype):
+    torch = _torch()
+    return (x.is_cuda and x.is_contiguous() and x.numel() > 0 and
+            ((x.dtype == torch.bfloat16 and dtype in (torch.float32, torch.bfloat16)) or
+             (x.dtype == torch.float32 and dtype == torch.bfloat16)))
+
 def _torch():
     import torch
     return torch
@@ -245,6 +279,26 @@ def _KuiperMode_cls():
                 if _supports_kuiper_bmm_common(A, B):
                     if _supports_kuiper_bmm_f32(A, B):
                         return ext.bmm_f32xf32_f32(A, B)
+
+            # aten::cat(Tensor[] tensors, int dim=0) -> Tensor
+            elif func is aten.cat.default and len(args) >= 1:
+                tensors = list(args[0])
+                dim = args[1] if len(args) > 1 else kwargs.get("dim", 0)
+                if _supports_kuiper_cat2_bf16_lastdim(tensors, dim):
+                    return ext.cat2_bf16_lastdim(tensors[0], tensors[1])
+
+            # torch Tensor.to(dtype) normally reaches aten::_to_copy from
+            # __torch_dispatch__ when a real copy/cast is requested.
+            elif func is aten._to_copy.default and len(args) == 1:
+                x = args[0]
+                dtype = kwargs.get("dtype", x.dtype)
+                if _supports_kuiper_to_copy(x, dtype):
+                    if x.dtype == torch.bfloat16 and dtype == torch.float32:
+                        return ext.cast_bf16_to_f32(x)
+                    if x.dtype == torch.float32 and dtype == torch.bfloat16:
+                        return ext.cast_f32_to_bf16(x)
+                    if x.dtype == torch.bfloat16 and dtype == torch.bfloat16:
+                        return ext.cast_bf16_to_bf16(x)
 
             return func(*args, **kwargs)
 

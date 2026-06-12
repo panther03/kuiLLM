@@ -113,6 +113,39 @@ def test_addmm_bf16():
             f"addmm wrapper mutated the bias tensor at {M}x{K}x{N}"
 
 
+def test_cat_cast_kernels():
+    print("[test_cat_cast_kernels]")
+    torch.manual_seed(0)
+
+    a = torch.randn(2, 3, 8, device=_DEVICE, dtype=torch.bfloat16).contiguous()
+    b = torch.randn(2, 3, 8, device=_DEVICE, dtype=torch.bfloat16).contiguous()
+    got = kuiper_ext.cat2_bf16_lastdim(a, b)
+    assert torch.equal(got.cpu(), torch.cat([a.cpu(), b.cpu()], dim=-1))
+
+    x_bf16 = torch.randn(4, 17, device=_DEVICE, dtype=torch.bfloat16).contiguous()
+    got_f32 = kuiper_ext.cast_bf16_to_f32(x_bf16)
+    assert got_f32.dtype == torch.float32
+    assert torch.equal(got_f32.cpu(), x_bf16.float().cpu())
+
+    x_f32 = torch.randn(4, 17, device=_DEVICE, dtype=torch.float32).contiguous()
+    got_bf16 = kuiper_ext.cast_f32_to_bf16(x_f32)
+    assert got_bf16.dtype == torch.bfloat16
+    assert torch.equal(got_bf16.cpu(), x_f32.to(torch.bfloat16).cpu())
+
+    copied = kuiper_ext.cast_bf16_to_bf16(x_bf16)
+    assert copied.dtype == torch.bfloat16
+    assert copied.data_ptr() != x_bf16.data_ptr()
+    assert torch.equal(copied.cpu(), x_bf16.cpu())
+
+    with kuiper_ext.KuiperMode():
+        mode_cat = torch.cat([a, b], dim=-1)
+        mode_f32 = x_bf16.to(torch.float32)
+        mode_bf16 = x_f32.to(torch.bfloat16)
+    assert torch.equal(mode_cat.cpu(), torch.cat([a.cpu(), b.cpu()], dim=-1))
+    assert torch.equal(mode_f32.cpu(), x_bf16.float().cpu())
+    assert torch.equal(mode_bf16.cpu(), x_f32.cpu().to(torch.bfloat16))
+
+
 def main():
     _need_cuda()
     print(f"Using device: {_DEVICE}")
