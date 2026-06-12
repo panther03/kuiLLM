@@ -164,6 +164,7 @@ torch::Tensor kuiper_bmm_f32xf32_f32(torch::Tensor A, torch::Tensor B) {
 // =============================================================================
 
 void register_reduce(pybind11::module& m);
+void register_catcast(pybind11::module& m);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("addmm_bf16xbf16xbf16_bf16", &kuiper_addmm_bf16xbf16xbf16_bf16, "Klas_GEMM_BlockTiling2D_g_gemm_bf16_32x32x32_16x16");
@@ -171,6 +172,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("bmm_f32xf32_f32", &kuiper_bmm_f32xf32_f32, "Klas_GEMM_Batched_batched_matmul_f32");
     register_elementwise(m);
     register_reduce(m);
+    register_catcast(m);
 }
 
 // note: integration with dispatcher happens in __init__.py

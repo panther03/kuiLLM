@@ -11,12 +11,12 @@
 | `aten::all`        | `b8` | `b8` | 1 | skipped: single low-priority config check; fall through to aten | no |
 | `aten::arange`     | `long int` | `?` | 1 | |
 | `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |
-| `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | |
-| `aten::to`         | `bf16,f32` | `?` | 51 | |
-| `aten::to`         | `f32,bf16` | `?` | 49 | |
-| `aten::to`         | `bf16,bf16` | `?` | 48 | |
-| `aten::to`         | `b8,long int` | `?` | 1 | |
-| `aten::to`         | `f32,long int` | `?` | 1 | |
+| `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | native cat2 bf16 last-dim wrapper (F* cat stub only) | yes, guarded |
+| `aten::to`         | `bf16,f32` | `?` | 51 | Klas_CatCast cast_bf16_to_f32 | yes |
+| `aten::to`         | `f32,bf16` | `?` | 49 | Klas_CatCast cast_f32_to_bf16 | yes |
+| `aten::to`         | `bf16,bf16` | `?` | 48 | Klas_CatCast cast_bf16_to_bf16 | yes |
+| `aten::to`         | `b8,long int` | `?` | 1 | skipped: no Kuiper bool-to-i64 cast primitive | no |
+| `aten::to`         | `f32,long int` | `?` | 1 | skipped: no Kuiper f32-to-i64 cast primitive | no |
 | `aten::cos`        | `f32` | `f32` | 1 | Klas_Elementwise_cos_fw_f32 | yes |
 | `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | |
 | `aten::mean`       | `f32` | `f32` | 49 | Klas_Reduce_mean_fw_f32_row | yes |
