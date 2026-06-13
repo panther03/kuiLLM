@@ -23,6 +23,10 @@ inline void sync_current_stream() {
 
 }  // namespace
 
+// The verified Kuiper `Klas_Reduce_mean` is a 1D scalar reducer:
+//   float Klas_Reduce_mean(uint32_t n, float *a)
+// For the (rows, cols) reduce-along-last-dim case we loop in C++ and
+// stage each scalar back into the output buffer.
 torch::Tensor kuiper_mean_f32_lastdim(torch::Tensor X) {
     TORCH_CHECK(X.is_cuda(), "kuiper_mean_f32_lastdim: tensor must be CUDA");
     TORCH_CHECK(X.scalar_type() == torch::kFloat32,
@@ -33,7 +37,6 @@ torch::Tensor kuiper_mean_f32_lastdim(torch::Tensor X) {
     const int64_t rows = X.size(0);
     const int64_t cols = X.size(1);
     TORCH_CHECK(rows > 0 && cols > 0, "kuiper_mean_f32_lastdim: empty reductions unsupported");
-    TORCH_CHECK(rows <= 2097152, "kuiper_mean_f32_lastdim: rows exceed Kuiper max_blocks");
     TORCH_CHECK(cols <= static_cast<int64_t>(UINT32_MAX) - 1024,
                 "kuiper_mean_f32_lastdim: cols too large");
 
@@ -42,15 +45,17 @@ torch::Tensor kuiper_mean_f32_lastdim(torch::Tensor X) {
     at::cuda::CUDAGuard guard(X.device());
     sync_current_stream();
 
-    Klas_Reduce_mean_fw_f32_row(
-        static_cast<uint32_t>(rows), static_cast<uint32_t>(cols),
-        1.0f / static_cast<float>(cols), reinterpret_cast<float*>(X.data_ptr()),
-        reinterpret_cast<float*>(Y.data_ptr()));
+    float* x_ptr = reinterpret_cast<float*>(X.data_ptr());
+    float* y_ptr = reinterpret_cast<float*>(Y.data_ptr());
+    for (int64_t r = 0; r < rows; ++r) {
+        float scalar = Klas_Reduce_mean(static_cast<uint32_t>(cols), x_ptr + r * cols);
+        AT_CUDA_CHECK(cudaMemcpy(y_ptr + r, &scalar, sizeof(float), cudaMemcpyHostToDevice));
+    }
 
     return Y;
 }
 
 void register_reduce(pybind11::module& m) {
     m.def("mean_f32_lastdim", &kuiper_mean_f32_lastdim,
-          "Klas_Reduce_mean_fw_f32_row");
+          "Klas_Reduce_mean (1D scalar mean, looped per row)");
 }

@@ -212,10 +212,10 @@ def test_cat_cast_kernels():
     print("[test_cat_cast_kernels]")
     torch.manual_seed(0)
 
-    a = torch.randn(2, 3, 8, device=_DEVICE, dtype=torch.bfloat16).contiguous()
-    b = torch.randn(2, 3, 8, device=_DEVICE, dtype=torch.bfloat16).contiguous()
-    got = kuiper_ext.cat2_bf16_lastdim(a, b)
-    assert torch.equal(got.cpu(), torch.cat([a.cpu(), b.cpu()], dim=-1))
+    a = torch.randn(48, device=_DEVICE, dtype=torch.bfloat16).contiguous()
+    b = torch.randn(48, device=_DEVICE, dtype=torch.bfloat16).contiguous()
+    got = kuiper_ext.cat2_bf16(a, b)
+    assert torch.equal(got.cpu(), torch.cat([a.cpu(), b.cpu()], dim=0))
 
     x_bf16 = torch.randn(4, 17, device=_DEVICE, dtype=torch.bfloat16).contiguous()
     got_f32 = kuiper_ext.cast_bf16_to_f32(x_bf16)
@@ -233,18 +233,23 @@ def test_cat_cast_kernels():
     assert torch.equal(copied.cpu(), x_bf16.cpu())
 
     with kuiper_ext.KuiperMode():
-        mode_cat = torch.cat([a, b], dim=-1)
+        mode_cat = torch.cat([a, b], dim=0)
         mode_f32 = x_bf16.to(torch.float32)
         mode_bf16 = x_f32.to(torch.bfloat16)
-    assert torch.equal(mode_cat.cpu(), torch.cat([a.cpu(), b.cpu()], dim=-1))
+    assert torch.equal(mode_cat.cpu(), torch.cat([a.cpu(), b.cpu()], dim=0))
     assert torch.equal(mode_f32.cpu(), x_bf16.float().cpu())
     assert torch.equal(mode_bf16.cpu(), x_f32.cpu().to(torch.bfloat16))
 def test_misc_arange_gather():
     print("[test_misc_arange_gather]")
     for n in [1, 17, 4096]:
-        got = kuiper_ext.arange_i64(n).cpu()
+        got = kuiper_ext.arange_i64(n, 0, 1).cpu()
         ref = torch.arange(n, dtype=torch.int64)
         assert torch.equal(got, ref)
+
+    # arange with non-zero start and step
+    got = kuiper_ext.arange_i64(8, 5, 3).cpu()
+    ref = torch.arange(5, 5 + 8 * 3, 3, dtype=torch.int64)
+    assert torch.equal(got, ref)
 
     src_r = torch.randn(1024, device="cpu", dtype=torch.bfloat16)
     idx_r = torch.tensor([0, 7, 13, 1023, 511, 4, 4, 900], dtype=torch.int64)

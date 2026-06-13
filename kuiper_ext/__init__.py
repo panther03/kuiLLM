@@ -21,9 +21,10 @@ _KUIPER_SOURCES = [
     KUIPER_DIST / "Klas_Elementwise.cu",
     KUIPER_DIST / "Klas_Reduce.cu",
     KUIPER_DIST / "Klas_CatCast.cu",
-    KUIPER_DIST / "Klas_Misc.cu",
+    KUIPER_DIST / "Klas_Arange.cu",
+    KUIPER_DIST / "Klas_Gather.cu",
 ]
-_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu", _CSRC / "ops_reduce.cu", _CSRC / "ops_catcast.cu", _CSRC / "ops_misc.cu"]
+_WRAPPER_SOURCES = [_CSRC / "ops.cu", _CSRC / "ops_elementwise.cu", _CSRC / "ops_reduce.cu", _CSRC / "ops_catcast.cu"]
 
 
 _ext = None
@@ -270,7 +271,7 @@ def _supports_kuiper_mean_f32_lastdim(X, dim, keepdim, dtype):
 def _normalize_dim(dim, rank):
     return dim + rank if dim < 0 else dim
 
-def _supports_kuiper_cat2_bf16_lastdim(tensors, dim):
+def _supports_kuiper_cat2_bf16_1d(tensors, dim):
     if len(tensors) != 2:
         return False
     a, b = tensors
@@ -279,16 +280,18 @@ def _supports_kuiper_cat2_bf16_lastdim(tensors, dim):
         return False
     if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
         return False
-    if a.dim() == 0 or b.dim() != a.dim():
-        return False
-    if tuple(a.shape) != tuple(b.shape):
+    if a.dim() != 1 or b.dim() != 1:
         return False
     if not (a.is_contiguous() and b.is_contiguous()):
         return False
-    return _normalize_dim(dim, a.dim()) == a.dim() - 1
+    if a.numel() == 0 or b.numel() == 0:
+        return False
+    return _normalize_dim(dim, a.dim()) == 0
 
-def _supports_kuiper_to_copy(x, dtype):
+def _supports_kuiper_to_copy(x, dtype, device):
     torch = _torch()
+    if device is not None and str(device) != str(x.device):
+        return False
     return (x.is_cuda and x.is_contiguous() and x.numel() > 0 and
             ((x.dtype == torch.bfloat16 and dtype in (torch.float32, torch.bfloat16)) or
              (x.dtype == torch.float32 and dtype == torch.bfloat16)))
@@ -300,8 +303,19 @@ def _supports_kuiper_to_copy(x, dtype):
 
 def _supports_kuiper_gather_bf16(src, dim, idx):
     import torch
-    return (src.is_cuda and idx.is_cuda and src.dim() == 1 and idx.dim() == 1
-            and dim == 0 and src.dtype == torch.bfloat16 and idx.dtype == torch.int64)
+    if not (src.is_cuda and idx.is_cuda):
+        return False
+    if src.dtype != torch.bfloat16 or idx.dtype != torch.int64:
+        return False
+    if not (src.is_contiguous() and idx.is_contiguous()):
+        return False
+    if src.dim() != idx.dim():
+        return False
+    if src.dim() == 1 and dim == 0:
+        return True
+    if src.dim() == 2 and dim == 0 and idx.size(1) == src.size(1):
+        return True
+    return False
 
 def _torch():
     import torch
@@ -441,15 +455,16 @@ def _KuiperMode_cls():
             elif func is aten.cat.default and len(args) >= 1:
                 tensors = list(args[0])
                 dim = args[1] if len(args) > 1 else kwargs.get("dim", 0)
-                if _supports_kuiper_cat2_bf16_lastdim(tensors, dim):
-                    return ext.cat2_bf16_lastdim(tensors[0], tensors[1])
+                if _supports_kuiper_cat2_bf16_1d(tensors, dim):
+                    return ext.cat2_bf16(tensors[0], tensors[1])
 
             # torch Tensor.to(dtype) normally reaches aten::_to_copy from
             # __torch_dispatch__ when a real copy/cast is requested.
             elif func is aten._to_copy.default and len(args) == 1:
                 x = args[0]
                 dtype = kwargs.get("dtype", x.dtype)
-                if _supports_kuiper_to_copy(x, dtype):
+                device = kwargs.get("device", None)
+                if _supports_kuiper_to_copy(x, dtype, device):
                     if x.dtype == torch.bfloat16 and dtype == torch.float32:
                         return ext.cast_bf16_to_f32(x)
                     if x.dtype == torch.float32 and dtype == torch.bfloat16:
@@ -462,8 +477,8 @@ def _KuiperMode_cls():
                 if isinstance(n, int) and kwargs.get("device", None) is not None:
                     device = kwargs.get("device")
                     dtype = kwargs.get("dtype", torch.int64)
-                    if str(device).startswith("cuda") and dtype is torch.int64:
-                        return ext.arange_i64(int(n))
+                    if str(device).startswith("cuda") and dtype is torch.int64 and n > 0:
+                        return ext.arange_i64(int(n), 0, 1)
 
             elif func is aten.gather.default and len(args) == 3:
                 src, dim, idx = args
