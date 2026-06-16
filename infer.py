@@ -313,6 +313,8 @@ def _main() -> int:
     if show_n < len(responses):
         print(f"\n… ({len(responses) - show_n} more, pass --print to see all)")
 
+    if args.use_kuiper and kuiper_ext.is_available() and kuiper_ext.ENABLE_PRINT_PROFILING:
+        kuiper_ext.print_profile_data()
     return 0
 
 

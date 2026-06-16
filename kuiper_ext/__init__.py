@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
+
 try: 
     KUIPER_ROOT  = Path(os.environ["KUIPER_HOME"])
 except KeyError:
@@ -324,6 +326,7 @@ def _torch():
 
 _KuiperMode_class = None
 
+profile_data = set()
 
 def _KuiperMode_cls():
     global _KuiperMode_class
@@ -345,8 +348,22 @@ def _KuiperMode_cls():
                 model(...)
         """
 
+        @classmethod
+        def arg_data(_, a):
+            if isinstance(a, torch.Tensor):
+                return (len(a.shape), a.dtype, a.device)
+            elif isinstance(a, list):
+                return (0x67, tuple([ KuiperMode.arg_data(ai) for ai in a ]))
+            else:
+                return type(a)
+                
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            global profile_data
             kwargs = kwargs or {}
+
+            if ENABLE_PRINT_PROFILING:
+                profile_data.add((func, tuple([ KuiperMode.arg_data(a) for a in args ]), tuple(kwargs.keys()), tuple([KuiperMode.arg_data(v) for v in kwargs.values()])))
+                #print(f"KuiperMode: func={func}, types={types}, args={[KuiperMode.print_arg(a) for a in args]}, kwargs={kwargs}")
 
             # aten::addmm(Tensor self, Tensor mat1, Tensor mat2, *,
             #             Scalar beta=1, Scalar alpha=1) -> Tensor
@@ -489,3 +506,29 @@ def _KuiperMode_cls():
 
     _KuiperMode_class = KuiperMode
     return _KuiperMode_class
+
+def print_profile_arg(a):
+    try:
+        if a[0] == 0x67:
+            s = "["
+            for ai in a[1]:
+                s += print_profile_arg(ai) + ", "
+            s += "]"
+            return s
+        else:
+            (nshape, dtype, device) = a
+            return f"Tensor(nshape={nshape}, dtype={dtype}, device={device})"
+    except Exception as _:
+        return repr(a)
+
+def print_profile_data():
+    global profile_data
+    out = {}
+    for func, args, kwargs_keys, kwargs_values in profile_data:
+        l = out.get(func, [])
+        l.append(f"args={[print_profile_arg(a) for a in args]}, kwargs={{ {', '.join(f'{k}={print_profile_arg(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }}")
+        out[func] = l
+    for func, calls in out.items():
+        print(f"Function {func}:")
+        for call in calls:
+            print(f"  {call}")
