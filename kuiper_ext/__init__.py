@@ -354,8 +354,10 @@ def _KuiperMode_cls():
                 return (len(a.shape), a.dtype, a.device)
             elif isinstance(a, list):
                 return (0x67, tuple([ KuiperMode.arg_data(ai) for ai in a ]))
+            elif isinstance(a, torch.dtype) or isinstance(a, torch.device):
+                return a
             else:
-                return type(a)
+                return type(a).__name__
                 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             global profile_data
@@ -515,11 +517,13 @@ def print_profile_arg(a):
                 s += print_profile_arg(ai) + ", "
             s += "]"
             return s
-        else:
+        elif not isinstance(a, str):
             (nshape, dtype, device) = a
             return f"Tensor(nshape={nshape}, dtype={dtype}, device={device})"
+        else:
+            return str(a)
     except Exception as _:
-        return repr(a)
+        return str(a)
 
 def print_profile_data():
     global profile_data
