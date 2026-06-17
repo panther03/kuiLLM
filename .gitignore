@@ -50,3 +50,4 @@ module_graph.png
 # ── Local notes / scratch ─────────────────────────────────────────────────────
 scratch/
 notes.local.md
+kernel_call.log

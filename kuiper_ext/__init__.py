@@ -347,6 +347,7 @@ def _KuiperMode_cls():
             with kuiper_ext.KuiperMode():
                 model(...)
         """
+        dummy_print_mode = False # dont use kuiper for anything, only for profiling
 
         @classmethod
         def arg_data(_, a):
@@ -354,7 +355,7 @@ def _KuiperMode_cls():
                 return (len(a.shape), a.dtype, a.device)
             elif isinstance(a, list):
                 return (0x67, tuple([ KuiperMode.arg_data(ai) for ai in a ]))
-            elif isinstance(a, torch.dtype) or isinstance(a, torch.device):
+            elif isinstance(a, torch.dtype) or isinstance(a, torch.device) or isinstance(a, bool):
                 return a
             else:
                 return type(a).__name__
@@ -366,6 +367,9 @@ def _KuiperMode_cls():
             if ENABLE_PRINT_PROFILING:
                 profile_data.add((func, tuple([ KuiperMode.arg_data(a) for a in args ]), tuple(kwargs.keys()), tuple([KuiperMode.arg_data(v) for v in kwargs.values()])))
                 #print(f"KuiperMode: func={func}, types={types}, args={[KuiperMode.print_arg(a) for a in args]}, kwargs={kwargs}")
+
+            if self.dummy_print_mode:
+                return func(*args, **kwargs)
 
             # aten::addmm(Tensor self, Tensor mat1, Tensor mat2, *,
             #             Scalar beta=1, Scalar alpha=1) -> Tensor
@@ -525,7 +529,7 @@ def print_profile_arg(a):
     except Exception as _:
         return str(a)
 
-def print_profile_data():
+def print_profile_data(out_dev=sys.stdout):
     global profile_data
     out = {}
     for func, args, kwargs_keys, kwargs_values in profile_data:
@@ -533,6 +537,6 @@ def print_profile_data():
         l.append(f"args={[print_profile_arg(a) for a in args]}, kwargs={{ {', '.join(f'{k}={print_profile_arg(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }}")
         out[func] = l
     for func, calls in out.items():
-        print(f"Function {func}:")
+        print(f"Function {func}:", file=out_dev)
         for call in calls:
-            print(f"  {call}")
+            print(f"  {call}", file=out_dev)

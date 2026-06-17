@@ -25,10 +25,13 @@ if tokenizer.pad_token_id is None:
     tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.pad_token    = tokenizer.eos_token
 
+use_flash_attn = os.getenv("USE_FLASH_ATTN", "0") == "1"
+
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
     device_map=DEVICE,
+    attn_implementation="flash_attention_2" if use_flash_attn else "spda",
 )
 model.eval()
 
@@ -92,9 +95,13 @@ def generate_batch(
         padding=True,           # left-pad to the longest row
     ).to(DEVICE)
 
-    if use_kuiper and DEVICE == "cuda" and kuiper_ext.is_available():
+    if kuiper_ext.is_available() and ((use_kuiper and DEVICE == "cuda") or (kuiper_ext.ENABLE_PRINT_PROFILING)):
         kernel_ctx = kuiper_ext.KuiperMode()
-        kernel_tag = "kuiper"
+        if kuiper_ext.ENABLE_PRINT_PROFILING:
+            kernel_ctx.dummy_print_mode = True
+            kernel_tag = "torch"
+        else:
+            kernel_tag = "kuiper"
     else:
         from contextlib import nullcontext
         kernel_ctx = nullcontext()
@@ -313,8 +320,10 @@ def _main() -> int:
     if show_n < len(responses):
         print(f"\n… ({len(responses) - show_n} more, pass --print to see all)")
 
-    if args.use_kuiper and kuiper_ext.is_available() and kuiper_ext.ENABLE_PRINT_PROFILING:
-        kuiper_ext.print_profile_data()
+    if kuiper_ext.is_available() and kuiper_ext.ENABLE_PRINT_PROFILING:
+        with open("kernel_call.log", "w") as f:
+            kuiper_ext.print_profile_data(f)
+
     return 0
 
 
