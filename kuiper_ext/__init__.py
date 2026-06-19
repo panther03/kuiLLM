@@ -80,6 +80,17 @@ def _launches_gpu_kernel(func, args, out):
     return not (outs and all(t.untyped_storage().data_ptr() in ins for t in outs))
 
 
+def _has_cuda_kernel(func):
+    """True iff the op registers a direct CUDA kernel (vs a composite that
+    decomposes/redispatches internally and whose GPU sub-ops we cannot intercept)."""
+    import torch
+    try:
+        return torch._C._dispatch_has_kernel_for_dispatch_key(
+            func.name(), torch._C.DispatchKey.CUDA)
+    except Exception:
+        return False
+
+
 def _KuiperMode_cls():
     global _KuiperMode_class
     if _KuiperMode_class is not None:
@@ -101,7 +112,7 @@ def _KuiperMode_cls():
         def arg_data(_, a):
             if isinstance(a, torch.Tensor):
                 return (len(a.shape), a.dtype, a.device)
-            elif isinstance(a, list):
+            elif isinstance(a, (list, tuple)):
                 return (0x67, tuple([KuiperMode.arg_data(ai) for ai in a]))
             elif isinstance(a, (torch.dtype, torch.device, bool)):
                 return a
@@ -122,7 +133,8 @@ def _KuiperMode_cls():
                 profile_data.add((func,
                                   tuple([KuiperMode.arg_data(a) for a in args]),
                                   tuple(kwargs.keys()),
-                                  tuple([KuiperMode.arg_data(v) for v in kwargs.values()])))
+                                  tuple([KuiperMode.arg_data(v) for v in kwargs.values()]),
+                                  KuiperMode.arg_data(out)))
             return out
 
     _KuiperMode_class = KuiperMode
@@ -149,12 +161,14 @@ def print_profile_arg(a):
 def print_profile_data(out_dev=sys.stdout):
     global profile_data
     out = {}
-    for func, args, kwargs_keys, kwargs_values in profile_data:
+    for func, args, kwargs_keys, kwargs_values, ret in profile_data:
         l = out.get(func, [])
         l.append(f"args={[print_profile_arg(a) for a in args]}, "
-                 f"kwargs={{ {', '.join(f'{k}={print_profile_arg(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }}")
+                 f"kwargs={{ {', '.join(f'{k}={print_profile_arg(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }} "
+                 f"-> {print_profile_arg(ret)}")
         out[func] = l
     for func, calls in out.items():
-        print(f"Function {func}:", file=out_dev)
+        tag = "" if _has_cuda_kernel(func) else "  [no CUDA kernel: composite — internal GPU sub-ops not interceptable]"
+        print(f"Function {func}:{tag}", file=out_dev)
         for call in calls:
             print(f"  {call}", file=out_dev)
