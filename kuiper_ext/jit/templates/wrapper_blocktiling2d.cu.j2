@@ -1,0 +1,50 @@
+// JIT-GENERATED PyTorch wrapper for a verified Kuiper BlockTiling2D GEMM.
+// This is trivial glue (no proof content): it marshals torch tensors into the
+// extracted Kuiper host function. Generated from
+// kuiper_ext/jit/templates/wrapper_blocktiling2d.cu.j2
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+
+#include "{{ header }}"
+
+namespace {
+inline void sync_current_stream() {
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    cudaStreamCaptureStatus cap;
+    AT_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &cap));
+    TORCH_CHECK(cap == cudaStreamCaptureStatusNone,
+                "Kuiper JIT kernels are not safe for CUDA graph capture.");
+    AT_CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
+}
+}  // namespace
+
+// C = alpha * (A @ B) + beta * Cin, computed in place on a clone of Cin.
+torch::Tensor run(torch::Tensor A, torch::Tensor B, torch::Tensor Cin,
+                  double alpha, double beta) {
+    TORCH_CHECK(A.is_cuda() && B.is_cuda() && Cin.is_cuda(), "JIT GEMM: CUDA tensors required");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "JIT GEMM: rank-2 only");
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+    TORCH_CHECK(B.size(0) == K, "JIT GEMM: contracting dim mismatch");
+
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+    auto C = Cin.expand({M, N}).contiguous().clone();
+
+    at::cuda::CUDAGuard guard(A.device());
+    sync_current_stream();
+
+    {{ sym }}(
+        ({{ ctype }})alpha, ({{ ctype }})beta,
+        (uint32_t)M, (uint32_t)K, (uint32_t)N,
+        reinterpret_cast<{{ ctype }}*>(Ac.data_ptr()),
+        reinterpret_cast<{{ ctype }}*>(Bc.data_ptr()),
+        reinterpret_cast<{{ ctype }}*>(C.data_ptr()));
+    return C;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &run, "{{ sym }}");
+}

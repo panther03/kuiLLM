@@ -31,6 +31,8 @@ env/
 # overrides TORCH_EXTENSIONS_DIR into the repo.
 torch_extensions/
 kuiper_ext/.build/
+# On-demand extracted + compiled Kuiper kernels (generated .fst/.cu/.so).
+kuiper_ext/.jitcache/
 
 # ── HuggingFace download cache (if user redirects HF_HOME here) ───────────────
 .cache/

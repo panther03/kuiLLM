@@ -1,8 +1,36 @@
 import os
 import sys
 from pathlib import Path
+from abc import ABC
 
 ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
+
+# When enabled, eligible aten ops (currently mm/addmm) are served by JIT-extracted
+# + compiled Kuiper kernels instead of the pre-built library. Misses and failures
+# fall through to stock PyTorch.
+ENABLE_JIT = os.environ.get("KUIPER_JIT", "0") == "1"
+# If set, JIT extraction/compilation errors propagate instead of falling back.
+JIT_STRICT = os.environ.get("KUIPER_JIT_STRICT", "0") == "1"
+
+_jit_dispatch = None
+_jit_warned = False
+
+
+def _jit_try(func, args, kwargs):
+    """Attempt JIT Kuiper dispatch. Returns a Tensor or None (miss/disabled)."""
+    global _jit_dispatch, _jit_warned
+    if _jit_dispatch is None:
+        from kuiper_ext.jit import try_dispatch as _jit_dispatch  # noqa: F811
+    try:
+        return _jit_dispatch(func, args, kwargs)
+    except Exception as e:
+        if JIT_STRICT:
+            raise
+        if not _jit_warned:
+            _jit_warned = True
+            print(f"[kuiper_ext] JIT dispatch failed, falling back to PyTorch: {e}",
+                  file=sys.stderr)
+        return None
 
 try: 
     KUIPER_ROOT  = Path(os.environ["KUIPER_HOME"])
@@ -370,6 +398,13 @@ def _KuiperMode_cls():
 
             if self.dummy_print_mode:
                 return func(*args, **kwargs)
+
+            # JIT path: serve eligible ops (mm/addmm) from on-demand extracted +
+            # compiled Kuiper kernels. A miss returns None and falls through.
+            if ENABLE_JIT:
+                _jit_out = _jit_try(func, args, kwargs)
+                if _jit_out is not None:
+                    return _jit_out
 
             # aten::addmm(Tensor self, Tensor mat1, Tensor mat2, *,
             #             Scalar beta=1, Scalar alpha=1) -> Tensor

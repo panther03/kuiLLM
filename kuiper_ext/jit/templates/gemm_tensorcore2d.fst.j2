@@ -1,0 +1,11 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiper_ext/jit/templates/gemm_tensorcore2d.fst.j2
+
+open Kuiper
+open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
+open Klas.GEMM.TensorCore2D.Inst { spec }
+
+let {{ name }} = spec {{ et_ab }} {{ et_c }} {{ bm }}sz {{ bn }}sz {{ bk }}sz {{ tm }}sz {{ tn }}sz {{ tk }}sz {{ wm }}sz {{ wn }}sz

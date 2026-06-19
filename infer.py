@@ -31,7 +31,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
     device_map=DEVICE,
-    attn_implementation="flash_attention_2" if use_flash_attn else "spda",
+    attn_implementation="flash_attention_2" if use_flash_attn else "sdpa",
 )
 model.eval()
 
