@@ -1,223 +1,96 @@
 # Kernel implementation checklist
 
-## better profile
-
-```
-
-Function aten.scalar_tensor.default:
-  args=["'float'"], kwargs={ dtype=torch.bfloat16, device=device(type='cuda', index=0) }
-  args=["'float'"], kwargs={ dtype=torch.bfloat16, layout='layout', device=device(type='cuda', index=0) }
-Function aten.max.default:
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.rsqrt.default:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.view.default:
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "['int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-Function aten.scatter.src:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'", 'Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', "'int'", 'Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.bitwise_and.Tensor:
-  args=['Tensor(nshape=0, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.where.self:
-  args=['Tensor(nshape=4, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=0, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=0, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.unsqueeze.default:
-  args=['Tensor(nshape=3, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.mul.Tensor:
-  args=['Tensor(nshape=1, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "'float'"], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', 'Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=0, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'float'"], kwargs={  }
-Function aten.cat.default:
-  args=['[Tensor(nshape=1, dtype=torch.bfloat16, device=cuda:0), Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0), ]', "'int'"], kwargs={  }
-  args=['[Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0), Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0), ]', "'int'"], kwargs={  }
-  args=['[Tensor(nshape=2, dtype=torch.int64, device=cuda:0), Tensor(nshape=2, dtype=torch.int64, device=cuda:0), ]', "'int'"], kwargs={  }
-  args=['[Tensor(nshape=3, dtype=torch.float32, device=cuda:0), Tensor(nshape=3, dtype=torch.float32, device=cuda:0), ]', "'int'"], kwargs={  }
-Function aten.slice.Tensor:
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', "'int'", "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "'int'", "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'", "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', "'int'", "'int'", "'int'"], kwargs={  }
-Function aten._softmax.default:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'", "'bool'"], kwargs={  }
-Function aten.lt.Scalar:
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.clone.default:
-  args=['Tensor(nshape=5, dtype=torch.bfloat16, device=cuda:0)'], kwargs={ memory_format='memory_format' }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)'], kwargs={ memory_format='memory_format' }
-Function aten.expand.default:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bool, device=cuda:0)', "['int', 'int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=5, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', 'int', 'int', ]"], kwargs={  }
-Function aten.lift_fresh.default:
-  args=['Tensor(nshape=1, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=0, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=0, dtype=torch.bool, device=cpu)'], kwargs={  }
-Function aten._local_scalar_dense.default:
-  args=['Tensor(nshape=0, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.mm.default:
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-Function aten.bmm.default:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', 'Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.new_ones.default:
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "['int', 'int', ]"], kwargs={ pin_memory='bool' }
-  args=['Tensor(nshape=4, dtype=torch.int64, device=cuda:0)', '[]'], kwargs={ dtype=torch.bool, pin_memory='bool' }
-Function aten.add.Tensor:
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "'float'"], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.cumsum.default:
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.transpose.int:
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "'int'", "'int'"], kwargs={  }
-Function aten._unsafe_view.default:
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=5, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', 'int', 'int', ]"], kwargs={  }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "['int', 'int', 'int', ]"], kwargs={  }
-Function aten.bitwise_or.Tensor:
-  args=['Tensor(nshape=1, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.arange.default:
-  args=["'int'"], kwargs={ dtype=torch.int64, device=device(type='cuda', index=0), pin_memory='bool' }
-  args=["'int'"], kwargs={ device=device(type='cuda', index=0), pin_memory='bool' }
-Function aten.index.Tensor:
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', '[Tensor(nshape=4, dtype=torch.int64, device=cuda:0), Tensor(nshape=4, dtype=torch.int64, device=cuda:0), ]'], kwargs={  }
-Function aten.masked_fill.Scalar:
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', "'float'"], kwargs={  }
-Function aten.div.Tensor:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'float'"], kwargs={  }
-Function aten.eq.Scalar:
-  args=['Tensor(nshape=0, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.fill_.Tensor:
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)', 'Tensor(nshape=0, dtype=torch.bool, device=cpu)'], kwargs={  }
-Function aten.rsub.Scalar:
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.select.int:
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)', "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'", "'int'"], kwargs={  }
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'", "'int'"], kwargs={  }
-Function aten._to_copy.default:
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)'], kwargs={ dtype=torch.float32, device=device(type='cuda', index=0) }
-  args=['Tensor(nshape=3, dtype=torch.int64, device=cuda:0)'], kwargs={ dtype=torch.float32 }
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={ dtype=torch.bfloat16 }
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)'], kwargs={ dtype=torch.float32 }
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)'], kwargs={ dtype=torch.bool, device=device(type='cuda', index=0) }
-Function aten.le.Scalar:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'float'"], kwargs={  }
-Function aten.sub.Tensor:
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.topk.default:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.sort.default:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.full.default:
-  args=["['int', ]", "'bool'"], kwargs={ dtype=torch.bool, device=device(type='cuda', index=0), pin_memory='bool' }
-Function aten.gather.default:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'", 'Tensor(nshape=2, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.any.default:
-  args=['Tensor(nshape=1, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.silu.default:
-  args=['Tensor(nshape=3, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-Function aten.isin.Tensor_Tensor:
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=1, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-  args=['Tensor(nshape=1, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=0, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.t.default:
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-Function aten.all.default:
-  args=['Tensor(nshape=2, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.neg.default:
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-Function aten.sin.default:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.ones.default:
-  args=["['int', ]"], kwargs={ dtype=torch.int64, device=device(type='cuda', index=0), pin_memory='bool' }
-Function aten.bitwise_not.default:
-  args=['Tensor(nshape=1, dtype=torch.bool, device=cuda:0)'], kwargs={  }
-Function aten.multinomial.default:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.mean.dim:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "['int', ]", "'bool'"], kwargs={  }
-Function aten.squeeze.dim:
-  args=['Tensor(nshape=2, dtype=torch.int64, device=cuda:0)', "'int'"], kwargs={  }
-Function aten.embedding.default:
-  args=['Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.lt.Tensor:
-  args=['Tensor(nshape=2, dtype=torch.float32, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.addmm.default:
-  args=['Tensor(nshape=1, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=2, dtype=torch.bfloat16, device=cuda:0)'], kwargs={  }
-Function aten.cos.default:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)'], kwargs={  }
-Function aten.le.Tensor:
-  args=['Tensor(nshape=4, dtype=torch.int64, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.int64, device=cuda:0)'], kwargs={  }
-Function aten.pow.Tensor_Scalar:
-  args=['Tensor(nshape=3, dtype=torch.float32, device=cuda:0)', "'int'"], kwargs={  }
-Function aten._scaled_dot_product_efficient_attention.default:
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', 'Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "'bool'"], kwargs={ scale='float' }
-Function aten.constant_pad_nd.default:
-  args=['Tensor(nshape=4, dtype=torch.bfloat16, device=cuda:0)', "['int', 'int', ]", "'float'"], kwargs={  }
-
-```
-
-| Op | Input dtypes | Output dtype | Calls | kuiper impl. | connected ? | 
-| --- | --- | --- | ---: | :---: | --- |
-| `aten::scaled_dot_product_attention` | `bf16,bf16,bf16` | `bf16` | 24 |  |
-| `aten::is_nonzero` | `b8` | `?` | 1 | skipped: aten already performs required D→H scalar sync | no |
-| `aten::add`        | `bf16,bf16` | `bf16` | 96 | Klas_Elementwise_add_fw_bf16 | yes |
-| `aten::add`        | `f32,f64` | `?` | 49 | Klas_Elementwise_add_const_fw_f32 | yes |
-| `aten::add`        | `long int,long int` | `?` | 1 | skipped (low-priority i64 add not wired) | no |
-| `aten::addmm`      | `bf16,bf16,bf16` | `bf16` | 72 | Klas_GEMM_BlockTiling2D (doesn't handle 1D case though? to review)| yes |
-| `aten::all`        | `b8` | `b8` | 1 | skipped: single low-priority config check; fall through to aten | no |
-| `aten::arange`     | `long int` | `?` | 1 | Klas_Arange_arange_i64 | yes |
-| `aten::bmm`        | `f32,f32` | `f32` | 1 | Klas_GEMM_Batched | yes |
-| `aten::cat`        | `TensorList` (dont know arity..) | `?` | 97 | Klas_CatCast_cat2_bf16 (1D dim=0 only) | yes, guarded |
-| `aten::to`         | `bf16,f32` | `?` | 51 | Klas_CatCast cast_bf16_to_f32 | yes |
-| `aten::to`         | `f32,bf16` | `?` | 49 | Klas_CatCast cast_f32_to_bf16 | yes |
-| `aten::to`         | `bf16,bf16` | `?` | 48 | Klas_CatCast cast_bf16_to_bf16 | yes |
-| `aten::to`         | `b8,long int` | `?` | 1 | skipped: no Kuiper bool-to-i64 cast primitive | no |
-| `aten::to`         | `f32,long int` | `?` | 1 | skipped: no Kuiper f32-to-i64 cast primitive | no |
-| `aten::cos`        | `f32` | `f32` | 1 | Klas_Elementwise_cos_fw_f32 | yes |
-| `aten::gather`     | `bf16,long int,bf16` | `?` | 1 | Klas_Gather_gather_bf16_u64_2d | yes |
-| `aten::mean`       | `f32` | `f32` | 49 | Klas_Reduce_mean (1D, looped per row) | yes |
-| `aten::mm`         | `bf16,bf16` | `bf16` | 97 | Klas_GEMM_TensorCore2D (output cast req.) | yes |
-| `aten::mul`        | `bf16,bf16` | `bf16` | 169 | Klas_Elementwise_mul_fw_bf16 | yes |
-| `aten::mul`        | `f32,f32` | `f32` | 49 | Klas_Elementwise_mul_fw_f32 | yes |
-| `aten::mul`        | `f32,f64` | `?` | 2 | Klas_Elementwise_mul_const_fw_f32 | yes |
-| `aten::neg`        | `bf16` | `bf16` | 48 | Klas_Elementwise_neg_fw_bf16 | yes |
-| `aten::pow`        | `f32` | `f32` | 49 | Klas_Elementwise_square_fw_f32 | yes |
-| `aten::rsqrt`      | `f32` | `f32` | 49 | Klas_Elementwise_rsqrt_fw_f32 | yes |
-| `aten::silu`       | `bf16` | `bf16` | 24 | Klas_Elementwise_silu_fw_bf16 | yes |
-| `aten::sin`        | `f32` | `f32` | 1 | Klas_Elementwise_sin_fw_f32 | yes |
+| Op                                                        | Args                                                      | Kwargs                                              | Connected? |
+| --------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------- | ---------- |
+| aten.masked\_fill.Scalar                                  | T(2,f32,c), T(2,bool,c), float                            |                                                     |            |
+| aten.masked\_fill.Scalar                                  | T(2,int64,c), T(2,bool,c), int                            |                                                     |            |
+| aten.mul.Tensor                                           | T(0,int64,c), T(1,int64,c)                                |                                                     |            |
+| aten.mul.Tensor                                           | T(1,bf16,c), T(3,bf16,c)                                  |                                                     |            |
+| aten.mul.Tensor                                           | T(3,f32,c), float                                         |                                                     |            |
+| aten.mul.Tensor                                           | T(3,f32,c), T(3,f32,c)                                    |                                                     |            |
+| aten.mul.Tensor                                           | T(4,bf16,c), T(4,bf16,c)                                  |                                                     |            |
+| aten.mul.Tensor                                           | T(1,int64,c), T(1,int64,c)                                |                                                     |            |
+| aten.mul.Tensor                                           | T(2,f32,c), float                                         |                                                     |            |
+| aten.mul.Tensor                                           | T(3,bf16,c), T(3,bf16,c)                                  |                                                     |            |
+| aten.isin.Tensor\_Tensor                                  | T(1,int64,c), T(0,int64,c)                                |                                                     |            |
+| aten.isin.Tensor\_Tensor                                  | T(1,int64,c), T(1,int64,c)                                |                                                     |            |
+| aten.scatter.src                                          | T(2,bool,c), int, T(2,int64,c), T(2,bool,c)               |                                                     |            |
+| aten.scatter.src                                          | T(2,f32,c), int, T(2,int64,c), T(2,f32,c)                 |                                                     |            |
+| aten.bitwise\_and.Tensor                                  | T(0,bool,c), T(4,bool,c)                                  |                                                     |            |
+| aten.bitwise\_and.Tensor                                  | T(4,bool,c), T(4,bool,c)                                  |                                                     |            |
+| aten.bitwise\_and.Tensor                                  | T(1,int64,c), T(1,bool,c)                                 |                                                     |            |
+| aten.eq.Scalar                                            | T(1,int64,c), int                                         |                                                     |            |
+| aten.eq.Scalar                                            | T(0,int64,c), int                                         |                                                     |            |
+| aten.eq.Scalar                                            | T(2,int64,c), int                                         |                                                     |            |
+| aten.add.Tensor                                           | T(4,bf16,c), T(4,bf16,c)                                  |                                                     |            |
+| aten.add.Tensor                                           | T(1,int64,c), int                                         |                                                     |            |
+| aten.add.Tensor                                           | T(2,int64,c), int                                         |                                                     |            |
+| aten.add.Tensor                                           | T(2,int64,c), T(2,int64,c)                                |                                                     |            |
+| aten.add.Tensor                                           | T(3,bf16,c), T(3,bf16,c)                                  |                                                     |            |
+| aten.add.Tensor                                           | T(1,int64,c), T(1,int64,c)                                |                                                     |            |
+| aten.add.Tensor                                           | T(3,f32,c), float                                         |                                                     |            |
+| aten.all.default                                          | T(2,bool,c)                                               |                                                     |            |
+| aten.embedding.default                                    | T(2,bf16,c), T(2,int64,c)                                 |                                                     |            |
+| aten.fill\_.Tensor                                        | T(2,bool,c), T(0,bool,cpu)                                |                                                     |            |
+| aten.cos.default                                          | T(3,f32,c)                                                |                                                     |            |
+| aten.div.Tensor                                           | T(2,f32,c), float                                         |                                                     |            |
+| aten.\_to\_copy.default                                   | T(3,bf16,c)                                               | dtype=torch.float32                                 |            |
+| aten.\_to\_copy.default                                   | T(2,bf16,c)                                               | dtype=torch.float32, device=cuda:0                  |            |
+| aten.\_to\_copy.default                                   | T(2,int64,c)                                              | dtype=torch.bool, device=cuda:0                     |            |
+| aten.\_to\_copy.default                                   | T(3,int64,c)                                              | dtype=torch.float32                                 |            |
+| aten.\_to\_copy.default                                   | T(3,f32,c)                                                | dtype=torch.bfloat16                                |            |
+| aten.mm.default                                           | T(2,bf16,c), T(2,bf16,c)                                  |                                                     |            |
+| aten.cumsum.default                                       | T(2,int64,c), int                                         |                                                     |            |
+| aten.cumsum.default                                       | T(2,f32,c), int                                           |                                                     |            |
+| aten.multinomial.default                                  | T(2,f32,c), int                                           |                                                     |            |
+| aten.bitwise\_or.Tensor                                   | T(1,bool,c), T(1,bool,c)                                  |                                                     |            |
+| aten.pow\.Tensor\_Scalar                                  | T(3,f32,c), int                                           |                                                     |            |
+| aten.clone.default                                        | T(2,int64,c)                                              | memory\_format=memory\_format                       |            |
+| aten.clone.default                                        | T(5,bf16,c)                                               | memory\_format=memory\_format                       |            |
+| aten.cat.default                                          | \[T(2,int64,c), T(2,int64,c)], int                        |                                                     |            |
+| aten.cat.default                                          | \[T(3,f32,c), T(3,f32,c)], int                            |                                                     |            |
+| aten.cat.default                                          | \[T(4,bf16,c), T(4,bf16,c)], int                          |                                                     |            |
+| aten.cat.default                                          | \[T(1,bf16,c), T(4,bf16,c)], int                          |                                                     |            |
+| aten.constant\_pad\_nd.default                            | T(4,bf16,c), \[int, int], float                           |                                                     |            |
+| aten.bitwise\_not.default                                 | T(1,bool,c)                                               |                                                     |            |
+| aten.topk.default                                         | T(2,f32,c), int                                           |                                                     |            |
+| aten.bmm.default                                          | T(3,f32,c), T(3,f32,c)                                    |                                                     |            |
+| aten.arange.default                                       | int                                                       | dtype=torch.int64, device=cuda:0, pin\_memory=False |            |
+| aten.arange.default                                       | int                                                       | device=cuda:0, pin\_memory=False                    |            |
+| aten.new\_ones.default                                    | T(4,int64,c), \[]                                         | dtype=torch.bool, pin\_memory=False                 |            |
+| aten.new\_ones.default                                    | T(2,int64,c), \[int, int]                                 | pin\_memory=False                                   |            |
+| aten.\_local\_scalar\_dense.default                       | T(0,bool,c)                                               |                                                     |            |
+| aten.silu.default                                         | T(3,bf16,c)                                               |                                                     |            |
+| aten.max.default                                          | T(1,int64,c)                                              |                                                     |            |
+| aten.lt.Scalar                                            | T(1,int64,c), int                                         |                                                     |            |
+| aten.lt.Scalar                                            | T(2,f32,c), int                                           |                                                     |            |
+| aten.gather.default                                       | T(2,f32,c), int, T(2,int64,c)                             |                                                     |            |
+| aten.\_softmax.default                                    | T(2,f32,c), int, False                                    |                                                     |            |
+| aten.where.self                                           | T(2,bool,c), T(2,f32,c), T(2,f32,c)                       |                                                     |            |
+| aten.where.self                                           | T(4,bool,c), T(0,bf16,c), T(0,bf16,c)                     |                                                     |            |
+| aten.sort.default                                         | T(2,f32,c)                                                |                                                     |            |
+| aten.lt.Tensor                                            | T(2,f32,c), T(2,f32,c)                                    |                                                     |            |
+| aten.sin.default                                          | T(3,f32,c)                                                |                                                     |            |
+| aten.index.Tensor                                         | T(2,bool,c), \[T(4,int64,c), T(4,int64,c)]                |                                                     |            |
+| aten.any.default                                          | T(1,bool,c)                                               |                                                     |            |
+| aten.le.Scalar                                            | T(2,f32,c), float                                         |                                                     |            |
+| aten.ones.default                                         | \[int]                                                    | dtype=torch.int64, device=cuda:0, pin\_memory=False |            |
+| aten.neg.default                                          | T(4,bf16,c)                                               |                                                     |            |
+| aten.sub.Tensor                                           | T(2,int64,c), int                                         |                                                     |            |
+| aten.scalar\_tensor.default                               | float                                                     | dtype=torch.bfloat16, device=cuda:0                 |            |
+| aten.scalar\_tensor.default                               | float                                                     | dtype=torch.bfloat16, layout=layout, device=cuda:0  |            |
+| aten.addmm.default                                        | T(1,bf16,c), T(2,bf16,c), T(2,bf16,c)                     |                                                     |            |
+| aten.rsqrt.default                                        | T(3,f32,c)                                                |                                                     |            |
+| aten.rsub.Scalar                                          | T(1,int64,c), int                                         |                                                     |            |
+| aten.full.default                                         | \[int], False                                             | dtype=torch.bool, device=cuda:0, pin\_memory=False  |            |
+| aten.full.default                                         | \[int], True                                              | dtype=torch.bool, device=cuda:0, pin\_memory=False  |            |
+| aten.le.Tensor                                            | T(4,int64,c), T(4,int64,c)                                |                                                     |            |
+| aten.mean.dim                                             | T(3,f32,c), \[int], True                                  |                                                     |            |
+| aten.\_scaled\_dot\_product\_efficient\_attention.default | T(4,bf16,c), T(4,bf16,c), T(4,bf16,c), T(4,bf16,c), False | scale=float                                         |            |
 
 
-source:
+
+old profile:
 
 ```
 Profile of Qwen/Qwen2.5-0.5B-Instruct  (CUDA time)

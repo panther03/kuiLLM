@@ -62,6 +62,24 @@ _KuiperMode_class = None
 profile_data = set()
 
 
+def _tensors(x):
+    import torch
+    if isinstance(x, torch.Tensor):
+        yield x
+    elif isinstance(x, (list, tuple)):
+        for e in x:
+            yield from _tensors(e)
+
+
+def _launches_gpu_kernel(func, args, out):
+    """False for pure view/metadata ops (output aliases an input, no kernel)."""
+    if func._schema.is_mutable:
+        return True
+    ins = {t.untyped_storage().data_ptr() for t in _tensors(args)}
+    outs = list(_tensors(out))
+    return not (outs and all(t.untyped_storage().data_ptr() in ins for t in outs))
+
+
 def _KuiperMode_cls():
     global _KuiperMode_class
     if _KuiperMode_class is not None:
@@ -91,22 +109,21 @@ def _KuiperMode_cls():
                 return type(a).__name__
 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-            global profile_data
             kwargs = kwargs or {}
 
-            if ENABLE_PRINT_PROFILING:
+            if self.dummy_print_mode:
+                out = func(*args, **kwargs)
+            else:
+                out = _jit_try(func, args, kwargs)
+                if out is None:
+                    out = func(*args, **kwargs)
+
+            if ENABLE_PRINT_PROFILING and _launches_gpu_kernel(func, args, out):
                 profile_data.add((func,
                                   tuple([KuiperMode.arg_data(a) for a in args]),
                                   tuple(kwargs.keys()),
                                   tuple([KuiperMode.arg_data(v) for v in kwargs.values()])))
-
-            if self.dummy_print_mode:
-                return func(*args, **kwargs)
-
-            out = _jit_try(func, args, kwargs)
-            if out is not None:
-                return out
-            return func(*args, **kwargs)
+            return out
 
     _KuiperMode_class = KuiperMode
     return _KuiperMode_class
