@@ -1,17 +1,17 @@
-"""JIT implementations for the fixed Kuiper kernel families.
-
-Each impl wraps one verified ``Klas.<Family>`` module (extracted on demand and
-compiled with a static pybind wrapper in ``csrc/``) and exposes ``supported()``
-+ ``run()``. ``supported()`` returns a small spec (or ``None``); ``run()`` calls
-the compiled kernel. The eligibility checks mirror the families' C signatures.
+"""
+Python bindings for KuiOps kernels. These classes:
+ a) check if a given aten op is supported by an instantiation of a KuiOps template
+ b) extract the relevant kernel from the template, compile it, and call it.
 """
 from . import compile as _compile
 
+import torch
+aten = torch.ops.aten
+
 _MAX_NUMEL = 2097152 * 1024
 
-
 def _scalar(x):
-    import torch
+    
     if isinstance(x, (int, float)):
         return float(x)
     if isinstance(x, torch.Tensor) and x.dim() == 0 and x.dtype == torch.float64:
@@ -26,9 +26,11 @@ def _norm_dim(d, rank):
 class _Family:
     module = None
     wrapper = None
+    variant = ()
+    deps = []
 
     def _mod(self):
-        return _compile.build_family(self.module, self.wrapper)
+        return _compile.build_family(self.module, self.wrapper, self.variant, self.deps)
 
 
 # ---------------------------------------------------------------------------
@@ -40,9 +42,7 @@ class ElementwiseImpl(_Family):
     wrapper = "elementwise.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
-        aten = torch.ops.aten
-
+    
         def unary(X, dt):
             return X.is_cuda and X.dtype == dt and 0 < X.numel() <= _MAX_NUMEL
 
@@ -113,7 +113,6 @@ class ReduceImpl(_Family):
     wrapper = "reduce.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
         if not (len(args) >= 2):
             return None
         X, dim = args[0], args[1]
@@ -154,8 +153,8 @@ class CatCastImpl(_Family):
     wrapper = "catcast.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
-        aten = torch.ops.aten
+        
+        
         if func is aten.cat.default and len(args) >= 1:
             tensors = list(args[0])
             dim = args[1] if len(args) > 1 else kwargs.get("dim", 0)
@@ -203,7 +202,7 @@ class ArangeImpl(_Family):
     wrapper = "arange.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
+        
         if len(args) != 1:
             return None
         n = args[0]
@@ -227,7 +226,7 @@ class GatherImpl(_Family):
     wrapper = "gather.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
+        
         if len(args) != 3:
             return None
         src, dim, idx = args
@@ -259,7 +258,7 @@ class BmmImpl(_Family):
     wrapper = "batched.cu"
 
     def supported(self, func, args, kwargs):
-        import torch
+        
         if len(args) != 2:
             return None
         A, B = args

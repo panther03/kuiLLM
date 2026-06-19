@@ -11,28 +11,12 @@ from pathlib import Path
 
 from . import config as C
 
-_seeded = False
+_built = False
 
 
 def _log(*a):
     if C.JIT_VERBOSE:
         print("[kuiper-jit]", *a, flush=True)
-
-
-def _seed_checked_symlinks():
-    """Make every verified dependency .checked visible in the JIT cache_dir."""
-    global _seeded
-    if _seeded:
-        return
-    C.ensure_dirs()
-    for src in C.KUIPER_OBJ.glob("*.checked"):
-        dst = C.JIT_OBJ / src.name
-        if not dst.exists():
-            try:
-                dst.symlink_to(src)
-            except FileExistsError:
-                pass
-    _seeded = True
 
 
 def _run(cmd, what):
@@ -45,6 +29,13 @@ def _run(cmd, what):
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     return proc
 
+def _ensure_built():
+    """run repository makefile and ensure deps are up to date"""
+    global _built
+    if _built:
+        return
+    _run(["make", "-C", str(C._REPO_ROOT), "verify-kuiops"], "repo build")
+    _built = True
 
 def extract_cu(module: str, fst_text: str):
     """Verify+extract ``module`` (whose source is ``fst_text``) to a .cu/.h pair.
@@ -52,7 +43,7 @@ def extract_cu(module: str, fst_text: str):
     Returns ``(cu_path, h_path, header_name)``. Idempotent: if the .cu already
     exists it is returned without recompiling.
     """
-    _seed_checked_symlinks()
+    _ensure_built()
 
     underscored = module.replace(".", "_")        # e.g. Klas_JitGemm...
     cu_path = C.JIT_CU / f"{underscored}.cu"
@@ -98,59 +89,6 @@ def extract_cu(module: str, fst_text: str):
     _fixup(pre_cu, cu_path)
     _fixup(pre_h, h_path)
     return cu_path, h_path, h_path.name
-
-
-def extract_module(module: str):
-    """Extract an EXISTING verified repo module ``Klas.<...>`` directly to .cu/.h.
-
-    Unlike ``extract_cu`` (which writes a generated one-line instantiation), this
-    reuses the module's real source in ``$KUIPER_SRC/klas`` and its verified
-    dependencies' ``.checked`` files. No new proof obligation is introduced.
-    Returns ``(cu_path, h_path, header_name)``; idempotent.
-    """
-    _seed_checked_symlinks()
-
-    underscored = module.replace(".", "_")
-    cu_path = C.JIT_CU / f"{underscored}.cu"
-    h_path = C.JIT_CU / f"{underscored}.h"
-    if cu_path.exists() and h_path.exists():
-        return cu_path, h_path, h_path.name
-
-    src = C.KUIPER_SRC / "klas" / f"{module}.fst"
-    if not src.exists():
-        raise RuntimeError(f"kuiper-jit: source module not found: {src}")
-
-    checked = C.JIT_OBJ / f"{module}.fst.checked"
-    # Drop the seeded symlink so we write a fresh local .checked (writing through
-    # the symlink would dirty the repo's obj).
-    if checked.is_symlink() or checked.exists():
-        checked.unlink()
-    krml = C.JIT_OBJ / f"{underscored}.krml"
-
-    already = f"*,-{module}"
-    admit = [] if C.JIT_FULL_VERIFY else ["--admit_smt_queries", "true"]
-
-    _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
-          "--already_cached", already,
-          "-c", str(src), "-o", str(checked)],
-         "check")
-
-    _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
-          "--already_cached", already,
-          "--codegen", "krml", "--load_cmxs", str(C.PLUGIN),
-          "--extract", f"-*,+{module},+Kuiper",
-          "-o", str(krml), str(src)],
-         "extract")
-
-    _run([str(C.KRML_EXE), *C.KRML_FLAGS,
-          "-bundle", f"{module}=*",
-          "-tmpdir", str(C.JIT_PRE), str(krml)],
-         "karamel")
-
-    _fixup(C.JIT_PRE / f"{underscored}.cu", cu_path)
-    _fixup(C.JIT_PRE / f"{underscored}.h", h_path)
-    return cu_path, h_path, h_path.name
-
 
 def _fixup(src: Path, dst: Path):
     sed = subprocess.run(["sed", "-f", str(C.FIXUP_SED), str(src)],

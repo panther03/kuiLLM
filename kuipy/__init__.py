@@ -2,45 +2,32 @@ import os
 import sys
 from pathlib import Path
 
-ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
+from . import config as C
 
-# If set, JIT extraction/compilation errors propagate instead of falling back to
-# stock PyTorch. Off by default so an unsupported shape never breaks a model.
-JIT_STRICT = os.environ.get("KUIPER_JIT_STRICT", "0") == "1"
-
-try:
-    KUIPER_ROOT = Path(os.environ["KUIPER_HOME"])
-except KeyError:
-    KUIPER_ROOT = None
-    print("$KUIPER_HOME must be defined and point to the root of the kuiper repo!")
+def is_available() -> bool:
+    """True if the Kuiper JIT toolchain (F* + the kuiper repo) is reachable."""
+    if C.KUIPER_ROOT is None:
+        return False
+    return (C.KUIPER_ROOT / "inst" / "bin" / "fstar.exe").exists()
 
 _jit_dispatch = None
 _jit_warned = False
 
-
 def _jit_try(func, args, kwargs):
-    """Attempt JIT Kuiper dispatch. Returns a Tensor or None (miss/disabled)."""
+    """Attempt JIT Kuiper dispatch. Returns None on failure."""
     global _jit_dispatch, _jit_warned
     if _jit_dispatch is None:
-        from kuiper_ext.jit import try_dispatch as _jit_dispatch  # noqa: F811
+        from .registry import try_dispatch as _jit_dispatch  # noqa: F811
     try:
         return _jit_dispatch(func, args, kwargs)
     except Exception as e:
-        if JIT_STRICT:
+        if C.JIT_STRICT:
             raise
         if not _jit_warned:
             _jit_warned = True
-            print(f"[kuiper_ext] JIT dispatch failed, falling back to PyTorch: {e}",
+            print(f"[kuipy] JIT dispatch failed, falling back to PyTorch: {e}",
                   file=sys.stderr)
         return None
-
-
-def is_available() -> bool:
-    """True if the Kuiper JIT toolchain (F* + the kuiper repo) is reachable."""
-    if KUIPER_ROOT is None:
-        return False
-    return (KUIPER_ROOT / "inst" / "bin" / "fstar.exe").exists()
-
 
 # Lazy attribute proxy so `kuiper_ext.KuiperMode` builds the class on first use
 # (it needs torch, which we don't want to import at module import time).
@@ -129,7 +116,7 @@ def _KuiperMode_cls():
                 if out is None:
                     out = func(*args, **kwargs)
 
-            if ENABLE_PRINT_PROFILING and _launches_gpu_kernel(func, args, out):
+            if C.ENABLE_PRINT_PROFILING and _launches_gpu_kernel(func, args, out):
                 profile_data.add((func,
                                   tuple([KuiperMode.arg_data(a) for a in args]),
                                   tuple(kwargs.keys()),

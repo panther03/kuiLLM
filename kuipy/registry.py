@@ -5,7 +5,7 @@ and (on a hit) a memoised compiled-kernel call. On any miss it returns ``None`` 
 the caller falls through to stock PyTorch.
 """
 from .gemm import GemmImpl
-from .families import (ElementwiseImpl, ReduceImpl, CatCastImpl,
+from .kuiops import (ElementwiseImpl, ReduceImpl, CatCastImpl,
                        ArangeImpl, GatherImpl, BmmImpl)
 
 _GEMM = GemmImpl()

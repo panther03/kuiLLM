@@ -7,15 +7,22 @@ never regenerates the repo's ``.depend`` and never edits files under ``src/``.
 import os
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent          
+_REPO_ROOT = _HERE.parent 
+
 # --------------------------------------------------------------------------
 # Roots
 # --------------------------------------------------------------------------
-KUIPER_ROOT = Path(os.environ["KUIPER_HOME"]).resolve()
+KUIPER_ROOT = Path(os.environ.get("KUIPER_HOME", os.path.join(_REPO_ROOT, "kuiper"))).resolve()
 KUIPER_SRC = KUIPER_ROOT / "src"
-KUIPER_OBJ = KUIPER_ROOT / "obj"          # holds the verified dependency .checked
 KUIPER_INCS = KUIPER_ROOT / "include"
 KUIPER_DIST = KUIPER_ROOT / "dist"
 KUIPER_SCRIPTS = KUIPER_ROOT / "scripts"
+
+# Holds all the .checked dependencies. It would be nice to have separate cache dirs, 
+# but FStar only supports one cache directory so it's really easiest to just have everything
+# write to the cache of the original repo.
+OBJ_CACHE_DIR = KUIPER_ROOT / "obj"          # holds the verified dependency .checked
 
 FSTAR_EXE = KUIPER_ROOT / "inst" / "bin" / "fstar.exe"
 KRML_EXE = KUIPER_ROOT / "inst" / "bin" / "krml"
@@ -27,21 +34,26 @@ FIXUP_SED = KUIPER_SCRIPTS / "fixup.sed"
 # --------------------------------------------------------------------------
 # JIT working tree (kept entirely inside the python package, repo stays clean)
 # --------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent.parent          # kuiper_ext/
-JIT_CACHE = Path(os.environ.get("KUIPER_JIT_CACHE", _HERE / ".jitcache")).resolve()
+JIT_CACHE = Path(os.environ.get("KUIPY_JIT_CACHE", os.path.join(_REPO_ROOT, ".jitcache"))).resolve()
 JIT_SRC = JIT_CACHE / "src"        # generated Klas_<Mod>.fst
-JIT_OBJ = JIT_CACHE / "obj"        # symlinks to KUIPER_OBJ/*.checked + our .checked/.krml
-JIT_PRE = JIT_OBJ / "pre"          # karamel raw output
+JIT_PRE = JIT_CACHE / "pre"        # our object files + raw karamel output
 JIT_CU = JIT_CACHE / "cu"          # fixed-up .cu/.h
 JIT_BUILD = JIT_CACHE / "build"    # torch cpp_extension build dirs (.so)
 
 # --------------------------------------------------------------------------
 # Behaviour
 # --------------------------------------------------------------------------
+
 # Default: admit SMT queries (fast cold compile). Set KUIPER_JIT_VERIFY=1 to run
 # full F* verification of each instantiation instead.
 JIT_FULL_VERIFY = os.environ.get("KUIPER_JIT_VERIFY", "0") == "1"
 JIT_VERBOSE = os.environ.get("KUIPER_JIT_VERBOSE", "0") == "1"
+
+ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
+
+# If set, JIT extraction/compilation errors propagate instead of falling back to
+# stock PyTorch. Off by default so an unsupported shape never breaks a model.
+JIT_STRICT = os.environ.get("KUIPY_JIT_STRICT", "0") == "1"
 
 # --------------------------------------------------------------------------
 # F* flags (mirrors `make echo-fstar`)
@@ -50,8 +62,8 @@ FSTAR_FLAGS = [
     "--silent",
     "--include", str(KUIPER_SRC),
     "--include", str(JIT_SRC),
-    "--cache_dir", str(JIT_OBJ),
-    "--odir", str(JIT_OBJ),
+    "--cache_dir", str(OBJ_CACHE_DIR),
+    "--odir", str(JIT_PRE),
     "--warn_error", "-291",
     "--warn_error", "-249-321",
     "--warn_error", "@242@250",
@@ -98,5 +110,6 @@ def nvcc_arch_flag():
 
 
 def ensure_dirs():
-    for d in (JIT_SRC, JIT_OBJ, JIT_PRE, JIT_CU, JIT_BUILD):
+    for d in (JIT_SRC, JIT_PRE, JIT_CU, JIT_BUILD):
         d.mkdir(parents=True, exist_ok=True)
+

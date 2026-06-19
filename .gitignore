@@ -53,3 +53,6 @@ module_graph.png
 scratch/
 notes.local.md
 kernel_call.log
+
+
+obj/

@@ -52,7 +52,8 @@ def _ensure_ninja_on_path():
         pass
 
 
-def build_kernel(module: str, fst_template: str, fst_ctx: dict,
+def build_kernel(module: str, 
+                 fst_template: str, fst_ctx: dict,
                  wrapper_template: str, wrapper_ctx: dict):
     """Extract + compile a kernel, returning the loaded torch extension module.
 
@@ -84,39 +85,6 @@ def build_kernel(module: str, fst_template: str, fst_ctx: dict,
         wrapper_path.write_text(_env.get_template(wrapper_template).render(**wctx))
 
     # 3) compile + load
-    _ensure_ninja_on_path()
-    from torch.utils.cpp_extension import load
-    build_dir = C.JIT_BUILD / ext_name
-    build_dir.mkdir(parents=True, exist_ok=True)
-    mod = load(
-        name=ext_name,
-        sources=[str(wrapper_path), str(cu_path)],
-        extra_include_paths=[str(C.KUIPER_INCS), str(C.KUIPER_DIST), str(C.JIT_CU)],
-        extra_cflags=["-O3", "-std=c++17"],
-        extra_cuda_cflags=_nvcc_flags(),
-        build_directory=str(build_dir),
-        verbose=C.JIT_VERBOSE,
-    )
-    _loaded[ext_name] = mod
-    return mod
-
-
-def build_family(module: str, wrapper_filename: str):
-    """Extract an existing verified ``Klas.<Family>`` module and compile it with a
-    static (checked-in) pybind wrapper ``.cu``. Returns the loaded torch module.
-
-    Used for the fixed kernel families (elementwise, reduce, cat/cast, arange,
-    gather, batched GEMM) whose exported functions are already concrete.
-    """
-    ext_name = module.replace(".", "_")
-    mod = _loaded.get(ext_name)
-    if mod is not None:
-        return mod
-
-    C.ensure_dirs()
-    cu_path, _h, _hn = toolchain.extract_module(module)
-    wrapper_path = _WRAPPERS / wrapper_filename
-
     _ensure_ninja_on_path()
     from torch.utils.cpp_extension import load
     build_dir = C.JIT_BUILD / ext_name

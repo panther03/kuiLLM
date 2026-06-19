@@ -8,7 +8,7 @@ from typing import List, Sequence
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-import kuiper_ext
+import kuipy
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -95,9 +95,9 @@ def generate_batch(
         padding=True,           # left-pad to the longest row
     ).to(DEVICE)
 
-    if kuiper_ext.is_available() and ((use_kuiper and DEVICE == "cuda") or (kuiper_ext.ENABLE_PRINT_PROFILING)):
-        kernel_ctx = kuiper_ext.KuiperMode()
-        if kuiper_ext.ENABLE_PRINT_PROFILING:
+    if kuipy.is_available() and ((use_kuiper and DEVICE == "cuda") or (kuipy.ENABLE_PRINT_PROFILING)):
+        kernel_ctx = kuipy.KuiperMode()
+        if kuipy.ENABLE_PRINT_PROFILING:
             kernel_ctx.dummy_print_mode = True
             kernel_tag = "torch"
         else:
@@ -320,9 +320,9 @@ def _main() -> int:
     if show_n < len(responses):
         print(f"\n… ({len(responses) - show_n} more, pass --print to see all)")
 
-    if kuiper_ext.is_available() and kuiper_ext.ENABLE_PRINT_PROFILING:
+    if kuipy.is_available() and kuipy.ENABLE_PRINT_PROFILING:
         with open("kernel_call.log", "w") as f:
-            kuiper_ext.print_profile_data(f)
+            kuipy.print_profile_data(f)
 
     return 0
 

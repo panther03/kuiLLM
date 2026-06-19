@@ -4,7 +4,7 @@ These extract, compile and run on-demand Kuiper kernels, so the FIRST run of a
 new instantiation is slow (F* + nvcc, tens of seconds). Subsequent runs hit the
 in-process / on-disk cache and are fast.
 
-Run with:  cd /home/julien/work/kuiLLM && KUIPER_JIT_STRICT=1 .venv/bin/python -m pytest tests/test_jit_gemm.py -s
+Run with:  cd /home/julien/work/kuiLLM && KUIPY_JIT_STRICT=1 .venv/bin/python -m pytest tests/test_jit_gemm.py -s
 """
 import sys
 import time
@@ -13,8 +13,8 @@ import torch
 
 import pytest
 
-from kuiper_ext.jit import gemm
-from kuiper_ext.jit import compile as jit_compile
+from kuipy import gemm
+from kuipy import compile as jit_compile
 
 _DEVICE = "cuda" if torch.cuda.is_available() else None
 aten = torch.ops.aten
@@ -95,11 +95,11 @@ def test_cache_is_hot_on_second_call():
 
 def test_kuiper_mode_integration():
     _need_cuda()
-    import kuiper_ext
+    import kuipy
     A = torch.randn(128, 64, device="cuda")
     B = torch.randn(64, 128, device="cuda")
     bias = torch.randn(128, device="cuda")
-    with kuiper_ext.KuiperMode():
+    with kuipy.KuiperMode():
         o_mm = torch.mm(A, B)
         o_am = torch.addmm(bias, A, B)
     assert torch.allclose(o_mm, A @ B, atol=1e-3, rtol=1e-3)

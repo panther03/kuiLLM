@@ -6,7 +6,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 
-namespace kuiper_jit {
+namespace kuiops {
 
 inline void sync_current_stream() {
     auto stream = c10::cuda::getCurrentCUDAStream();
@@ -17,4 +17,4 @@ inline void sync_current_stream() {
     AT_CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
 }
 
-}  // namespace kuiper_jit
+} // namespace kuiops

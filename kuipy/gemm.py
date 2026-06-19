@@ -8,7 +8,7 @@ Tile selection is a deterministic heuristic: the largest valid block/warp tiling
 that divides (M, N, K) and satisfies the same shared-memory / copy-fullness /
 thread-count constraints encoded in the kuiper repo's ``*.fst.sh`` generators.
 """
-from . import compile as _compile
+from .jit import compile as _compile
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
