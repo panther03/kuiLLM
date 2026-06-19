@@ -100,6 +100,58 @@ def extract_cu(module: str, fst_text: str):
     return cu_path, h_path, h_path.name
 
 
+def extract_module(module: str):
+    """Extract an EXISTING verified repo module ``Klas.<...>`` directly to .cu/.h.
+
+    Unlike ``extract_cu`` (which writes a generated one-line instantiation), this
+    reuses the module's real source in ``$KUIPER_SRC/klas`` and its verified
+    dependencies' ``.checked`` files. No new proof obligation is introduced.
+    Returns ``(cu_path, h_path, header_name)``; idempotent.
+    """
+    _seed_checked_symlinks()
+
+    underscored = module.replace(".", "_")
+    cu_path = C.JIT_CU / f"{underscored}.cu"
+    h_path = C.JIT_CU / f"{underscored}.h"
+    if cu_path.exists() and h_path.exists():
+        return cu_path, h_path, h_path.name
+
+    src = C.KUIPER_SRC / "klas" / f"{module}.fst"
+    if not src.exists():
+        raise RuntimeError(f"kuiper-jit: source module not found: {src}")
+
+    checked = C.JIT_OBJ / f"{module}.fst.checked"
+    # Drop the seeded symlink so we write a fresh local .checked (writing through
+    # the symlink would dirty the repo's obj).
+    if checked.is_symlink() or checked.exists():
+        checked.unlink()
+    krml = C.JIT_OBJ / f"{underscored}.krml"
+
+    already = f"*,-{module}"
+    admit = [] if C.JIT_FULL_VERIFY else ["--admit_smt_queries", "true"]
+
+    _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
+          "--already_cached", already,
+          "-c", str(src), "-o", str(checked)],
+         "check")
+
+    _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
+          "--already_cached", already,
+          "--codegen", "krml", "--load_cmxs", str(C.PLUGIN),
+          "--extract", f"-*,+{module},+Kuiper",
+          "-o", str(krml), str(src)],
+         "extract")
+
+    _run([str(C.KRML_EXE), *C.KRML_FLAGS,
+          "-bundle", f"{module}=*",
+          "-tmpdir", str(C.JIT_PRE), str(krml)],
+         "karamel")
+
+    _fixup(C.JIT_PRE / f"{underscored}.cu", cu_path)
+    _fixup(C.JIT_PRE / f"{underscored}.h", h_path)
+    return cu_path, h_path, h_path.name
+
+
 def _fixup(src: Path, dst: Path):
     sed = subprocess.run(["sed", "-f", str(C.FIXUP_SED), str(src)],
                          capture_output=True, text=True, check=True)

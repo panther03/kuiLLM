@@ -96,8 +96,6 @@ def test_cache_is_hot_on_second_call():
 def test_kuiper_mode_integration():
     _need_cuda()
     import kuiper_ext
-    import os
-    os.environ["KUIPER_JIT"] = "1"
     A = torch.randn(128, 64, device="cuda")
     B = torch.randn(64, 128, device="cuda")
     bias = torch.randn(128, device="cuda")
