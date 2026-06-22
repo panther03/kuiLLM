@@ -1,0 +1,13 @@
+addmm
+bmm
+cat
+elementwise
+gather
+index
+isin
+mm
+reduce
+scatter
+sdpa
+softmax
+topk

@@ -20,7 +20,7 @@ def _log(*a):
 
 
 def _run(cmd, what):
-    _log(what, " ".join(str(c) for c in cmd))
+    _log(f"({what})", " ".join(str(c) for c in cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -56,10 +56,11 @@ def extract_cu(module: str, fst_text: str):
     # No .fsti: the single `let` must be exported (it is the host entry point),
     # and an interface would require its own .checked to exist first.
 
-    checked = C.JIT_OBJ / f"{module}.fst.checked"
-    krml = C.JIT_OBJ / f"{underscored}.krml"
+    checked = C.OBJ_CACHE_DIR / f"{module}.fst.checked"
+    krml = C.JIT_PRE / f"{underscored}.krml"
 
-    already = f"*,-{module}"
+    # TODO: shouldnt have to reverify kuiops stuff, but the cache is not working right now
+    already = f"*,-{module},-Kuiops" 
     admit = [] if C.JIT_FULL_VERIFY else ["--admit_smt_queries", "true"]
 
     # 1) check (produces <module>.fst.checked)

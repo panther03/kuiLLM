@@ -1,0 +1,3 @@
+[submodule "kuiper"]
+	path = kuiper
+	url = https://github.com/FStarLang/kuiper

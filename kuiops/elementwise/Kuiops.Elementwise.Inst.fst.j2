@@ -1,0 +1,21 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiops/elementwise/Kuiops.Elementwise.Inst.fst.j2
+
+open Kuiper
+open Kuiper.Tensor.Layout.Alg { l1_forward }
+open Kuiper.Float.Casts
+open Kuiper.Kernel.Map
+open Kuiops.Elementwise
+
+{% if arity == 1 %}
+let {{ name }} (lena: szp {lena <= max_blocks * max_threads}) = 
+    map_gpu #({{ et }}) ({{ fun }}) lena #(l1_forward lena)
+{% elif arity == 2 %}
+let {{ name }} (lenab: szp {lenab <= max_blocks * max_threads}) = 
+    map_gpu2 #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #_ #(l1_forward lenab) #_
+{% else %}
+UNSUPPORTED ELEMENTWISE ARITY
+{% endif %}

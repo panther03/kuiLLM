@@ -14,8 +14,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from . import config as C
 from . import toolchain
 
-_TEMPLATES = Path(__file__).resolve().parent / "templates"
-_WRAPPERS = Path(__file__).resolve().parent / "csrc"
+_TEMPLATES = C._REPO_ROOT / "kuiops"
 _env = Environment(loader=FileSystemLoader(str(_TEMPLATES)), undefined=StrictUndefined)
 
 # In-process cache: ext_name -> loaded module.
@@ -25,13 +24,15 @@ _loaded = {}
 def _nvcc_flags():
     flags = [
         "-O3", "--use_fast_math",
-        "-Xcompiler", "-fPIC",
-        "--expt-relaxed-constexpr",
-        "-std=c++17",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+         "-Xcompiler", "-fPIC",
+         "--expt-relaxed-constexpr",
+         "-std=c++17",
+# wtf copilot ?
+# I guess these are to prevent accidental performance hits from casting stuff?
+         "-U__CUDA_NO_HALF_OPERATORS__",
+         "-U__CUDA_NO_HALF_CONVERSIONS__",
+         "-U__CUDA_NO_HALF2_OPERATORS__",
+         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
     ]
     arch = C.nvcc_arch_flag()
     if arch:
@@ -92,7 +93,7 @@ def build_kernel(module: str,
     mod = load(
         name=ext_name,
         sources=[str(wrapper_path), str(cu_path)],
-        extra_include_paths=[str(C.KUIPER_INCS), str(C.KUIPER_DIST), str(C.JIT_CU)],
+        extra_include_paths=[str(C.KUIPER_INCS), str(C.KUIPER_DIST), str(C.JIT_CU), str(C._REPO_ROOT / "include")],
         extra_cflags=["-O3", "-std=c++17"],
         extra_cuda_cflags=_nvcc_flags(),
         build_directory=str(build_dir),

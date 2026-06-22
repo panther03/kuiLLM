@@ -1,3 +1,5 @@
+.PHONY: infer infer-kuiper infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys test verify-kuiops
+
 infer: infer-kuiper
 infer-kuiper:
 	python3 infer.py
@@ -19,3 +21,6 @@ profile-no-kuiper-nsys:
 
 test:
 	python3 -m pytest tests/
+
+verify-kuiops:
+	+$(MAKE) -f verify.mk verify-kuiops

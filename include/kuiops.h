@@ -17,4 +17,6 @@ inline void sync_current_stream() {
     AT_CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
 }
 
+inline torch::Tensor clone_in(const torch::Tensor& X) { return X.contiguous().clone(); }
+
 } // namespace kuiops

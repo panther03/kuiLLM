@@ -13,7 +13,7 @@ _REPO_ROOT = _HERE.parent
 # --------------------------------------------------------------------------
 # Roots
 # --------------------------------------------------------------------------
-KUIPER_ROOT = Path(os.environ.get("KUIPER_HOME", os.path.join(_REPO_ROOT, "kuiper"))).resolve()
+KUIPER_ROOT = Path(os.path.join(_REPO_ROOT, "kuiper")).resolve()
 KUIPER_SRC = KUIPER_ROOT / "src"
 KUIPER_INCS = KUIPER_ROOT / "include"
 KUIPER_DIST = KUIPER_ROOT / "dist"
@@ -53,7 +53,7 @@ ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
 
 # If set, JIT extraction/compilation errors propagate instead of falling back to
 # stock PyTorch. Off by default so an unsupported shape never breaks a model.
-JIT_STRICT = os.environ.get("KUIPY_JIT_STRICT", "0") == "1"
+JIT_STRICT = os.environ.get("KUIPY_JIT_STRICT", "1") == "1"
 
 # --------------------------------------------------------------------------
 # F* flags (mirrors `make echo-fstar`)
@@ -62,8 +62,9 @@ FSTAR_FLAGS = [
     "--silent",
     "--include", str(KUIPER_SRC),
     "--include", str(JIT_SRC),
+    "--include", str(_REPO_ROOT / "kuiops"),
     "--cache_dir", str(OBJ_CACHE_DIR),
-    "--odir", str(JIT_PRE),
+    "--odir", str(OBJ_CACHE_DIR),
     "--warn_error", "-291",
     "--warn_error", "-249-321",
     "--warn_error", "@242@250",

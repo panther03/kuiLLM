@@ -1,0 +1,33 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{module}}.h"
+
+torch::Tensor op_{{name}}
+{% if arity == 1 %}
+    (torch::Tensor A)
+{% elif arity == 2 %}
+    (torch::Tensor A, torch::Tensor B)
+{% else %}
+#error "UNSUPPORTED ELEMENTWISE ARITY"
+{% endif %}
+{
+    auto out = kuiops::clone_in(A);
+    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+
+{% if arity == 1 %}
+    {{module}}_{{name}}(out.numel(), reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));
+{% elif arity == 2 %}
+    {{module}}_{{name}}(out.numel(), 
+        reinterpret_cast<{{cpp_et}}*>(out.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(B.data_ptr()));
+{% else %}
+#error "UNSUPPORTED ELEMENTWISE ARITY"
+{% endif %}
+    return out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{name}}, "op_{{name}}");
+}
+    

@@ -3,6 +3,7 @@ Python bindings for KuiOps kernels. These classes:
  a) check if a given aten op is supported by an instantiation of a KuiOps template
  b) extract the relevant kernel from the template, compile it, and call it.
 """
+import sys
 from . import compile as _compile
 
 import torch
@@ -12,8 +13,8 @@ _MAX_NUMEL = 2097152 * 1024
 
 def _scalar(x):
     
-    if isinstance(x, (int, float)):
-        return float(x)
+    if isinstance(x, (float, int)):
+        return x
     if isinstance(x, torch.Tensor) and x.dim() == 0 and x.dtype == torch.float64:
         return float(x.item())
     return None
@@ -24,86 +25,119 @@ def _norm_dim(d, rank):
 
 
 class _Family:
-    module = None
-    wrapper = None
-    variant = ()
-    deps = []
+    fst_template = None
+    wrapper_template = None
 
-    def _mod(self):
-        return _compile.build_family(self.module, self.wrapper, self.variant, self.deps)
+    def _mod(self, module, fst_ctx, wrapper_ctx):
+        return _compile.build_kernel(module,
+            self.fst_template, fst_ctx,
+            self.wrapper_template, wrapper_ctx)
 
+def torch_dtype_to_fstar(dt):
+    return {
+        torch.float32: "f32",
+        torch.float64: "f64",
+        torch.bfloat16: "bf16",
+    }[dt]
+
+def torch_dtype_to_ctype(dt):
+    return {
+        torch.float32: "float",
+        torch.float64: "double",
+        torch.bfloat16: "__nv_bfloat16",
+    }[dt]
 
 # ---------------------------------------------------------------------------
 # Elementwise (unary, binary, scalar-broadcast)
 # ---------------------------------------------------------------------------
 
 class ElementwiseImpl(_Family):
-    module = "Klas.Elementwise"
-    wrapper = "elementwise.cu"
+    fst_template = "elementwise/Kuiops.Elementwise.Inst.fst.j2"
+    wrapper_template = "elementwise/wrapper_elementwise.cu.j2"
+    
+    def _aten_fn_to_fstar_impl(self,fn):
+        impl = None
+        try: 
+            impl = { \
+                aten.silu.default:      "silu",     \
+                aten.neg.default:       "neg",      \
+                aten.rsqrt.default:     "rsqrt",    \
+                aten.cos.default:       "cos",      \
+                aten.sin.default:       "sin",      \
+                aten.pow.Tensor_Scalar: "pow", \
+                aten.add.Tensor:        "add", \
+                aten.add.Scalar:        "add", \
+                aten.mul.Tensor:        "mul", \
+                aten.mul.Scalar:        "mul",
+            }[fn]
+        except KeyError:
+            print(f"[kuipy] warning: elementwise function unsupported: {fn}",
+                  file=sys.stderr)
+        return impl
 
     def supported(self, func, args, kwargs):
     
-        def unary(X, dt):
-            return X.is_cuda and X.dtype == dt and 0 < X.numel() <= _MAX_NUMEL
+        def unary(X):
+            return X.is_cuda and (0 < X.numel() <= _MAX_NUMEL)
 
-        def binary(A, B, dt):
-            return (A.is_cuda and B.is_cuda and A.dtype == dt and B.dtype == dt
+        def binary(A, B):
+            return (A.is_cuda and B.is_cuda and A.dtype == B.dtype
                     and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
 
-        if func is aten.silu.default and len(args) == 1:
-            if unary(args[0], torch.bfloat16):
-                return ("silu_bf16", [args[0]])
-        elif func is aten.neg.default and len(args) == 1:
-            if unary(args[0], torch.bfloat16):
-                return ("neg_bf16", [args[0]])
-        elif func is aten.rsqrt.default and len(args) == 1:
-            if unary(args[0], torch.float32):
-                return ("rsqrt_f32", [args[0]])
-        elif func is aten.cos.default and len(args) == 1:
-            if unary(args[0], torch.float32):
-                return ("cos_f32", [args[0]])
-        elif func is aten.sin.default and len(args) == 1:
-            if unary(args[0], torch.float32):
-                return ("sin_f32", [args[0]])
-        elif func is aten.pow.Tensor_Scalar and len(args) == 2:
-            X, e = args
-            if e in (2, 2.0) and unary(X, torch.float32):
-                return ("square_f32", [X])
-        elif func is aten.add.Tensor and len(args) >= 2:
-            A, B = args[:2]
-            if kwargs.get("alpha", 1) == 1:
-                if isinstance(B, torch.Tensor) and binary(A, B, torch.bfloat16):
-                    return ("add_bf16", [A, B])
-                c = _scalar(B)
-                if c is not None and unary(A, torch.float32):
-                    return ("add_const_f32", [A, c])
-        elif func is aten.add.Scalar and len(args) >= 2:
-            A, B = args[:2]
-            c = _scalar(B)
-            if kwargs.get("alpha", 1) == 1 and c is not None and unary(A, torch.float32):
-                return ("add_const_f32", [A, c])
-        elif func is aten.mul.Tensor and len(args) >= 2:
-            A, B = args[:2]
-            if isinstance(B, torch.Tensor):
-                if binary(A, B, torch.bfloat16):
-                    return ("mul_bf16", [A, B])
-                if binary(A, B, torch.float32):
-                    return ("mul_f32", [A, B])
-            c = _scalar(B)
-            if c is not None and unary(A, torch.float32):
-                return ("mul_const_f32", [A, c])
-        elif func is aten.mul.Scalar and len(args) >= 2:
-            A, B = args[:2]
-            c = _scalar(B)
-            if c is not None and unary(A, torch.float32):
-                return ("mul_const_f32", [A, c])
+        impl = self._aten_fn_to_fstar_impl(func)
+        if impl is not None:
+            if len(args) == 1:
+                if unary(args[0]):
+                    return (impl, 1, [], [args[0]])
+            elif len(args) == 2:
+                constargs = []
+                if (func is aten.add.Tensor or 
+                    func is aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
+                    impl += "_alpha"
+                    constargs += [_scalar(kwargs["alpha"])]
+
+                if (func is aten.add.Scalar or 
+                    func is aten.mul.Scalar or 
+                    func is aten.pow.Tensor_Scalar) and unary(args[0]):
+                    constargs += [_scalar(args[1])]
+                    return (impl, 1, constargs, [args[0]])
+                elif binary(args[0], args[1]):
+                    return (impl, 2, constargs, [args[0], args[1]])
+                
         return None
 
     def run(self, spec, args, kwargs):
-        method, call = spec
-        return getattr(self._mod(), method)(*call)
+        method, arity, constargs, call = spec
+        dtype = torch_dtype_to_fstar(call[0].dtype)
+        args = [f"(i{i}: {dtype})" for i in range(arity)]
+        # TODO: integer constants
+        # TODO: we should have a map_gpu that does not cast the constant to `et`,
+        # but rather promotes the `et` tensor to the higher precision type and 
+        # does the math and writes the result in that type. 
+        # Or we can just do the math in that type and then cast it back,
+        # this does not require a new kernel, but it is less precise 
+        # and I don't think it reflects the behavior of PyTorch.
+        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast {c})" for c in constargs]
+
+        module = f"Kuiops.Elementwise{arity}.{method.title()}.{dtype.title()}"
+        name = f"elem{arity}_{method}_{dtype}_jit"
+        fst_ctx = dict(
+            module=module,
+            name=name,
+            fun=f"fun {' '.join(args)} -> {method} {' '.join(all_args)}",
+            arity=arity,
+            et=dtype
+        )
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"),
+            name=name,
+            arity=arity,
+            cpp_et=torch_dtype_to_ctype(call[0].dtype),
+        )
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
 
 
+'''
 # ---------------------------------------------------------------------------
 # Reduce (mean along last dim, f32, keepdim)
 # ---------------------------------------------------------------------------
@@ -275,3 +309,4 @@ class BmmImpl(_Family):
     def run(self, spec, args, kwargs):
         _, call = spec
         return self._mod().bmm_f32(*call)
+'''
