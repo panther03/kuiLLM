@@ -4,7 +4,8 @@ The hot path is intentionally tiny: a dict lookup, a cheap ``supported()`` check
 and (on a hit) a memoised compiled-kernel call. On any miss it returns ``None`` so
 the caller falls through to stock PyTorch.
 """
-from .kuiops import ElementwiseImpl, MmImpl
+from .kuiops import (ElementwiseImpl, MmImpl, BmmImpl, AddmmImpl, SoftmaxImpl,
+                     SdpaImpl)
 from . import config as C
 
 # _GEMM = GemmImpl()
@@ -23,6 +24,10 @@ def _build_registry(tune_params):
     aten = torch.ops.aten
     _ELEM = ElementwiseImpl(tune_params)
     _MM = MmImpl(tune_params)
+    _BMM = BmmImpl(tune_params)
+    _ADDMM = AddmmImpl(tune_params)
+    _SOFTMAX = SoftmaxImpl(tune_params)
+    _SDPA = SdpaImpl(tune_params)
 
     '''
     aten.mm.default: _GEMM,
@@ -55,6 +60,10 @@ def _build_registry(tune_params):
         aten.mul.Tensor: _ELEM,
         aten.mul.Scalar: _ELEM,
         aten.mm.default: _MM,
+        aten.bmm.default: _BMM,
+        aten.addmm.default: _ADDMM,
+        aten._softmax.default: _SOFTMAX,
+        aten._scaled_dot_product_efficient_attention.default: _SDPA,
     }
 
 def _tune_impls(tune_params):

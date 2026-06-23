@@ -1,0 +1,12 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiops/addmm/Kuiops.Addmm.Inst.fst.j2
+
+open Kuiper
+open Klas.GEMM.BlockTiling2D.Inst
+
+// gC := beta * gC + alpha * (gA @ gB); caller preloads gC with the bias.
+let {{ name }} (rows shared cols: szp) (alpha beta: {{ et }}) =
+  spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ et }} alpha beta #rows #shared #cols

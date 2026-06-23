@@ -1,0 +1,11 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiops/softmax/Kuiops.Softmax.Inst.fst.j2
+
+open Kuiper
+open Klas.RowSoftmax
+
+// Row-wise softmax over the last dim of a row-major [m, n] matrix, in place.
+let {{ name }} = inst_gpu #{{ et }}

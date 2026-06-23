@@ -1,0 +1,23 @@
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{module}}.h"
+
+// A is an [m, n] row-major contiguous copy; softmax runs over n, in place.
+torch::Tensor op_{{name}} (torch::Tensor A)
+{
+    const int64_t m = A.size(0), n = A.size(1);
+
+    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+
+    {{module}}_{{name}} (
+        (uint32_t)m, (uint32_t)n,
+        reinterpret_cast<{{cpp_et}}*>(A.data_ptr()));
+
+    return A;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{name}}, "op_{{name}}");
+}

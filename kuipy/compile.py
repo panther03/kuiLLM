@@ -27,6 +27,10 @@ def _nvcc_flags():
          "-Xcompiler", "-fPIC",
          "--expt-relaxed-constexpr",
          "-std=c++17",
+         # karamel emits compound-literal struct returns as KRML_CLITERAL(T){...}
+         # in C++-compat mode but this karamel build ships no definition for it;
+         # force-include a shim that defines the macro.
+         "-include", str(C._REPO_ROOT / "include" / "kuiops_compat.h"),
 # wtf copilot ?
 # I guess these are to prevent accidental performance hits from casting stuff?
          "-U__CUDA_NO_HALF_OPERATORS__",

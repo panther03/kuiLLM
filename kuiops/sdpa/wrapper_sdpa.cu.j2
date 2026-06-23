@@ -1,0 +1,36 @@
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include "kuiops.h"
+
+#include "{{module}}.h"
+
+// Efficient SDPA: Q(N,H,L,E) K(N,H,S,E) V(N,H,S,Ev) bias(N,H,L,S) -> out(N,H,L,Ev), lse(N,H,L).
+// The kernel allocates out/lse with cudaMalloc; from_blob takes ownership and frees them.
+static void _cuda_free(void *p) { cudaFree(p); }
+
+std::tuple<torch::Tensor, torch::Tensor> op_{{name}}
+    (torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor bias, double scale)
+{
+    const int64_t n = Q.size(0), h = Q.size(1), l = Q.size(2), e = Q.size(3);
+    const int64_t s = K.size(2), ev = V.size(3);
+    auto Qc = Q.contiguous(), Kc = K.contiguous(), Vc = V.contiguous(), Bc = bias.contiguous();
+
+    at::cuda::CUDAGuard g(Q.device()); kuiops::sync_current_stream();
+
+    auto r = {{module}}_{{name}} (
+        (uint32_t)n, (uint32_t)h, (uint32_t)l, (uint32_t)s, (uint32_t)e, (uint32_t)ev,
+        reinterpret_cast<{{cpp_et}}*>(Qc.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(Kc.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(Vc.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(Bc.data_ptr()),
+        static_cast<{{cpp_et}}>((float)scale));
+
+    auto out = torch::from_blob(r.fst, {n, h, l, ev}, _cuda_free, Q.options());
+    auto lse = torch::from_blob(r.snd, {n, h, l}, _cuda_free, Q.options());
+    return std::make_tuple(out, lse);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{name}}, "op_{{name}}");
+}
