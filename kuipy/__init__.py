@@ -13,7 +13,7 @@ def is_available() -> bool:
 _jit_dispatch = None
 _jit_warned = False
 
-def _jit_try(func, args, kwargs):
+def _jit_try(func, args, kwargs, VERY_STRICT=False):
     """Attempt JIT Kuiper dispatch. Returns None on failure."""
     global _jit_dispatch, _jit_warned
     if _jit_dispatch is None:
@@ -22,7 +22,7 @@ def _jit_try(func, args, kwargs):
     try:
         ret = _jit_dispatch(func, args, kwargs)
     except Exception as e:
-        if C.JIT_STRICT:
+        if C.JIT_STRICTNESS > 0:
             raise
         if not _jit_warned:
             _jit_warned = True
@@ -32,6 +32,9 @@ def _jit_try(func, args, kwargs):
     if ret is None:
         if C.JIT_VERBOSE:
             print(f"[kuipy] operator {func} did not match", file=sys.stderr)
+        if C.JIT_STRICTNESS > 1:
+            raise
+            
     return ret
 
 

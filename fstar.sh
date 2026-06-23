@@ -9,6 +9,7 @@ gcmd () {
 	echo "$KUIPER_INST/bin/fstar.exe \
     --silent \
     --include kuiops \
+    --already_cached *,-Kuiops \
     --cache_dir .kuipy_cache/checked \
     --odir  .kuipy_cache/checked \
     --warn_error  -291 \

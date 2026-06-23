@@ -40,9 +40,10 @@ JIT_FLUSH_CACHE = os.environ.get("KUIPY_JIT_FLUSH_CACHE", "0") == "1"
 
 ENABLE_PRINT_PROFILING = os.environ.get("KUIPY_PRINT_PROFILING", "0") == "1"
 
-# If set, JIT extraction/compilation errors propagate instead of falling back to
-# stock PyTorch. Off by default so an unsupported shape never breaks a model.
-JIT_STRICT = os.environ.get("KUIPY_JIT_STRICT", "1") == "1"
+# 0 = no errors from JIT, even when compilation fails
+# 1 = error when compilation fails only
+# 2 = error when operator is not offloaded
+JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
 RE_TUNE = os.environ.get("KUIPY_RE_TUNE", "0") == "1"
 
