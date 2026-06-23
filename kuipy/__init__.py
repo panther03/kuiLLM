@@ -135,8 +135,19 @@ def _KuiperMode_cls():
         Use as:
             with kuiper_ext.KuiperMode():
                 model(...)
+
+        When ``verify`` is true, every op that Kuiper actually handles is ALSO
+        run through stock PyTorch and the two results are compared (relative
+        Frobenius norm). Divergences are accumulated in ``verify_stats`` and can
+        be printed with ``print_verify_report()``. This roughly doubles the work
+        for dispatched ops, so it is for correctness checking, not benchmarking.
         """
         dummy_print_mode = False  # only profile, never use Kuiper
+
+        def __init__(self, verify=False, verify_tol=2e-2):
+            super().__init__()
+            self.verify = verify
+            self.verify_tol = verify_tol
 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
@@ -145,8 +156,12 @@ def _KuiperMode_cls():
                 out = func(*args, **kwargs)
             else:
                 out = _jit_try(func, args, kwargs)
-                if out is None:
+                used_kuiper = out is not None
+                if not used_kuiper:
                     out = func(*args, **kwargs)
+                elif self.verify and not func._schema.is_mutable:
+                    ref = func(*args, **kwargs)
+                    _verify_compare(func, out, ref, self.verify_tol)
 
             if C.ENABLE_PRINT_PROFILING and _launches_gpu_kernel(func, args, out):
                 profile_data.add((func,
@@ -158,6 +173,73 @@ def _KuiperMode_cls():
 
     _KuiperMode_class = KuiperMode
     return _KuiperMode_class
+
+
+# ---------------------------------------------------------------------------
+# Numerical verification (Kuiper vs. stock PyTorch)
+# ---------------------------------------------------------------------------
+
+# str(func) -> {n, fail, max_rel, worst}
+verify_stats = {}
+
+
+def reset_verify():
+    verify_stats.clear()
+
+
+def _verify_compare(func, out, ref, tol):
+    """Compare matching floating tensors in ``out`` vs ``ref`` by relative
+    Frobenius norm and fold the result into ``verify_stats[str(func)]``.
+
+    Tensors are restricted to positions where the reference is finite: fully
+    masked attention rows (all keys ``-inf``) yield implementation-defined
+    NaN/0 outputs that are not meaningful to compare. Empty reference tensors
+    (e.g. the LSE when ``compute_log_sumexp`` is false) are skipped."""
+    import torch
+    name = str(func)
+    st = verify_stats.setdefault(name, {"n": 0, "fail": 0, "max_rel": 0.0, "worst": None})
+    for o, r in zip(_tensors(out), _tensors(ref)):
+        if not (o.is_floating_point() and r.is_floating_point()):
+            continue
+        if r.numel() == 0 or o.numel() == 0:
+            continue
+        if o.shape != r.shape:
+            st["fail"] += 1
+            st["worst"] = f"shape mismatch {tuple(o.shape)} vs {tuple(r.shape)}"
+            continue
+        of, rf = o.float(), r.float()
+        finite = torch.isfinite(rf) & torch.isfinite(of)
+        if not finite.any():
+            continue
+        of, rf = of[finite], rf[finite]
+        rel = ((of - rf).norm() / (rf.norm() + 1e-12)).item()
+        st["n"] += 1
+        if rel > st["max_rel"]:
+            st["max_rel"] = rel
+        if rel > tol:
+            st["fail"] += 1
+            st["worst"] = f"rel={rel:.3e} (tol {tol:.1e})"
+
+
+def print_verify_report(out_dev=sys.stdout, tol=2e-2):
+    """Print a per-op pass/fail summary collected during a verify run."""
+    if not verify_stats:
+        print("[verify] no Kuiper-dispatched ops were checked.", file=out_dev)
+        return
+    total_fail = sum(s["fail"] for s in verify_stats.values())
+    print("[verify] Kuiper vs stock PyTorch (relative Frobenius norm, "
+          f"tol {tol:.1e}):", file=out_dev)
+    for name in sorted(verify_stats):
+        s = verify_stats[name]
+        status = "FAIL" if s["fail"] else "ok"
+        line = (f"  [{status:4}] {name}: {s['n']} checked, "
+                f"{s['fail']} fail, max_rel={s['max_rel']:.3e}")
+        if s["worst"]:
+            line += f", worst: {s['worst']}"
+        print(line, file=out_dev)
+    verdict = "PASS" if total_fail == 0 else f"FAIL ({total_fail} divergences)"
+    print(f"[verify] result: {verdict}", file=out_dev)
+    return total_fail == 0
 
 
 # ---------------------------------------------------------------------------

@@ -92,11 +92,12 @@ class ElementwiseImpl(_Family):
     def supported(self, func, args, kwargs):
     
         def unary(X):
-            return isinstance(X, torch.Tensor) and X.is_cuda and (0 < X.numel() <= _MAX_NUMEL)
+            return (isinstance(X, torch.Tensor) and X.is_cuda
+                    and (0 < X.numel() <= _MAX_NUMEL))
 
         def binary(A, B):
-            return isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor) and \
-                    (A.is_cuda and B.is_cuda and A.dtype == B.dtype
+            return (isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor)
+                    and A.is_cuda and B.is_cuda and A.dtype == B.dtype
                     and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
 
         impl = self._aten_fn_to_fstar_impl(func)
@@ -134,7 +135,7 @@ class ElementwiseImpl(_Family):
         # Or we can just do the math in that type and then cast it back,
         # this does not require a new kernel, but it is less precise 
         # and I don't think it reflects the behavior of PyTorch.
-        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast {c})" for c in constargs]
+        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast (Kuiper.Float64.is_floating.of_literal \"{c:f}\"))" for c in constargs]
 
         module = f"Kuiops.Elementwise{arity}.{method.title()}.{dtype.title()}"
         name = f"elem{arity}_{method}_{dtype}_jit"
