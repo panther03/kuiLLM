@@ -6,9 +6,9 @@ from . import config as C
 
 def is_available() -> bool:
     """True if the Kuiper JIT toolchain (F* + the kuiper repo) is reachable."""
-    if C.KUIPER_ROOT is None:
+    if C.KUIPER_INST is None:
         return False
-    return (C.KUIPER_ROOT / "inst" / "bin" / "fstar.exe").exists()
+    return (C.KUIPER_INST / "inst" / "bin" / "fstar.exe").exists()
 
 _jit_dispatch = None
 _jit_warned = False

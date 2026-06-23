@@ -1,10 +1,4 @@
-"""Out-of-tree F* -> karamel -> .cu pipeline for a single JIT instantiation.
-
-Reproduces the relevant ``verify.mk`` rules without touching the kuiper repo's
-``src/`` or ``.depend``. The repo's verified dependency ``.checked`` files in
-``$KUIPER_HOME/obj`` are reused (symlinked into the JIT obj dir) so only the new
-one-line instantiation module is compiled.
-"""
+"""Out-of-tree F* -> karamel -> .cu pipeline for a single JIT instantiation."""
 import os
 import subprocess
 from pathlib import Path
@@ -40,19 +34,23 @@ def extract_cu(module: str, fst_text: str):
     _ensure_built()
 
     underscored = module.replace(".", "_")        # e.g. Klas_JitGemm...
-    cu_path = C.JIT_CU / f"{underscored}.cu"
-    h_path = C.JIT_CU / f"{underscored}.h"
-# TODO: should rebuild every time..? seems like yes
-#     if cu_path.exists() and h_path.exists():
-#         return cu_path, h_path, h_path.name
+    cu_path = C.KUIPY_JIT_CU / f"{underscored}.cu"
+    h_path = C.KUIPY_JIT_CU  / f"{underscored}.h"
 
-    fst_path = C.JIT_SRC / f"{module}.fst"
+    if cu_path.exists() and h_path.exists(): 
+        if C.JIT_FLUSH_CACHE:
+            os.remove(cu_path)
+            os.remove(h_path)
+        else:
+            return cu_path, h_path, h_path.name
+
+    fst_path = C.KUIPY_JIT_SRC / f"{module}.fst"
     fst_path.write_text(fst_text)
     # No .fsti: the single `let` must be exported (it is the host entry point),
     # and an interface would require its own .checked to exist first.
 
-    checked = C.OBJ_CACHE_DIR / f"{module}.fst.checked"
-    krml = C.JIT_PRE / f"{underscored}.krml"
+    checked = C.KUIPY_CHECKED_DIR / f"{module}.fst.checked"
+    krml = C.KUIPY_JIT_PRE / f"{underscored}.krml"
 
     # TODO: shouldnt have to reverify kuiops stuff, but the cache is not working right now
     already = f"*,-{module},-Kuiops" 
@@ -68,18 +66,18 @@ def extract_cu(module: str, fst_text: str):
     _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
           "--already_cached", already,
           "--codegen", "krml", "--load_cmxs", str(C.PLUGIN),
-          "--extract", f"-*,+{module},+Kuiper",
+          "--extract", f"-*,+{module},+Kuiper,+Klas",
           "-o", str(krml), str(fst_path)],
          "extract")
 
     # 3) karamel -> pre/<underscored>.cu + .h
     _run([str(C.KRML_EXE), *C.KRML_FLAGS,
           "-bundle", f"{module}=*",
-          "-tmpdir", str(C.JIT_PRE), str(krml)],
+          "-tmpdir", str(C.KUIPY_JIT_PRE), str(krml)],
          "karamel")
 
-    pre_cu = C.JIT_PRE / f"{underscored}.cu"
-    pre_h = C.JIT_PRE / f"{underscored}.h"
+    pre_cu = C.KUIPY_JIT_PRE / f"{underscored}.cu"
+    pre_h = C.KUIPY_JIT_PRE / f"{underscored}.h"
 
     # 4) fixup (sed + indent), matching verify.mk
     _fixup(pre_cu, cu_path)

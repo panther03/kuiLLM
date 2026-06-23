@@ -1,0 +1,8 @@
+{
+  "fstar_exe": "./fstar.sh",
+  "options": [
+    "--query_cache",
+    "--already_cached *,-Kuiops"
+  ],
+  "include_dirs": []
+}

@@ -68,6 +68,9 @@ def build_kernel(module: str,
     mod = _loaded.get(ext_name)
     if mod is not None:
         return mod
+    
+    # LATER: would be nice if there was a way to load the built .so directly (not have to build it in ninja),
+    # but it seems you have to go through this torch.utils.cpp_extension stuff to load it.
 
     C.ensure_dirs()
 
@@ -79,7 +82,7 @@ def build_kernel(module: str,
     sym = f"{ext_name}_{fst_ctx['name']}"
 
     # 2) generate wrapper .cu next to the kernel
-    wrapper_path = C.JIT_CU / f"{ext_name}_wrapper.cu"
+    wrapper_path = C.KUIPY_JIT_CU / f"{ext_name}_wrapper.cu"
     if not wrapper_path.exists():
         wctx = dict(wrapper_ctx)
         wctx.update(sym=sym, header=header_name)
@@ -88,12 +91,12 @@ def build_kernel(module: str,
     # 3) compile + load
     _ensure_ninja_on_path()
     from torch.utils.cpp_extension import load
-    build_dir = C.JIT_BUILD / ext_name
+    build_dir = C.KUIPY_JIT_BUILD / ext_name
     build_dir.mkdir(parents=True, exist_ok=True)
     mod = load(
         name=ext_name,
         sources=[str(wrapper_path), str(cu_path)],
-        extra_include_paths=[str(C.KUIPER_INCS), str(C.KUIPER_DIST), str(C.JIT_CU), str(C._REPO_ROOT / "include")],
+        extra_include_paths=[str(C.KUIPY_JIT_CU), str(C.KUIPER_INCLUDE), str(C._REPO_ROOT / "include")],
         extra_cflags=["-O3", "-std=c++17"],
         extra_cuda_cflags=_nvcc_flags(),
         build_directory=str(build_dir),

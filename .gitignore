@@ -26,14 +26,12 @@ env/
 *.swo
 .DS_Store
 
-# ── JIT'd CUDA extension cache (torch.utils.cpp_extension) ────────────────────
-# Built into ~/.cache/torch_extensions by default; only matters if someone
-# overrides TORCH_EXTENSIONS_DIR into the repo.
-torch_extensions/
-kuiper_ext/.build/
-# On-demand extracted + compiled Kuiper kernels (generated .fst/.cu/.so).
-kuiper_ext/.jitcache/
-.jitcache
+# ── kuipy JIT cache ────────────────────
+.kuipy_cache/
+
+# local fstar installation
+inst/
+.kuiper.touch
 
 # ── HuggingFace download cache (if user redirects HF_HOME here) ───────────────
 .cache/
@@ -54,6 +52,3 @@ module_graph.png
 scratch/
 notes.local.md
 kernel_call.log
-
-
-obj/

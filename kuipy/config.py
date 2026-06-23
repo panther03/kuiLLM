@@ -1,9 +1,4 @@
-"""Paths and toolchain flags for JIT extraction/compilation of Kuiper kernels.
-
-Everything here is derived from ``$KUIPER_HOME`` (the root of the kuiper repo)
-so the JIT pipeline reproduces what ``verify.mk`` does, but out-of-tree: it
-never regenerates the repo's ``.depend`` and never edits files under ``src/``.
-"""
+"""Paths and toolchain flags for JIT extraction/compilation of Kuiper kernels."""
 import os
 from pathlib import Path
 
@@ -11,34 +6,27 @@ _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent 
 
 # --------------------------------------------------------------------------
-# Roots
+# paths
 # --------------------------------------------------------------------------
-KUIPER_ROOT = Path(os.path.join(_REPO_ROOT, "kuiper")).resolve()
-KUIPER_SRC = KUIPER_ROOT / "src"
-KUIPER_INCS = KUIPER_ROOT / "include"
-KUIPER_DIST = KUIPER_ROOT / "dist"
-KUIPER_SCRIPTS = KUIPER_ROOT / "scripts"
+KUIPER_INST = Path(os.environ.get("KUIPER_INST", _REPO_ROOT / "inst")).resolve()
+KUIOPS_SRC = Path(_REPO_ROOT / "kuiops").resolve()
 
-# Holds all the .checked dependencies. It would be nice to have separate cache dirs, 
-# but FStar only supports one cache directory so it's really easiest to just have everything
-# write to the cache of the original repo.
-OBJ_CACHE_DIR = KUIPER_ROOT / "obj"          # holds the verified dependency .checked
-
-FSTAR_EXE = KUIPER_ROOT / "inst" / "bin" / "fstar.exe"
-KRML_EXE = KUIPER_ROOT / "inst" / "bin" / "krml"
+FSTAR_EXE = KUIPER_INST / "bin" / "fstar.exe"
+KRML_EXE = KUIPER_INST / "bin" / "krml"
 # F* extraction plugin, without the .cmxs extension (matches verify.mk PLUGIN).
-PLUGIN = KUIPER_ROOT / "extraction" / "dune" / "_build" / "default" / "kuiper_extr"
-
-FIXUP_SED = KUIPER_SCRIPTS / "fixup.sed"
+PLUGIN = KUIPER_INST / "kuiper_extr" / "kuiper_extr"
+KUIPER_INCLUDE = KUIPER_INST / "include" / "kuiper"
+FIXUP_SED = KUIPER_INST / "fixup.sed"
 
 # --------------------------------------------------------------------------
-# JIT working tree (kept entirely inside the python package, repo stays clean)
+# JIT cache dirs
 # --------------------------------------------------------------------------
-JIT_CACHE = Path(os.environ.get("KUIPY_JIT_CACHE", os.path.join(_REPO_ROOT, ".jitcache"))).resolve()
-JIT_SRC = JIT_CACHE / "src"        # generated Klas_<Mod>.fst
-JIT_PRE = JIT_CACHE / "pre"        # our object files + raw karamel output
-JIT_CU = JIT_CACHE / "cu"          # fixed-up .cu/.h
-JIT_BUILD = JIT_CACHE / "build"    # torch cpp_extension build dirs (.so)
+KUIPY_CACHE = Path(os.environ.get("KUIPY_CACHE", _REPO_ROOT / ".kuipy_cache")).resolve()
+KUIPY_CHECKED_DIR = KUIPY_CACHE / "checked"  # holds the verified dependency .checked
+KUIPY_JIT_PRE = KUIPY_CACHE / "pre"          # holds the raw karamel output
+KUIPY_JIT_CU = KUIPY_CACHE / "cu"            # holds the fixed-up .cu/.h files
+KUIPY_JIT_BUILD = KUIPY_CACHE / "build"      # holds the torch cpp_extension build dirs (.so)
+KUIPY_JIT_SRC = KUIPY_CACHE / "src"          # instantiated fst files
 
 # --------------------------------------------------------------------------
 # Behaviour
@@ -48,6 +36,7 @@ JIT_BUILD = JIT_CACHE / "build"    # torch cpp_extension build dirs (.so)
 # full F* verification of each instantiation instead.
 JIT_FULL_VERIFY = os.environ.get("KUIPY_JIT_VERIFY", "0") == "1"
 JIT_VERBOSE = os.environ.get("KUIPY_JIT_VERBOSE", "0") == "1"
+JIT_FLUSH_CACHE = os.environ.get("KUIPY_JIT_FLUSH_CACHE", "0") == "1"
 
 ENABLE_PRINT_PROFILING = os.environ.get("KUIPY_PRINT_PROFILING", "0") == "1"
 
@@ -62,11 +51,9 @@ RE_TUNE = os.environ.get("KUIPY_RE_TUNE", "0") == "1"
 # --------------------------------------------------------------------------
 FSTAR_FLAGS = [
     "--silent",
-    "--include", str(KUIPER_SRC),
-    "--include", str(JIT_SRC),
-    "--include", str(_REPO_ROOT / "kuiops"),
-    "--cache_dir", str(OBJ_CACHE_DIR),
-    "--odir", str(OBJ_CACHE_DIR),
+    "--include", str(KUIOPS_SRC),
+    "--cache_dir", str(KUIPY_CHECKED_DIR),
+    "--odir", str(KUIPY_CHECKED_DIR),
     "--warn_error", "-291",
     "--warn_error", "-249-321",
     "--warn_error", "@242@250",
@@ -113,7 +100,7 @@ def nvcc_arch_flag():
 
 
 def ensure_dirs():
-    for d in (JIT_SRC, JIT_PRE, JIT_CU, JIT_BUILD):
+    for d in (KUIPY_CHECKED_DIR, KUIPY_JIT_SRC, KUIPY_JIT_PRE, KUIPY_JIT_CU, KUIPY_JIT_BUILD):
         d.mkdir(parents=True, exist_ok=True)
 
 
