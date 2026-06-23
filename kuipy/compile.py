@@ -19,6 +19,9 @@ _env = Environment(loader=FileSystemLoader(str(_TEMPLATES)), undefined=StrictUnd
 
 # In-process cache: ext_name -> loaded module.
 _loaded = {}
+# Negative cache: ext_name -> exception, for kernels that failed to build, so we
+# fall back to PyTorch immediately instead of re-running F*/nvcc on every call.
+_failed = {}
 
 
 def _nvcc_flags():
@@ -72,6 +75,19 @@ def build_kernel(module: str,
     mod = _loaded.get(ext_name)
     if mod is not None:
         return mod
+    failed = _failed.get(ext_name)
+    if failed is not None:
+        raise failed
+    try:
+        return _build_kernel(module, ext_name, fst_template, fst_ctx,
+                             wrapper_template, wrapper_ctx)
+    except Exception as e:
+        _failed[ext_name] = e
+        raise
+
+
+def _build_kernel(module, ext_name,
+                  fst_template, fst_ctx, wrapper_template, wrapper_ctx):
     
     # LATER: would be nice if there was a way to load the built .so directly (not have to build it in ninja),
     # but it seems you have to go through this torch.utils.cpp_extension stuff to load it.

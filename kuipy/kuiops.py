@@ -92,10 +92,12 @@ class ElementwiseImpl(_Family):
     def supported(self, func, args, kwargs):
     
         def unary(X):
-            return X.is_cuda and (0 < X.numel() <= _MAX_NUMEL)
+            return (isinstance(X, torch.Tensor) and X.is_cuda
+                    and (0 < X.numel() <= _MAX_NUMEL))
 
         def binary(A, B):
-            return (A.is_cuda and B.is_cuda and A.dtype == B.dtype
+            return (isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor)
+                    and A.is_cuda and B.is_cuda and A.dtype == B.dtype
                     and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
 
         impl = self._aten_fn_to_fstar_impl(func)

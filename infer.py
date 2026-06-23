@@ -9,6 +9,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import kuipy
+from kuipy.config import ENABLE_PRINT_PROFILING
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,6 +61,8 @@ def generate_batch(
     pad_to_multiple: int = DEFAULT_BATCH,
     use_kuiper: bool = True,
     timing: bool = False,
+    verify: bool = False,
+    verify_tol: float = 2e-2,
 ) -> List[str]:
     """Generate responses for many prompts in one batched forward pass.
 
@@ -70,6 +73,10 @@ def generate_batch(
     calls (mm / addmm / bmm) to the verified Kuiper CUDA kernels. Tensors
     remain on the regular CUDA device — only the kernel implementation
     changes.
+
+    When ``verify`` is true, every op Kuiper handles is also run through stock
+    PyTorch and the two results are compared (relative Frobenius norm); a
+    pass/fail summary is printed afterwards.
 
     When ``timing`` is true, the forward pass is wrapped in a torch
     profiler so we can report total time spent inside CUDA kernels as
@@ -95,17 +102,25 @@ def generate_batch(
         padding=True,           # left-pad to the longest row
     ).to(DEVICE)
 
-    if kuipy.is_available() and ((use_kuiper and DEVICE == "cuda") or (kuipy.ENABLE_PRINT_PROFILING)):
-        kernel_ctx = kuipy.KuiperMode()
-        if kuipy.ENABLE_PRINT_PROFILING:
+    if verify and not (kuipy.is_available() and DEVICE == "cuda"):
+        print("[verify] Kuiper JIT unavailable on this device — nothing to verify.",
+              file=sys.stderr)
+        verify = False
+
+    if kuipy.is_available() and ((use_kuiper and DEVICE == "cuda") or (ENABLE_PRINT_PROFILING)):
+        kernel_ctx = kuipy.KuiperMode(verify=verify, verify_tol=verify_tol)
+        if ENABLE_PRINT_PROFILING:
             kernel_ctx.dummy_print_mode = True
             kernel_tag = "torch"
         else:
-            kernel_tag = "kuiper"
+            kernel_tag = "kuiper+verify" if verify else "kuiper"
     else:
         from contextlib import nullcontext
         kernel_ctx = nullcontext()
         kernel_tag = "torch"
+
+    if verify:
+        kuipy.reset_verify()
 
     if timing and DEVICE == "cuda":
         from torch.profiler import profile, ProfilerActivity
@@ -152,6 +167,9 @@ def generate_batch(
 
     if timing and DEVICE == "cuda" and prof is not None:
         _report_timing(prof, elapsed)
+
+    if verify:
+        kuipy.print_verify_report(tol=verify_tol)
 
     return decoded
 
@@ -221,11 +239,13 @@ def _report_timing(prof, wall_s: float) -> None:
 
 
 def generate(prompt: str, max_new_tokens: int = 256, temperature: float = 0.7,
-             use_kuiper: bool = True, timing: bool = False) -> str:
+             use_kuiper: bool = True, timing: bool = False,
+             verify: bool = False, verify_tol: float = 2e-2) -> str:
     """Single-prompt convenience wrapper."""
     return generate_batch([prompt], max_new_tokens=max_new_tokens,
                           temperature=temperature, pad_to_multiple=1,
-                          use_kuiper=use_kuiper, timing=timing)[0]
+                          use_kuiper=use_kuiper, timing=timing,
+                          verify=verify, verify_tol=verify_tol)[0]
 
 
 def _read_prompts(path: Path) -> List[str]:
@@ -284,10 +304,18 @@ def _main() -> int:
     ap.add_argument("--timing", action="store_true",
                     help="Print wall-clock and CUDA-kernel timing breakdown "
                          "(uses torch.profiler; small overhead).")
+    ap.add_argument("--verify", action="store_true",
+                    help="Run every Kuiper-dispatched op through stock PyTorch too "
+                         "and report numerical divergences (forces Kuiper on).")
+    ap.add_argument("--verify-tol", type=float, default=2e-2,
+                    help="Relative-norm tolerance for --verify (default 0.02).")
     args = ap.parse_args()
 
     if args.prompt and args.prompts:
         ap.error("pass either a positional prompt or --prompts FILE, not both")
+
+    if args.verify and not args.use_kuiper:
+        ap.error("--verify requires Kuiper kernels; do not combine it with --no-kuiper")
 
     if args.prompts is not None:
         prompts = _read_prompts(args.prompts)
@@ -310,6 +338,8 @@ def _main() -> int:
         pad_to_multiple=pad_to,
         use_kuiper=args.use_kuiper,
         timing=args.timing,
+        verify=args.verify,
+        verify_tol=args.verify_tol,
     )
 
     show_n = len(responses) if args.show else min(3, len(responses))
@@ -320,7 +350,7 @@ def _main() -> int:
     if show_n < len(responses):
         print(f"\n… ({len(responses) - show_n} more, pass --print to see all)")
 
-    if kuipy.is_available() and kuipy.ENABLE_PRINT_PROFILING:
+    if kuipy.is_available() and ENABLE_PRINT_PROFILING:
         with open("kernel_call.log", "w") as f:
             kuipy.print_profile_data(f)
 
