@@ -13,18 +13,12 @@ from . import config as C
 
 _built = False
 
-
-def _log(*a):
-    if C.JIT_VERBOSE:
-        print("[kuiper-jit]", *a, flush=True)
-
-
 def _run(cmd, what):
-    _log(f"({what})", " ".join(str(c) for c in cmd))
+    C.log(f"({what})", " ".join(str(c) for c in cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
-            f"kuiper-jit {what} failed (exit {proc.returncode}):\n"
+            f"kuipy-jit {what} failed (exit {proc.returncode}):\n"
             f"CMD: {' '.join(str(c) for c in cmd)}\n"
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     return proc
@@ -48,8 +42,9 @@ def extract_cu(module: str, fst_text: str):
     underscored = module.replace(".", "_")        # e.g. Klas_JitGemm...
     cu_path = C.JIT_CU / f"{underscored}.cu"
     h_path = C.JIT_CU / f"{underscored}.h"
-    if cu_path.exists() and h_path.exists():
-        return cu_path, h_path, h_path.name
+# TODO: should rebuild every time..? seems like yes
+#     if cu_path.exists() and h_path.exists():
+#         return cu_path, h_path, h_path.name
 
     fst_path = C.JIT_SRC / f"{module}.fst"
     fst_path.write_text(fst_text)

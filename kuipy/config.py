@@ -44,16 +44,18 @@ JIT_BUILD = JIT_CACHE / "build"    # torch cpp_extension build dirs (.so)
 # Behaviour
 # --------------------------------------------------------------------------
 
-# Default: admit SMT queries (fast cold compile). Set KUIPER_JIT_VERIFY=1 to run
+# Default: admit SMT queries (fast cold compile). Set KUIPY_JIT_VERIFY=1 to run
 # full F* verification of each instantiation instead.
-JIT_FULL_VERIFY = os.environ.get("KUIPER_JIT_VERIFY", "0") == "1"
-JIT_VERBOSE = os.environ.get("KUIPER_JIT_VERBOSE", "0") == "1"
+JIT_FULL_VERIFY = os.environ.get("KUIPY_JIT_VERIFY", "0") == "1"
+JIT_VERBOSE = os.environ.get("KUIPY_JIT_VERBOSE", "0") == "1"
 
-ENABLE_PRINT_PROFILING = os.environ.get("PRINT_PROFILING", "0") == "1"
+ENABLE_PRINT_PROFILING = os.environ.get("KUIPY_PRINT_PROFILING", "0") == "1"
 
 # If set, JIT extraction/compilation errors propagate instead of falling back to
 # stock PyTorch. Off by default so an unsupported shape never breaks a model.
 JIT_STRICT = os.environ.get("KUIPY_JIT_STRICT", "1") == "1"
+
+RE_TUNE = os.environ.get("KUIPY_RE_TUNE", "0") == "1"
 
 # --------------------------------------------------------------------------
 # F* flags (mirrors `make echo-fstar`)
@@ -114,3 +116,7 @@ def ensure_dirs():
     for d in (JIT_SRC, JIT_PRE, JIT_CU, JIT_BUILD):
         d.mkdir(parents=True, exist_ok=True)
 
+
+def log(*a):
+    if JIT_VERBOSE:
+        print("[kuipy-jit]", *a, flush=True)

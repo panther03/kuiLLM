@@ -18,8 +18,9 @@ def _jit_try(func, args, kwargs):
     global _jit_dispatch, _jit_warned
     if _jit_dispatch is None:
         from .registry import try_dispatch as _jit_dispatch  # noqa: F811
+    ret = None
     try:
-        return _jit_dispatch(func, args, kwargs)
+        ret = _jit_dispatch(func, args, kwargs)
     except Exception as e:
         if C.JIT_STRICT:
             raise
@@ -27,7 +28,12 @@ def _jit_try(func, args, kwargs):
             _jit_warned = True
             print(f"[kuipy] JIT dispatch failed, falling back to PyTorch: {e}",
                   file=sys.stderr)
-        return None
+        ret = None
+    if ret is None:
+        if C.JIT_VERBOSE:
+            print(f"[kuipy] operator {func} did not match", file=sys.stderr)
+    return ret
+
 
 # Lazy attribute proxy so `kuiper_ext.KuiperMode` builds the class on first use
 # (it needs torch, which we don't want to import at module import time).

@@ -1,0 +1,26 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{module}}.h"
+
+torch::Tensor op_{{name}} (torch::Tensor A, torch::Tensor B)
+{
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+    auto C = torch::empty({M, N}, A.options());
+
+    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+
+    {{module}}_{{name}} (
+        (uint32_t)M, (uint32_t)K, (uint32_t)N,
+        reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
+        reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
+        reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()));
+
+    return C;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{name}}, "op_{{name}}");
+}

@@ -4,10 +4,10 @@ The hot path is intentionally tiny: a dict lookup, a cheap ``supported()`` check
 and (on a hit) a memoised compiled-kernel call. On any miss it returns ``None`` so
 the caller falls through to stock PyTorch.
 """
-from .kuiops import ElementwiseImpl
+from .kuiops import ElementwiseImpl, MmImpl
+from . import config as C
 
 # _GEMM = GemmImpl()
-_ELEM = ElementwiseImpl()
 # _REDUCE = ReduceImpl()
 # _CATCAST = CatCastImpl()
 # _ARANGE = ArangeImpl()
@@ -18,9 +18,12 @@ _ELEM = ElementwiseImpl()
 _REGISTRY = None
 
 
-def _build_registry():
+def _build_registry(tune_params):
     import torch
     aten = torch.ops.aten
+    _ELEM = ElementwiseImpl(tune_params)
+    _MM = MmImpl(tune_params)
+
     '''
     aten.mm.default: _GEMM,
     aten.addmm.default: _GEMM,
@@ -50,15 +53,26 @@ def _build_registry():
         aten.add.Tensor: _ELEM,
         aten.add.Scalar: _ELEM,
         aten.mul.Tensor: _ELEM,
-        aten.mul.Scalar: _ELEM
+        aten.mul.Scalar: _ELEM,
+        aten.mm.default: _MM,
     }
 
+def _tune_impls(tune_params):
+    for impl in set(_REGISTRY.values()):
+        tune_params = impl.tune(tune_params)
+    return tune_params
 
 def try_dispatch(func, args, kwargs):
     """Return a result Tensor if a JIT Kuiper kernel handles ``func``, else None."""
     global _REGISTRY
     if _REGISTRY is None:
-        _REGISTRY = _build_registry()
+        # LATER: load these from json
+        tune_params = {}
+        _REGISTRY = _build_registry(tune_params)
+        if C.RE_TUNE:
+            tune_params = _tune_impls(tune_params)
+            # LATER: write it back out
+
     impl = _REGISTRY.get(func)
     if impl is None:
         return None
