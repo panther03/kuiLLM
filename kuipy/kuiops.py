@@ -121,6 +121,8 @@ class ElementwiseImpl(_Family):
                     impl += "_alpha"
                     constargs += [_scalar(kwargs["alpha"])]
 
+                # TODO: apparently the Tensor operators can have a scalar 
+                # second argument as well? wtf is the point of them then? investigate
                 if (func is aten.add.Scalar or 
                     func is aten.mul.Scalar or 
                     func is aten.pow.Tensor_Scalar) and unary(args[0]):
@@ -142,7 +144,7 @@ class ElementwiseImpl(_Family):
         # Or we can just do the math in that type and then cast it back,
         # this does not require a new kernel, but it is less precise 
         # and I don't think it reflects the behavior of PyTorch.
-        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast {c})" for c in constargs]
+        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast (Kuiper.Float64.is_floating.of_literal \"{c:f}\"))" for c in constargs]
 
         module = f"Kuiops.Elementwise{arity}.{method.title()}.{dtype.title()}"
         name = f"elem{arity}_{method}_{dtype}_jit"

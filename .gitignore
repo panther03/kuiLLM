@@ -32,6 +32,7 @@ env/
 # local fstar installation
 inst/
 .kuiper.touch
+.depend
 
 # ── HuggingFace download cache (if user redirects HF_HOME here) ───────────────
 .cache/

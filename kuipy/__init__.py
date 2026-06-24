@@ -4,6 +4,40 @@ from pathlib import Path
 
 from . import config as C
 
+def arg_data(a):
+    import torch
+    if isinstance(a, torch.Tensor):
+        return (len(a.shape), a.dtype, a.device)
+    elif isinstance(a, (list, tuple)):
+        return (0x67, tuple([arg_data(ai) for ai in a]))
+    elif isinstance(a, (torch.dtype, torch.device, bool)):
+        return a
+    else:
+        return type(a).__name__
+    
+def print_arg_data(a):
+    try:
+        if a[0] == 0x67:
+            return "[" + ", ".join(print_arg_data(ai) for ai in a[1]) + ", ]"
+        elif not isinstance(a, str):
+            (nshape, dtype, device) = a
+            return f"Tensor(nshape={nshape}, dtype={dtype}, device={device})"
+        else:
+            return str(a)
+    except Exception:
+        return str(a)
+    
+def print_call_data_aux(args, kwargs_keys, kwargs_values, ret):
+    return (f"args={[print_arg_data(a) for a in args]}, "
+            f"kwargs={{ {', '.join(f'{k}={print_arg_data(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }} "
+            f"-> {print_arg_data(ret)}")
+    
+def print_call_data(args, kwargs):
+    return print_call_data_aux(tuple([arg_data(a) for a in args]),
+                    tuple(kwargs.keys()),
+                    tuple([arg_data(v) for v in kwargs.values()]),
+                    "no return captured")
+
 def is_available() -> bool:
     """True if the Kuiper JIT toolchain (F* + the kuiper repo) is reachable."""
     if C.KUIPER_INST is None:
@@ -31,7 +65,7 @@ def _jit_try(func, args, kwargs, VERY_STRICT=False):
         ret = None
     if ret is None:
         if C.JIT_VERBOSE:
-            print(f"[kuipy] operator {func} did not match", file=sys.stderr)
+            print(f"[kuipy] operator {func} ({print_call_data(args, kwargs)}) did not match", file=sys.stderr)
         if C.JIT_STRICTNESS > 1:
             raise
             
@@ -115,17 +149,6 @@ def _KuiperMode_cls():
             self.verify = verify
             self.verify_tol = verify_tol
 
-        @classmethod
-        def arg_data(_, a):
-            if isinstance(a, torch.Tensor):
-                return (len(a.shape), a.dtype, a.device)
-            elif isinstance(a, (list, tuple)):
-                return (0x67, tuple([KuiperMode.arg_data(ai) for ai in a]))
-            elif isinstance(a, (torch.dtype, torch.device, bool)):
-                return a
-            else:
-                return type(a).__name__
-
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
 
@@ -142,10 +165,10 @@ def _KuiperMode_cls():
 
             if C.ENABLE_PRINT_PROFILING and _launches_gpu_kernel(func, args, out):
                 profile_data.add((func,
-                                  tuple([KuiperMode.arg_data(a) for a in args]),
+                                  tuple([arg_data(a) for a in args]),
                                   tuple(kwargs.keys()),
-                                  tuple([KuiperMode.arg_data(v) for v in kwargs.values()]),
-                                  KuiperMode.arg_data(out)))
+                                  tuple([arg_data(v) for v in kwargs.values()]),
+                                  arg_data(out)))
             return out
 
     _KuiperMode_class = KuiperMode
@@ -223,27 +246,12 @@ def print_verify_report(out_dev=sys.stdout, tol=2e-2):
 # Profiling helpers
 # ---------------------------------------------------------------------------
 
-def print_profile_arg(a):
-    try:
-        if a[0] == 0x67:
-            return "[" + ", ".join(print_profile_arg(ai) for ai in a[1]) + ", ]"
-        elif not isinstance(a, str):
-            (nshape, dtype, device) = a
-            return f"Tensor(nshape={nshape}, dtype={dtype}, device={device})"
-        else:
-            return str(a)
-    except Exception:
-        return str(a)
-
-
 def print_profile_data(out_dev=sys.stdout):
     global profile_data
     out = {}
     for func, args, kwargs_keys, kwargs_values, ret in profile_data:
         l = out.get(func, [])
-        l.append(f"args={[print_profile_arg(a) for a in args]}, "
-                 f"kwargs={{ {', '.join(f'{k}={print_profile_arg(v)}' for k, v in zip(kwargs_keys, kwargs_values))} }} "
-                 f"-> {print_profile_arg(ret)}")
+        l.append(print_call_data_aux(args, kwargs_keys, kwargs_values, ret))
         out[func] = l
     for func, calls in out.items():
         tag = "" if _has_cuda_kernel(func) else "  [no CUDA kernel: composite — internal GPU sub-ops not interceptable]"
