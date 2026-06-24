@@ -8,7 +8,7 @@ torch::Tensor op_{{name}} (torch::Tensor A, torch::Tensor B)
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
-    auto C = torch::empty({M, N}, A.options());
+    auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
 
     at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
 

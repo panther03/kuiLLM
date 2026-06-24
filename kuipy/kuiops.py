@@ -59,6 +59,15 @@ def torch_dtype_to_ctype(dt):
         torch.bfloat16: "__nv_bfloat16",
     }[dt]
 
+def torch_dtype_to_aten_scalar(dt):
+    """libtorch ScalarType enum name, for allocating C++ output tensors."""
+    return {
+        torch.float16: "torch::kFloat16",
+        torch.float32: "torch::kFloat32",
+        torch.float64: "torch::kFloat64",
+        torch.bfloat16: "torch::kBFloat16",
+    }[dt]
+
 # ---------------------------------------------------------------------------
 # Elementwise (unary, binary, scalar-broadcast)
 # ---------------------------------------------------------------------------
@@ -291,7 +300,8 @@ class MmImpl(_Family):
             module=module.replace(".", "_"),
             name=name,
             cpp_in_et=torch_dtype_to_ctype(in_dtype),
-            cpp_out_et=torch_dtype_to_ctype(out_dtype)
+            cpp_out_et=torch_dtype_to_ctype(out_dtype),
+            out_scalar=torch_dtype_to_aten_scalar(out_dtype),
         )
         res = self._mod(module, fst_ctx, wrapper_ctx).run(*call)
         if out_dtype != in_dtype:
