@@ -35,7 +35,7 @@ KUIPY_JIT_SRC = KUIPY_CACHE / "src"          # instantiated fst files
 # Default: admit SMT queries (fast cold compile). Set KUIPY_JIT_VERIFY=1 to run
 # full F* verification of each instantiation instead.
 JIT_FULL_VERIFY = os.environ.get("KUIPY_JIT_VERIFY", "0") == "1"
-JIT_VERBOSE = os.environ.get("KUIPY_JIT_VERBOSE", "0") == "1"
+JIT_VERBOSITY = int(os.environ.get("KUIPY_JIT_VERBOSITY", "0")) # 2 = print mismatched ops
 JIT_FLUSH_CACHE = os.environ.get("KUIPY_JIT_FLUSH_CACHE", "0") == "1"
 
 ENABLE_PRINT_PROFILING = os.environ.get("KUIPY_PRINT_PROFILING", "0") == "1"
@@ -106,5 +106,5 @@ def ensure_dirs():
 
 
 def log(*a):
-    if JIT_VERBOSE:
+    if JIT_VERBOSITY > 0:
         print("[kuipy-jit]", *a, flush=True)

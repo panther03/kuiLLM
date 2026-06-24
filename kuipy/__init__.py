@@ -64,7 +64,7 @@ def _jit_try(func, args, kwargs, VERY_STRICT=False):
                   file=sys.stderr)
         ret = None
     if ret is None:
-        if C.JIT_VERBOSE:
+        if C.JIT_VERBOSITY > 1:
             print(f"[kuipy] operator {func} ({print_call_data(args, kwargs)}) did not match", file=sys.stderr)
         if C.JIT_STRICTNESS > 1:
             raise

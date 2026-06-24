@@ -120,7 +120,7 @@ def _build_kernel(module, ext_name,
         extra_cflags=["-O3", "-std=c++17"],
         extra_cuda_cflags=_nvcc_flags(),
         build_directory=str(build_dir),
-        verbose=C.JIT_VERBOSE,
+        verbose=(C.JIT_VERBOSITY > 0),
     )
     _loaded[ext_name] = mod
     return mod

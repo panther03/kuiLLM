@@ -54,7 +54,7 @@ def _build_registry(tune_params):
         aten.rsqrt.default: _ELEM,
         aten.cos.default: _ELEM,
         aten.sin.default: _ELEM,
-        aten.pow.Tensor_Scalar: _ELEM,
+        #aten.pow.Tensor_Scalar: _ELEM, # imprecise ??
         aten.add.Tensor: _ELEM,
         aten.add.Scalar: _ELEM,
         aten.mul.Tensor: _ELEM,
@@ -63,7 +63,7 @@ def _build_registry(tune_params):
         aten.bmm.default: _BMM,
         aten.addmm.default: _ADDMM,
         aten._softmax.default: _SOFTMAX,
-        aten._scaled_dot_product_efficient_attention.default: _SDPA,
+        #aten._scaled_dot_product_efficient_attention.default: _SDPA,
     }
 
 def _tune_impls(tune_params):

@@ -49,6 +49,14 @@ def torch_dtype_to_fstar(dt):
         torch.float32: "f32",
         torch.float64: "f64",
         torch.bfloat16: "bf16",
+        torch.int64: "i64",
+        torch.int32: "i32",
+        torch.int16: "i16",
+        torch.int8: "i8",
+        torch.uint64: "u64",
+        torch.uint32: "u32",
+        torch.uint16: "u16",
+        torch.uint8: "u8"
     }[dt]
 
 def torch_dtype_to_ctype(dt):
@@ -57,6 +65,14 @@ def torch_dtype_to_ctype(dt):
         torch.float32: "float",
         torch.float64: "double",
         torch.bfloat16: "__nv_bfloat16",
+        torch.int64: "int64_t",
+        torch.int32: "int32_t",
+        torch.int16: "int16_t",
+        torch.int8: "int8_t",
+        torch.uint64: "uint64_t",
+        torch.uint32: "uint32_t",
+        torch.uint16: "uint16_t",
+        torch.uint8: "uint8_t"
     }[dt]
 
 def torch_dtype_to_aten_scalar(dt):
@@ -66,7 +82,10 @@ def torch_dtype_to_aten_scalar(dt):
         torch.float32: "torch::kFloat32",
         torch.float64: "torch::kFloat64",
         torch.bfloat16: "torch::kBFloat16",
+        # todo fill in
     }[dt]
+
+_FLOAT_DTYPES = (torch.float16, torch.float32, torch.float64, torch.bfloat16)
 
 # ---------------------------------------------------------------------------
 # Elementwise (unary, binary, scalar-broadcast)
@@ -109,6 +128,9 @@ class ElementwiseImpl(_Family):
                     and A.is_cuda and B.is_cuda and A.dtype == B.dtype
                     and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
 
+        if args[0].dtype not in _FLOAT_DTYPES:
+            return None # TODO: integers do not have scalar typeclass for some reason
+
         impl = self._aten_fn_to_fstar_impl(func)
         if impl is not None:
             if len(args) == 1:
@@ -120,6 +142,12 @@ class ElementwiseImpl(_Family):
                     func is aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
                     impl += "_alpha"
                     constargs += [_scalar(kwargs["alpha"])]
+
+                # Special case for square, since it seems to have impact on the precision aside from just speed.
+                if ((func is aten.pow.Tensor_Scalar) and
+                    (isinstance(args[1], int)) and args[1] == 2):
+                    return ("square", 1, [], [args[0]])
+                    
 
                 # TODO: apparently the Tensor operators can have a scalar 
                 # second argument as well? wtf is the point of them then? investigate
@@ -309,8 +337,6 @@ class MmImpl(_Family):
         if out_dtype != in_dtype:
             res = res.to(in_dtype)
         return res
-
-_FLOAT_DTYPES = (torch.float16, torch.float32, torch.float64, torch.bfloat16)
 
 # ---------------------------------------------------------------------------
 # Batched matmul (bmm)

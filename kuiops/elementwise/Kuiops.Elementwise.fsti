@@ -9,3 +9,6 @@ let silu (#t:Type0) {| floating t |} (x : t) : t =
 
 inline_for_extraction noextract
 let neg (#t:Type0) {| floating t |} (x : t) : t = sub zero x
+
+inline_for_extraction noextract
+let square (#t:Type0) {| floating t |} (x : t) : t = x `mul` x
