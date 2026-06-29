@@ -11,14 +11,13 @@ module SZ = Kuiper.SizeT
 let rec set_at (#r : nat) (#d : shape r) (dim : natlt r) (idx : natlt (d @! dim)) (x : abs d)
   : GTot (abs d)
          (decreases r)
-  = match d with
-    | INil -> ()
-    | ICons h t ->
-      let (i1, i2) = x <: natlt h & abs t in
-      if dim == 0 then
-        (idx, i2)
-      else
-        (i1, set_at #_ #t (dim - 1) idx i2)
+  = assert r > 0;
+    let (i1, i2) = x <: natlt (d @! 0) & abs (tail d) in
+    if dim == 0 then
+      (idx, i2)
+    else
+      (i1, set_at #_ #(tail d) (dim - 1) idx i2)
+
 
 let gather_chest 
   (#et : Type0)
