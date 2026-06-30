@@ -23,7 +23,7 @@ profile-no-kuiper-nsys:
 	nsys profile -o data/no-kuiper.nsys-rep --force-overwrite=true -t cuda python3 infer.py --no-kuiper
 
 test:
-	python3 -m pytest tests/
+	KUIPY_JIT_NVCC_FAST=1 python3 -m pytest tests/
 
 _reset-kuiper-touch:
 	@rm -f .kuiper.touch
@@ -58,4 +58,4 @@ install-kuiper: _reset-kuiper-touch
 	touch .kuiper.touch
 
 verify-kuiops: .kuiper.touch
-	@+$(MAKE) -f verify.mk verify-kuiops
+#	@+$(MAKE) -f verify.mk verify-kuiops

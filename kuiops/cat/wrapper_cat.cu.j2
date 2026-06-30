@@ -1,0 +1,36 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper cat kernel. DO NOT EDIT.
+// Generated from kuiops/cat/wrapper_cat.cu.j2
+//
+// Binary torch.cat(A, B, dim={{ dim }}): A and B agree on every dimension except
+// `dim`; the output keeps that shape with size A.size(dim) + B.size(dim) along
+// `dim`. The kernel maps over the (row-major contiguous) output, so the inputs
+// are made contiguous and the output is allocated with the input dtype.
+
+torch::Tensor op_{{ name }} (torch::Tensor A, torch::Tensor B)
+{
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+
+    auto out_sizes = Ac.sizes().vec();
+    out_sizes[{{ dim }}] = Ac.size({{ dim }}) + Bc.size({{ dim }});
+    auto Out = torch::empty(out_sizes, Ac.options());
+
+    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+
+    {{ sym }} (
+        reinterpret_cast<{{ cpp_et }}*>(Ac.data_ptr()),
+        reinterpret_cast<{{ cpp_et }}*>(Bc.data_ptr()),
+        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
+        (size_t)Out.numel());
+
+    return Out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{ name }}, "op_{{ name }}");
+}

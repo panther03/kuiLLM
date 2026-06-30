@@ -55,7 +55,7 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
   float ok), and `TensorCore2D` needs valid fragment/accumulator types (so f32
   inputs can't use TC2D — fall back to BlockTiling2D). See `MmImpl` for the pattern.
 - **No element-type / tile-size branching that selects between fixed kernels** in
-  Python or templates. Keep templates minimal (no proofs). Anything with nontrivial
+  Python or templates. KEEP TEMPLATES MINIMAL (no proofs). Anything with nontrivial
   proof obligations belongs in `$KUIPER_HOME`, not here. Prefer instantiating a
   generic `Klas.<Kernel>.Inst` (e.g. `Klas.GEMM.TensorCore2D.Inst` fixes row-major
   layout) over `Kuiper.Kernel.<...>` when it saves proof steps — but only if the
@@ -72,6 +72,8 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
   an op isn't offloaded. Other env flags in `kuipy/config.py`:
   `KUIPY_JIT_VERBOSITY`, `KUIPY_JIT_VERIFY` (full F* verify vs admit-SMT),
   `KUIPY_JIT_FLUSH_CACHE`, `KUIPY_PRINT_PROFILING`.
+- **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. There is one exception right now in the form of `mm` which uses a cast at the output because it doesn't handle bf16 x bf16 -> bf16 matmul in Kuiper. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). `supported()` constraints should reflect the kernel's ability to handle broadcasting, and `run()` should not attempt to implement it in Python.
+- **Allocations**: By convention, the Kuiper kernels do not allocate output tensors and instead take the output tensor as argument. In terms of the native_functions.yaml of ATen, If it is OK for an input tensor to be modified and it is in the same alias set as the output, then the Kuiper implementation shall modify that input in place instead of there being a separate argument (this is the case for a unary elementwise operation for instance). The allocation of the output tensor should happen on the CUDA/C++ template side, not in Python. The allocation could also be a copy of some input tensor, for example in the `addmm` operator which copies the C matrix to the output matrix and the Kuiper kernel modifies this in-place. 
 - Keep code concise and match existing style; avoid excessive comments. Do new work
   on a fresh git worktree. Commits include:
   `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.

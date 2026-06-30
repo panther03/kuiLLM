@@ -45,6 +45,8 @@ ENABLE_PRINT_PROFILING = os.environ.get("KUIPY_PRINT_PROFILING", "0") == "1"
 # 2 = error when operator is not offloaded
 JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
+JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
+
 RE_TUNE = os.environ.get("KUIPY_RE_TUNE", "0") == "1"
 
 # --------------------------------------------------------------------------
@@ -89,6 +91,24 @@ KRML_FLAGS = [
     "-warn-error", "-2@4-10@18",
 ]
 
+# --------------------------------------------------------------------------
+# nvcc base flags
+# --------------------------------------------------------------------------
+
+NVCC_BASE_FLAGS = [
+    "-O3", "--use_fast_math",
+    "-Xcompiler", "-fPIC",
+    "--expt-relaxed-constexpr",
+    "-std=c++17",
+# wtf copilot ?
+# I guess these are to prevent accidental performance hits from casting stuff?
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+]
+if not JIT_NVCC_FAST:
+    NVCC_BASE_FLAGS = ["-Xcompiler", "-O0", "-lineinfo"]
 
 def nvcc_arch_flag():
     """gencode flag for the current device, or None if torch/CUDA unavailable."""

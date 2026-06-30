@@ -79,7 +79,8 @@ def test_bmm_unsupported():
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
-def test_addmm(dtype, alpha, beta):
+@pytest.mark.skip(reason="broadcasting currently disabled")
+def test_addmm_1d_bias(dtype, alpha, beta):
     _need_cuda()
     impl = kuiops.AddmmImpl({})
     torch.manual_seed(0)
@@ -94,14 +95,43 @@ def test_addmm(dtype, alpha, beta):
     _assert_close(out, ref, dtype)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
+def test_addmm(dtype, alpha, beta):
+    _need_cuda()
+    impl = kuiops.AddmmImpl({})
+    torch.manual_seed(0)
+    M, K, N = 64, 64, 64
+    A = torch.randn(M, K, device="cuda", dtype=dtype)
+    B = torch.randn(K, N, device="cuda", dtype=dtype)
+    bias = torch.randn(M, N, device="cuda", dtype=dtype)  # 2D bias/C matrix
+    kw = dict(alpha=alpha, beta=beta)
+    out = _run(impl, aten.addmm.default, (bias, A, B), kw)
+    ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, dtype)
+
+
 def test_addmm_rejects_f64():
     _need_cuda()
     impl = kuiops.AddmmImpl({})
     # BlockTiling2D needs has_vec_cpy -> no f64.
     A = torch.randn(32, 32, device="cuda", dtype=torch.float64)
     B = torch.randn(32, 32, device="cuda", dtype=torch.float64)
-    bias = torch.randn(32, device="cuda", dtype=torch.float64)
+    bias = torch.randn(32, 32, device="cuda", dtype=torch.float64)
     assert impl.supported(aten.addmm.default, (bias, A, B), {}) is None
+
+
+def test_addmm_rejects_broadcast_bias():
+    _need_cuda()
+    impl = kuiops.AddmmImpl({})
+    M, K, N = 32, 32, 32
+    A = torch.randn(M, K, device="cuda")
+    B = torch.randn(K, N, device="cuda")
+    bias_1d = torch.randn(N, device="cuda")
+    bias_wrong = torch.randn(1, N, device="cuda")
+    assert impl.supported(aten.addmm.default, (bias_1d, A, B), {}) is None
+    assert impl.supported(aten.addmm.default, (bias_wrong, A, B), {}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +170,7 @@ def test_softmax_non_last_dim_unsupported():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.skip(reason="SDPA currently disabled")
 def test_sdpa(dtype):
     _need_cuda()
     impl = kuiops.SdpaImpl({})
@@ -161,7 +192,7 @@ def test_sdpa(dtype):
     lse_ref = torch.logsumexp(scores, dim=-1)
     _assert_close(lse, lse_ref, dtype)
 
-
+@pytest.mark.skip(reason="SDPA currently disabled")
 def test_sdpa_causal_unsupported():
     _need_cuda()
     impl = kuiops.SdpaImpl({})

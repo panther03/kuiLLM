@@ -1,0 +1,51 @@
+{%- macro shape(dims) -%}
+{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- endmacro -%}
+{%- macro cshape(dims) -%}
+{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- endmacro -%}
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of the verified Kuiper scatter kernel. DO NOT EDIT.
+// Generated from kuiops/scatter/Kuiops.Scatter.Inst.fst.j2
+
+open Kuiper
+open Kuiper.Shape
+open Kuiper.Tensor
+open Kuiops.Scatter
+
+module SZ = Kuiper.SizeT
+
+// `dInp` is the src/index shape; `dOut` the (pointwise larger) self/output shape
+// and `dim` the scattered axis. `shape_le dInp dOut` holds by computation on the
+// literal shapes, so the binder refinement is discharged at the call. The
+// concrete cshapes are passed inline so extraction reduces them away (cshape is
+// `inline_for_extraction noextract`; a top-level `let` would not extract).
+let dInp : shape {{ r }} = {{ shape(dims_inp) }}
+let dOut : shape {{ r }} = {{ shape(dims_out) }}
+
+fn {{ name }}
+    (#lInp #lIdx : tlayout dInp) (#lOut : tlayout dOut)
+    {| ctlayout lInp, ctlayout lIdx, ctlayout lOut |}
+    (gInp : tensor ({{ et }}) lInp {is_global gInp})
+    (gIdx : tensor (szlt (dOut @! {{ dim }})) lIdx {is_global gIdx})
+    (gOut : tensor ({{ et }}) lOut {is_global gOut})
+    (n : sz { SZ.v n == sizeof dInp /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eInp : chest dInp ({{ et }}))
+    (eIdx : chest dInp (szlt (dOut @! {{ dim }})) { chest_inj dInp dOut {{ dim }} eIdx })
+    (#fInp #fIdx : perm)
+  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest dInp (szlt (dOut @! {{ dim }}))))
+  requires on gpu_loc (live gOut)
+  ensures
+    exists* eOut.
+      on gpu_loc (gOut |-> eOut) **
+      pure (vscatter_chest dInp dOut {{ dim }} eInp eIdx eOut)
+{
+  // Index injectivity is a *runtime* property of `eIdx`, carried here as the
+  // `chest_inj` refinement on its type. PyTorch leaves scatter with duplicate
+  // indices nondeterministic, so at this trusted C boundary it is assumed; the
+  // refinement is erased and never reaches the extracted kernel nor its ABI.
+  scatter_gpu dInp dOut ({{ cshape(dims_inp) }}) ({{ cshape(dims_out) }}) {{ dim }}sz
+    gInp gIdx gOut n eInp eIdx
+}

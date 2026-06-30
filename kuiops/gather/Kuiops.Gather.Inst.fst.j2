@@ -1,0 +1,45 @@
+{%- macro shape(dims) -%}
+{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- endmacro -%}
+{%- macro cshape(dims) -%}
+{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- endmacro -%}
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of the verified Kuiper gather kernel. DO NOT EDIT.
+// Generated from kuiops/gather/Kuiops.Gather.Inst.fst.j2
+
+open Kuiper
+open Kuiper.Shape
+open Kuiper.Tensor
+open Kuiops.Gather
+
+module SZ = Kuiper.SizeT
+
+// `dInp` is the (pointwise larger) input shape; `dIdx` is the index/output shape
+// and `dim` the gathered axis. `shape_le dIdx dInp` holds by computation on the
+// literal shapes, so the binder refinement is discharged at the call. The
+// concrete cshapes are passed inline so extraction reduces them away (cshape is
+// `inline_for_extraction noextract`; a top-level `let` would not extract).
+let dInp : shape {{ r }} = {{ shape(dims_inp) }}
+let dIdx : shape {{ r }} = {{ shape(dims_idx) }}
+
+fn {{ name }}
+    (#lInp : tlayout dInp) (#lIdx #lOut : tlayout dIdx)
+    {| ctlayout lInp, ctlayout lIdx, ctlayout lOut |}
+    (gInp : tensor ({{ et }}) lInp {is_global gInp})
+    (gIdx : tensor (szlt (dInp @! {{ dim }})) lIdx {is_global gIdx})
+    (gOut : tensor ({{ et }}) lOut {is_global gOut})
+    (n : sz { SZ.v n == sizeof dIdx /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eInp : chest dInp ({{ et }}))
+    (eIdx : chest dIdx (szlt (dInp @! {{ dim }})))
+    (#fInp #fIdx : perm)
+  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx eIdx)
+  requires on gpu_loc (live gOut)
+  ensures
+    on gpu_loc (gOut |-> gather_chest dIdx dInp eInp {{ dim }} eIdx)
+{
+  gather_gpu dIdx dInp ({{ cshape(dims_idx) }}) ({{ cshape(dims_inp) }}) {{ dim }}sz
+    gInp gIdx gOut n eInp eIdx
+}

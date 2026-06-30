@@ -4,14 +4,14 @@
 
 #include "{{module}}.h"
 
-// addmm(input, A, B, beta, alpha) = beta*input + alpha*(A@B).
-// C is preloaded (broadcast) with input and updated in place.
+// addmm(C, A, B, beta, alpha) = beta*C + alpha*(A@B).
 torch::Tensor op_{{name}} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
                            double alpha, double beta)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
+    auto Cout = C.clone();
 
     at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
 
@@ -21,9 +21,9 @@ torch::Tensor op_{{name}} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
         static_cast<{{cpp_et}}>((float)beta),
         reinterpret_cast<{{cpp_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_et}}*>(Bc.data_ptr()),
-        reinterpret_cast<{{cpp_et}}*>(C.data_ptr()));
+        reinterpret_cast<{{cpp_et}}*>(Cout.data_ptr()));
 
-    return C;
+    return Cout;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

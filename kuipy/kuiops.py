@@ -59,6 +59,22 @@ def torch_dtype_to_fstar(dt):
         torch.uint8: "u8"
     }[dt]
 
+def torch_dtype_to_fstar_namespace(dt):
+    return {
+        torch.float16: "Kuiper.Float16",
+        torch.float32: "Kuiper.Float32",
+        torch.float64: "Kuiper.Float64",
+        torch.bfloat16: "Kuiper.BFloat16",
+        torch.int64:  "FStar.Int64",
+        torch.int32:  "FStar.Int32",
+        torch.int16:  "FStar.Int16",
+        torch.int8:   "FStar.Int8",
+        torch.uint64: "FStar.UInt64",
+        torch.uint32: "FStar.UInt32",
+        torch.uint16: "FStar.UInt16",
+        torch.uint8:  "FStar.UInt8"
+    }[dt]
+
 def torch_dtype_to_ctype(dt):
     return {
         torch.float16: "__half",
@@ -85,7 +101,33 @@ def torch_dtype_to_aten_scalar(dt):
         # todo fill in
     }[dt]
 
-_FLOAT_DTYPES = (torch.float16, torch.float32, torch.float64, torch.bfloat16)
+_FLOAT_DTYPES = [torch.float16, torch.float32, torch.float64, torch.bfloat16]
+
+# TODO: signed integers do not have the scalar typeclass in kuiper
+# because we do not have total unconditional operations on them. 
+# What to do about it?
+_SCALAR_DTYPES = _FLOAT_DTYPES + [torch.uint16, torch.uint32, torch.uint64]
+                
+def cast_constarg(c,dt):
+    if isinstance(c, float):
+        return f"(fcast (Kuiper.Float64.is_floating.of_literal \"{c:f}\"))"
+    elif isinstance(c, int):    
+        cast_typename = {
+            torch.int8: "int8",
+            torch.int16: "int16",
+            torch.int32: "int32",
+            torch.int64: "int64",
+            torch.uint8: "uint8",
+            torch.uint16: "uint16",
+            torch.uint32: "uint32",
+            torch.uint64: "uint64"
+        }[dt]
+        return f"(uint64_to_{cast_typename} (FStar.UInt64.uint_to_t {c:d}))"
+    else:
+        raise ValueError(c)
+
+# LATER: be more dilligent about checking tensor layouts when a Kuiper operator expects row_major or column_major etc.
+# Or if we flatten it on the Kuiper side then it doesn't matter.
 
 # ---------------------------------------------------------------------------
 # Elementwise (unary, binary, scalar-broadcast)
@@ -96,6 +138,20 @@ class ElementwiseImpl(_Family):
     wrapper_template = "elementwise/wrapper_elementwise.cu.j2"
     tune_key = "ELEM"
     tune_params = ()
+
+    # operators all scalar dtypes should be expected to have
+    _floating_ops = [
+        aten.silu.default,
+        aten.neg.default,
+        aten.rsqrt.default,
+        aten.cos.default,
+        aten.sin.default,
+        aten.pow.Tensor_Scalar,
+        aten.add.Tensor,
+        aten.add.Scalar,
+        aten.mul.Tensor,
+        aten.mul.Scalar
+    ]
     
     def _aten_fn_to_fstar_impl(self,fn):
         impl = None
@@ -128,8 +184,12 @@ class ElementwiseImpl(_Family):
                     and A.is_cuda and B.is_cuda and A.dtype == B.dtype
                     and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
 
-        if args[0].dtype not in _FLOAT_DTYPES:
-            return None # TODO: integers do not have scalar typeclass for some reason
+        # Not strictly required of map_gpu or map_gpu2, but all the operations 
+        # we support require scalar typeclass, so we filter dtypes that don't match out.
+        if args[0].dtype not in _SCALAR_DTYPES:
+            return None
+        if args[0].dtype not in _FLOAT_DTYPES and (func not in ElementwiseImpl._floating_ops):
+            return None
 
         impl = self._aten_fn_to_fstar_impl(func)
         if impl is not None:
@@ -141,20 +201,20 @@ class ElementwiseImpl(_Family):
                 if (func is aten.add.Tensor or 
                     func is aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
                     impl += "_alpha"
-                    constargs += [_scalar(kwargs["alpha"])]
+                    alpha = _scalar(kwargs["alpha"])
+                    assert alpha is not None
+                    constargs += [alpha]
 
                 # Special case for square, since it seems to have impact on the precision aside from just speed.
                 if ((func is aten.pow.Tensor_Scalar) and
                     (isinstance(args[1], int)) and args[1] == 2):
                     return ("square", 1, [], [args[0]])
-                    
 
-                # TODO: apparently the Tensor operators can have a scalar 
-                # second argument as well? wtf is the point of them then? investigate
-                if (func is aten.add.Scalar or 
-                    func is aten.mul.Scalar or 
-                    func is aten.pow.Tensor_Scalar) and unary(args[0]):
-                    constargs += [_scalar(args[1])]
+                # Any binary operator that is supplying a scalar as the second argument
+                # (whether by spec e.g. add.Scalar or by overloading), just 
+                # check that args[0] is a valid unary op input and add the constant to constargs.
+                if unary(args[0]) and (s := _scalar(args[1])):
+                    constargs += [s]
                     return (impl, 1, constargs, [args[0]])
                 elif binary(args[0], args[1]):
                     return (impl, 2, constargs, [args[0], args[1]])
@@ -165,14 +225,9 @@ class ElementwiseImpl(_Family):
         method, arity, constargs, call = spec
         dtype = torch_dtype_to_fstar(call[0].dtype)
         args = [f"(i{i}: {dtype})" for i in range(arity)]
-        # TODO: integer constants
-        # TODO: we should have a map_gpu that does not cast the constant to `et`,
-        # but rather promotes the `et` tensor to the higher precision type and 
-        # does the math and writes the result in that type. 
-        # Or we can just do the math in that type and then cast it back,
-        # this does not require a new kernel, but it is less precise 
-        # and I don't think it reflects the behavior of PyTorch.
-        all_args = [f"i{i}" for i in range(arity)] + [f"(fcast (Kuiper.Float64.is_floating.of_literal \"{c:f}\"))" for c in constargs]
+        # TODO: proper handling of PyTorch's type promotion rules for mixed-precision math. 
+        # For now, we just cast the constant to the same type as the tensor.
+        all_args = [f"i{i}" for i in range(arity)] + [cast_constarg(c, call[0].dtype) for c in constargs]
 
         module = f"Kuiops.Elementwise{arity}.{method.title()}.{dtype.title()}"
         name = f"elem{arity}_{method}_{dtype}_jit"
@@ -334,6 +389,8 @@ class MmImpl(_Family):
             out_scalar=torch_dtype_to_aten_scalar(out_dtype),
         )
         res = self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+        # TODO: remove. We should never have a call to a cast operator like this.
+        # Problem is the kuiper kernels don't all support in dtype = out dtype (e.g. bf16 tc2d gemm).
         if out_dtype != in_dtype:
             res = res.to(in_dtype)
         return res
@@ -399,7 +456,7 @@ class AddmmImpl(_Family):
         Cin, A, B = args
         # BlockTiling2D needs scalar + has_vec_cpy: f32, f16, bf16 (no f64).
         if not (A.is_cuda and B.is_cuda and Cin.is_cuda and
-                A.dim() == 2 and B.dim() == 2 and
+                A.dim() == 2 and B.dim() == 2 and Cin.dim() == 2 and
                 A.dtype == B.dtype == Cin.dtype and
                 A.dtype in (torch.float16, torch.float32, torch.bfloat16)):
             return None
@@ -407,7 +464,7 @@ class AddmmImpl(_Family):
         K2, N = (int(x) for x in B.shape)
         if K != K2 or M * N > _MAX_BLOCKS:
             return None
-        if tuple(torch.broadcast_shapes(tuple(Cin.shape), (M, N))) != (M, N):
+        if tuple(int(x) for x in Cin.shape) != (M, N):
             return None
         tile_params = _bt2d_tile(A.dtype, M, N, K)
         if tile_params is None:
@@ -431,15 +488,14 @@ class AddmmImpl(_Family):
             name=name,
             cpp_et=torch_dtype_to_ctype(dtype),
         )
-        C = torch.empty((M, N), dtype=dtype, device=A.device)
-        C.copy_(Cin)
-        return self._mod(module, fst_ctx, wrapper_ctx).run(C, A, B, alpha, beta)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(Cin, A, B, alpha, beta)
 
 
 # ---------------------------------------------------------------------------
 # softmax (row-wise, last dim)
 # ---------------------------------------------------------------------------
 
+# LATER: implement this as a proper n-dimensional batched operator on the kuiper side
 class SoftmaxImpl(_Family):
     fst_template = "softmax/Kuiops.Softmax.Inst.fst.j2"
     wrapper_template = "softmax/wrapper_softmax.cu.j2"
@@ -475,6 +531,7 @@ class SoftmaxImpl(_Family):
             name=name,
             cpp_et=torch_dtype_to_ctype(dtype),
         )
+        # TODO: move this stuff to C++ for consistency
         A = X.contiguous().reshape(m, n).clone()
         out = self._mod(module, fst_ctx, wrapper_ctx).run(A)
         return out.reshape(X.shape)
@@ -485,6 +542,8 @@ import math as _math
 # ---------------------------------------------------------------------------
 # Scaled dot-product attention (efficient_attention)
 # ---------------------------------------------------------------------------
+
+# NOTE: currently disconnected. may remove and only support flashattention.
 
 class SdpaImpl(_Family):
     fst_template = "sdpa/Kuiops.Sdpa.Inst.fst.j2"
@@ -547,3 +606,193 @@ class SdpaImpl(_Family):
         lse = lse.to(torch.float32)
         empty = torch.empty([], dtype=torch.int64)
         return (out, lse, empty, empty)
+
+
+# ---------------------------------------------------------------------------
+# Indexed data-movement (gather / scatter / cat)
+# ---------------------------------------------------------------------------
+#
+# These kernels only move element payloads (no arithmetic), so they impose no
+# `scalar` typeclass requirement on the element type -- any dtype with a layout
+# is fine. The index tensor is int64 and reinterpreted bit-for-bit as the
+# kernel's machine-word offset type. The concrete tensor shapes are baked into
+# the F* instantiation (hence the module name encodes them), and the output is
+# allocated on the C++ side per the wrapper conventions.
+
+# dtypes these movement ops accept (everything with both an F* element type and
+# a C type); the kernels need no `scalar` typeclass, only a layout.
+_MOVE_DTYPES = _FLOAT_DTYPES + [
+    torch.int64, torch.int32, torch.int16, torch.int8,
+    torch.uint8, torch.uint16, torch.uint32, torch.uint64,
+]
+
+
+def _shape_le(small, large):
+    """Pointwise ``small[d] <= large[d]`` over equal ranks (Kuiper ``shape_le``)."""
+    return len(small) == len(large) and all(s <= l for s, l in zip(small, large))
+
+
+def _shp(dims):
+    return "x".join(str(int(d)) for d in dims)
+
+
+def _numel(dims):
+    n = 1
+    for d in dims:
+        n *= int(d)
+    return n
+
+
+class GatherImpl(_Family):
+    fst_template = "gather/Kuiops.Gather.Inst.fst.j2"
+    wrapper_template = "gather/wrapper_gather.cu.j2"
+    tune_key = "GATHER"
+    tune_params = ()
+
+    def supported(self, func, args, kwargs):
+        # aten.gather.default(self, dim, index, *, sparse_grad=False)
+        if len(args) < 3 or kwargs.get("sparse_grad", False):
+            return None
+        Inp, dim, Idx = args[0], args[1], args[2]
+        if not (isinstance(Inp, torch.Tensor) and isinstance(Idx, torch.Tensor)
+                and Inp.is_cuda and Idx.is_cuda):
+            return None
+        if Inp.dtype not in _MOVE_DTYPES or Idx.dtype != torch.int64:
+            return None
+        rank = Inp.dim()
+        if Idx.dim() != rank or rank < 1:
+            return None
+        dim = _norm_dim(int(dim), rank)
+        if not (0 <= dim < rank):
+            return None
+        inp_shape = [int(x) for x in Inp.shape]
+        idx_shape = [int(x) for x in Idx.shape]
+        # The kernel requires `shape_le idx inp` (pointwise over every axis).
+        if not _shape_le(idx_shape, inp_shape):
+            return None
+        if not (0 < _numel(idx_shape) <= _MAX_NUMEL):
+            return None
+        return (Inp.dtype, dim, inp_shape, idx_shape, [Inp, Idx])
+
+    def run(self, spec, args, kwargs):
+        dtype, dim, inp_shape, idx_shape, call = spec
+        et = torch_dtype_to_fstar(dtype)
+        module = (f"Kuiops.Gather.{et.title()}.Dim{dim}"
+                  f".Idx_{_shp(idx_shape)}.Inp_{_shp(inp_shape)}")
+        name = "gather_jit"
+        fst_ctx = dict(
+            module=module, name=name, r=len(inp_shape),
+            dims_inp=inp_shape, dims_idx=idx_shape, dim=dim, et=et)
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"), name=name, dim=dim,
+            cpp_et=torch_dtype_to_ctype(dtype))
+        # wrapper: op(Input, Index)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+
+
+class ScatterImpl(_Family):
+    fst_template = "scatter/Kuiops.Scatter.Inst.fst.j2"
+    wrapper_template = "scatter/wrapper_scatter.cu.j2"
+    tune_key = "SCATTER"
+    tune_params = ()
+
+    def supported(self, func, args, kwargs):
+        # aten.scatter.src(self, dim, index, src)
+        if len(args) < 4:
+            return None
+        Self, dim, Idx, Src = args[0], args[1], args[2], args[3]
+        if not all(isinstance(t, torch.Tensor) for t in (Self, Idx, Src)):
+            return None
+        if not (Self.is_cuda and Idx.is_cuda and Src.is_cuda):
+            return None
+        if Self.dtype not in _MOVE_DTYPES or Src.dtype != Self.dtype:
+            return None
+        if Idx.dtype != torch.int64:
+            return None
+        rank = Self.dim()
+        if Idx.dim() != rank or Src.dim() != rank or rank < 1:
+            return None
+        dim = _norm_dim(int(dim), rank)
+        if not (0 <= dim < rank):
+            return None
+        self_shape = [int(x) for x in Self.shape]
+        idx_shape = [int(x) for x in Idx.shape]
+        src_shape = [int(x) for x in Src.shape]
+        # The kernel models src and index with one shape `di`, so they must match.
+        if src_shape != idx_shape:
+            return None
+        # Requires `shape_le src self` (pointwise over every axis).
+        if not _shape_le(src_shape, self_shape):
+            return None
+        if not (0 < _numel(src_shape) <= _MAX_NUMEL):
+            return None
+        return (Self.dtype, dim, src_shape, self_shape, [Self, Idx, Src])
+
+    def run(self, spec, args, kwargs):
+        dtype, dim, src_shape, self_shape, call = spec
+        Self, Idx, Src = call
+        et = torch_dtype_to_fstar(dtype)
+        module = (f"Kuiops.Scatter.{et.title()}.Dim{dim}"
+                  f".Src_{_shp(src_shape)}.Self_{_shp(self_shape)}")
+        name = "scatter_jit"
+        fst_ctx = dict(
+            module=module, name=name, r=len(self_shape),
+            dims_inp=src_shape, dims_out=self_shape, dim=dim, et=et)
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"), name=name, dim=dim,
+            cpp_et=torch_dtype_to_ctype(dtype))
+        # wrapper: op(Self, Index, Src) -> clone(Self) updated in place
+        return self._mod(module, fst_ctx, wrapper_ctx).run(Self, Idx, Src)
+
+
+class CatImpl(_Family):
+    fst_template = "cat/Kuiops.Cat.Inst.fst.j2"
+    wrapper_template = "cat/wrapper_cat.cu.j2"
+    tune_key = "CAT"
+    tune_params = ()
+
+    def supported(self, func, args, kwargs):
+        # aten.cat.default(tensors, dim=0) -- the kernel is binary only.
+        if len(args) < 1:
+            return None
+        tensors = args[0]
+        dim = args[1] if len(args) > 1 else kwargs.get("dim", 0)
+        if not (isinstance(tensors, (list, tuple)) and len(tensors) == 2):
+            return None
+        A, B = tensors
+        if not all(isinstance(t, torch.Tensor) and t.is_cuda for t in (A, B)):
+            return None
+        if A.dtype != B.dtype or A.dtype not in _MOVE_DTYPES:
+            return None
+        rank = A.dim()
+        if B.dim() != rank or rank < 1:
+            return None
+        dim = _norm_dim(int(dim), rank)
+        if not (0 <= dim < rank):
+            return None
+        a_shape = [int(x) for x in A.shape]
+        b_shape = [int(x) for x in B.shape]
+        # Every axis except `dim` must agree.
+        if any(a_shape[d] != b_shape[d] for d in range(rank) if d != dim):
+            return None
+        out_shape = list(a_shape)
+        out_shape[dim] = a_shape[dim] + b_shape[dim]
+        if not (0 < _numel(out_shape) <= _MAX_NUMEL):
+            return None
+        return (A.dtype, dim, a_shape, b_shape, out_shape, [A, B])
+
+    def run(self, spec, args, kwargs):
+        dtype, dim, a_shape, b_shape, out_shape, call = spec
+        et = torch_dtype_to_fstar(dtype)
+        module = (f"Kuiops.Cat.{et.title()}.Dim{dim}"
+                  f".A_{_shp(a_shape)}.B_{_shp(b_shape)}")
+        name = "cat_jit"
+        fst_ctx = dict(
+            module=module, name=name, r=len(out_shape),
+            dims_a=a_shape, dims_b=b_shape, dims_out=out_shape,
+            dim=dim, na=a_shape[dim], et=et)
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"), name=name, dim=dim,
+            cpp_et=torch_dtype_to_ctype(dtype))
+        # wrapper: op(A, B)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)

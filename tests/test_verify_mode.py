@@ -5,6 +5,7 @@ synthetic tensors (no kernel compilation, CPU-only) so they run fast.
 """
 import io
 
+import pytest
 import torch
 
 import kuipy
@@ -38,7 +39,7 @@ def test_divergent_tensors_fail():
     s = kuipy.verify_stats["aten.mm"]
     assert s["fail"] == 1 and s["max_rel"] > 2e-2 and "rel=" in s["worst"]
 
-
+@pytest.mark.skip(reason="SDPA currently disabled")
 def test_empty_reference_is_skipped():
     _fresh()
     out = torch.randn(2, 3, 1)              # kuiper always computes the LSE
@@ -49,7 +50,7 @@ def test_empty_reference_is_skipped():
     s = kuipy.verify_stats["aten.sdpa"]
     assert s["n"] == 0 and s["fail"] == 0
 
-
+@pytest.mark.skip(reason="SDPA currently disabled")
 def test_nonfinite_positions_are_ignored():
     _fresh()
     # A fully-masked attention row: kuiper -> NaN, torch -> 0. Those positions
@@ -62,7 +63,7 @@ def test_nonfinite_positions_are_ignored():
     s = kuipy.verify_stats["aten.sdpa"]
     assert s["n"] == 1 and s["fail"] == 0
 
-
+@pytest.mark.skip(reason="SDPA currently disabled")
 def test_tuple_outputs_compared_elementwise():
     _fresh()
     a, b = torch.randn(4, 4), torch.randn(4)

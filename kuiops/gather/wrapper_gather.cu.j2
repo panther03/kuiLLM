@@ -1,0 +1,34 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper gather kernel. DO NOT EDIT.
+// Generated from kuiops/gather/wrapper_gather.cu.j2
+//
+// torch.gather(input, dim={{ dim }}, index): `index` (and the output) are
+// pointwise no larger than `input`; every output cell reads `input` at the same
+// coordinates with axis {{ dim }} replaced by the index value. Inputs are made
+// contiguous; the output is freshly allocated with `index`'s shape and `input`'s
+// dtype. The index tensor holds machine-word offsets (size_t) into `input`.
+
+torch::Tensor op_{{ name }} (torch::Tensor Input, torch::Tensor Index)
+{
+    auto Inp = Input.contiguous();
+    auto Idx = Index.contiguous();
+    auto Out = torch::empty(Idx.sizes(), Inp.options());
+
+    at::cuda::CUDAGuard g(Input.device()); kuiops::sync_current_stream();
+
+    {{ sym }} (
+        reinterpret_cast<{{ cpp_et }}*>(Inp.data_ptr()),
+        reinterpret_cast<size_t*>(Idx.data_ptr()),
+        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
+        (size_t)Out.numel());
+
+    return Out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{ name }}, "op_{{ name }}");
+}

@@ -5,15 +5,8 @@ and (on a hit) a memoised compiled-kernel call. On any miss it returns ``None`` 
 the caller falls through to stock PyTorch.
 """
 from .kuiops import (ElementwiseImpl, MmImpl, BmmImpl, AddmmImpl, SoftmaxImpl,
-                     SdpaImpl)
+                     SdpaImpl, GatherImpl, ScatterImpl, CatImpl)
 from . import config as C
-
-# _GEMM = GemmImpl()
-# _REDUCE = ReduceImpl()
-# _CATCAST = CatCastImpl()
-# _ARANGE = ArangeImpl()
-# _GATHER = GatherImpl()
-# _BMM = BmmImpl()
 
 # Lazily populated on first use (needs torch.ops.aten).
 _REGISTRY = None
@@ -27,34 +20,18 @@ def _build_registry(tune_params):
     _BMM = BmmImpl(tune_params)
     _ADDMM = AddmmImpl(tune_params)
     _SOFTMAX = SoftmaxImpl(tune_params)
-    _SDPA = SdpaImpl(tune_params)
-
-    '''
-    aten.mm.default: _GEMM,
-    aten.addmm.default: _GEMM,
-    aten.bmm.default: _BMM,
-    aten.silu.default: _ELEM,
-    aten.neg.default: _ELEM,
-    aten.rsqrt.default: _ELEM,
-    aten.cos.default: _ELEM,
-    aten.sin.default: _ELEM,
-    aten.pow.Tensor_Scalar: _ELEM,
-    aten.add.Tensor: _ELEM,
-    aten.add.Scalar: _ELEM,
-    aten.mul.Tensor: _ELEM,
-    aten.mul.Scalar: _ELEM,
-    aten.mean.dim: _REDUCE,
-    aten.cat.default: _CATCAST,
-    aten._to_copy.default: _CATCAST,
-    aten.arange.default: _ARANGE,
-    aten.gather.default: _GATHER,'''
+    _GATHER = GatherImpl(tune_params)
+    _SCATTER = ScatterImpl(tune_params)
+    _CAT = CatImpl(tune_params)
+    # NOTE: currently disconnected
+    # _SDPA = SdpaImpl(tune_params)
     return {
         aten.silu.default: _ELEM,
         aten.neg.default: _ELEM,
         aten.rsqrt.default: _ELEM,
         aten.cos.default: _ELEM,
         aten.sin.default: _ELEM,
-        #aten.pow.Tensor_Scalar: _ELEM, # imprecise ??
+        aten.pow.Tensor_Scalar: _ELEM,
         aten.add.Tensor: _ELEM,
         aten.add.Scalar: _ELEM,
         aten.mul.Tensor: _ELEM,
@@ -63,6 +40,9 @@ def _build_registry(tune_params):
         aten.bmm.default: _BMM,
         aten.addmm.default: _ADDMM,
         aten._softmax.default: _SOFTMAX,
+        aten.gather.default: _GATHER,
+        aten.scatter.src: _SCATTER,
+        aten.cat.default: _CAT,
         #aten._scaled_dot_product_efficient_attention.default: _SDPA,
     }
 

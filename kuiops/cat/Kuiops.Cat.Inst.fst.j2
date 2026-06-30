@@ -1,0 +1,46 @@
+{%- macro shape(dims) -%}
+{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- endmacro -%}
+{%- macro cshape(dims) -%}
+{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- endmacro -%}
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of the verified Kuiper cat kernel. DO NOT EDIT.
+// Generated from kuiops/cat/Kuiops.Cat.Inst.fst.j2
+
+open Kuiper
+open Kuiper.Shape
+open Kuiper.Tensor
+open Kuiops.Cat
+
+module SZ = Kuiper.SizeT
+
+let dA : shape {{ r }} = {{ shape(dims_a) }}
+let dB : shape {{ r }} = {{ shape(dims_b) }}
+let dOut : shape {{ r }} = {{ shape(dims_out) }}
+
+let cdA : cshape dA = {{ cshape(dims_a) }}
+let cdB : cshape dB = {{ cshape(dims_b) }}
+let cdOut : cshape dOut = {{ cshape(dims_out) }}
+
+// `dim` and `na` are baked from the concrete request; the three shape side
+// conditions hold by computation on the literal shapes (hence the `()` proofs).
+fn {{ name }}
+    (#lA : tlayout dA) (#lB : tlayout dB) (#lOut : tlayout dOut)
+    {| ctlayout lA, ctlayout lB, ctlayout lOut |}
+    (gA : tensor ({{ et }}) lA {is_global gA})
+    (gB : tensor ({{ et }}) lB {is_global gB})
+    (gOut : tensor ({{ et }}) lOut {is_global gOut})
+    (n : sz { SZ.v n == sizeof dOut /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eA : chest dA ({{ et }})) (eB : chest dB ({{ et }}))
+    (#fA #fB : perm)
+  preserves cpu ** on gpu_loc (gA |-> Frac fA eA) ** on gpu_loc (gB |-> Frac fB eB)
+  requires on gpu_loc (live gOut)
+  ensures
+    on gpu_loc (gOut |-> cat_chest {{ dim }} dA dB dOut eA eB {{ na }} () () ())
+{
+  cat_gpu dA dB dOut cdA cdB cdOut {{ dim }} {{ na }}sz () () ()
+      gA gB gOut n eA eB
+}

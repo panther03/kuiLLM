@@ -1,0 +1,38 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper scatter kernel. DO NOT EDIT.
+// Generated from kuiops/scatter/wrapper_scatter.cu.j2
+//
+// torch.scatter(self, dim={{ dim }}, index, src): the output keeps `self`'s
+// shape; each src cell is written to `self` at the same coordinates with axis
+// {{ dim }} replaced by the index value. `index`/`src` are pointwise no larger
+// than `self`. The output is a copy of `self` (so untouched cells keep `self`'s
+// values), which the kernel updates in place. The index tensor holds machine-word
+// offsets (size_t) into the scattered axis.
+//
+// NOTE: duplicate indices make scatter nondeterministic (as in PyTorch); the
+// verified kernel assumes the index map is injective.
+
+torch::Tensor op_{{ name }} (torch::Tensor Self, torch::Tensor Index, torch::Tensor Src)
+{
+    auto Out = kuiops::clone_in(Self);
+    auto Idx = Index.contiguous();
+    auto S   = Src.contiguous();
+
+    at::cuda::CUDAGuard g(Self.device()); kuiops::sync_current_stream();
+
+    {{ sym }} (
+        reinterpret_cast<{{ cpp_et }}*>(S.data_ptr()),
+        reinterpret_cast<size_t*>(Idx.data_ptr()),
+        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
+        (size_t)S.numel());
+
+    return Out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{ name }}, "op_{{ name }}");
+}
