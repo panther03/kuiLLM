@@ -41,7 +41,7 @@ install-kuiper: _reset-kuiper-touch
 	@+set -e; \
 	KUIPER_HOME=$$(realpath "$(KUIPER_HOME)"); \
 	KUIPER_INST=$$(realpath -m "$(KUIPER_INST)"); \
-	$(MAKE) -C "$$KUIPER_HOME" -f verify.mk prepare verify-minimal ADMIT=1; \
+	$(MAKE) -C "$$KUIPER_HOME" -f verify.mk prepare verify-all ADMIT=1; \
 	rm -rf "$$KUIPER_INST"; \
 	cp -r "$$KUIPER_HOME/inst" "$$KUIPER_INST"; \
 	mkdir -p "$$KUIPER_INST/lib/fstar/kuiper.checked/"; \

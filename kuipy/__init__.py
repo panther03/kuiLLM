@@ -7,7 +7,10 @@ from . import config as C
 def arg_data(a):
     import torch
     if isinstance(a, torch.Tensor):
-        return (len(a.shape), a.dtype, a.device)
+        shape = len(a.shape)
+        if C.JIT_VERBOSITY > 1:
+            shape = tuple(a.shape)
+        return (shape, a.dtype, a.device)
     elif isinstance(a, (list, tuple)):
         return (0x67, tuple([arg_data(ai) for ai in a]))
     elif isinstance(a, (torch.dtype, torch.device, bool)):

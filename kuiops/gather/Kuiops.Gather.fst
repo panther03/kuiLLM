@@ -41,16 +41,12 @@ instance gather_frame_shareable
   (eInp: chest d et)
   (eIdx: chest d (szlt (d @! (SZ.v dim))))
   (fInp fIdx: perm):
-  shareable (gather_frame d cd dim #lInp #lIdx gInp gIdx eInp eIdx fInp fIdx) = magic ()
-(*
-  WHY IS CALLING double_shareable A GHOST EFFECT??
-  
-  double_shareable 
-  (fun fr -> tensor_pts_to gInp #fr eInp) 
-  (fun fr -> tensor_pts_to gIdx #fr eIdx)
-  (fInp /. (fInp +. fIdx)) (fIdx /. (fInp +. fIdx))
-*)
-  
+  shareable (gather_frame d cd dim #lInp #lIdx gInp gIdx eInp eIdx fInp fIdx) =
+    double_shareable 
+    (fun fr -> tensor_pts_to gInp #fr eInp) 
+    (fun fr -> tensor_pts_to gIdx #fr eIdx)
+    (fInp /. (fInp +. fIdx)) (fIdx /. (fInp +. fIdx))
+
 inline_for_extraction noextract
 fn fgather (#et : Type0) (#r : erased nat) (d : shape r) (cd: cshape d)
   (dim: szlt r)
