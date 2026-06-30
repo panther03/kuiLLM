@@ -5,19 +5,9 @@ open Kuiper
 open Kuiper.Shape
 open Kuiper.Chest
 open Kuiper.Tensor
+open Kuiops.Common
 
 module SZ = Kuiper.SizeT
-
-let rec set_at (#r : nat) (#d : shape r) (dim : natlt r) (idx : natlt (d @! dim)) (x : abs d)
-  : GTot (abs d)
-         (decreases r)
-  = assert r > 0;
-    let (i1, i2) = x <: natlt (d @! 0) & abs (tail d) in
-    if dim == 0 then
-      (idx, i2)
-    else
-      (i1, set_at #_ #(tail d) (dim - 1) idx i2)
-
 
 let gather_chest 
   (#et : Type0)
@@ -29,7 +19,7 @@ let gather_chest
   = Kuiper.Chest.mk d
       (fun (x : abs d) ->
          let idx = acc eIdx x in
-         let x' = set_at dim idx x in
+         let x' = abs_set_at dim idx x in
          acc eInp x')
 
 (* LATER: technically, idx and out can be smaller than inp. PyTorch says:
@@ -58,6 +48,7 @@ fn gather_gpu
   (gInp: tensor et lInp {is_global gInp})
   (gIdx: tensor (szlt (d @! (SZ.v dim))) lIdx {is_global gIdx})
   (gOut: tensor et lOut {is_global gOut})
+  (n : sz{SZ.v n == sizeof d /\ n <= max_blocks * max_threads /\ n > 0})
   (eInp: chest d et)
   (eIdx: chest d (szlt (d @! (SZ.v dim))))
   (#fInp #fIdx: perm)
