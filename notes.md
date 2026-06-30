@@ -20,3 +20,17 @@ So far, I have `aten` (torch) operators `mm` and a number of elementwise kernels
 * Please keep code concise, try to follow existing conventions, and do not add excessive comments.
 * Do not hesitate to ask any questions.
 * Please work on a new git worktree.
+
+## reduce
+
+Can you implement all the reduce-style kernels in KERNELS.md - generic Kuiper kernel, jinja template, and Python integration? These kernels have been marked with [r] (reduce) and [br] (batch-reduce). The [r] ops do not use any sort of batching and are defined as a reduction on the entire tensor (if multiple dimensions, flatten it as contiguous and reduce over that array). The [br] ops have some sort of batch-reduction, where the reduction is only applied over some dimension(s) and the remaining dims are mapped. Some specific notes:
+
+- For aten.mean.dim (https://docs.pytorch.org/docs/2.12/generated/torch.mean.html) and aten.cumsum.default (https://docs.pytorch.org/docs/2.12/generated/torch.cumsum.html), while they can normally support a tuple of dimensions to reduce over, you can opt to only support the case of 1 dim argument, and just unpack the tuple as a singleton in the supported() method. 
+- aten.mean.dim should be a proper N-dimensional kernel in the style of gather, scatter, cat.
+- In the KERNELS.md, aten.mean.dim is called with keepdim=True, so you can assume this behavior in the kuiper kernel and gate the requirement in supported().
+- Kuiper might be missing the abstractions necesssary to cast a SizeT to a float, which you will most likely need for aten.mean.dim in order to divide the sum by the length of the array (It should of course be a float/element-type division, not a SizeT division). If you find this is the case after investigating Kuiper, add it as another cast function in Kuiper.Float.Casts.Base.fsti, and add extraction support for it in ExtractKuiper.fst (all in the main kuiper repo). You will then have to run `make install-kuiper` which will trigger a rebuild of most of the kuiper repo, this will most likely take a long time and you will want to parallelize with -j8 ish but not too many jobs as you can run out of RAM.
+- As stated in the instructions use a different kuiLLM worktree. You can however modify the main Kuiper repo.
+- You can assume torch.bool is a uint8_t.
+- You will probably find Kuiper.Kernel.HReduce.Block and Kuiper.Kernel.HReduce useful. Ignore Kuiper.Kernel.Reduce and Kuiper.Kernel.RowReduce.
+- Do not worry about unit tests for now. 
+- Start your worktree from the latest commit as the tree is dirty. 
