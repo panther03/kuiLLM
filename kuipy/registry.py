@@ -5,7 +5,7 @@ and (on a hit) a memoised compiled-kernel call. On any miss it returns ``None`` 
 the caller falls through to stock PyTorch.
 """
 from .kuiops import (ElementwiseImpl, MmImpl, BmmImpl, AddmmImpl, SoftmaxImpl,
-                     SdpaImpl, GatherImpl, ScatterImpl, CatImpl)
+                     SdpaImpl, GatherImpl, ScatterImpl, CatImpl, MeanImpl)
 from . import config as C
 
 # Lazily populated on first use (needs torch.ops.aten).
@@ -23,6 +23,7 @@ def _build_registry(tune_params):
     _GATHER = GatherImpl(tune_params)
     _SCATTER = ScatterImpl(tune_params)
     _CAT = CatImpl(tune_params)
+    _MEAN = MeanImpl(tune_params)
     # NOTE: currently disconnected
     # _SDPA = SdpaImpl(tune_params)
     return {
@@ -43,6 +44,7 @@ def _build_registry(tune_params):
         aten.gather.default: _GATHER,
         aten.scatter.src: _SCATTER,
         aten.cat.default: _CAT,
+        aten.mean.dim: _MEAN,
         #aten._scaled_dot_product_efficient_attention.default: _SDPA,
     }
 

@@ -1,0 +1,34 @@
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper mean kernel. DO NOT EDIT.
+// Generated from kuiops/mean/wrapper_mean.cu.j2
+//
+// torch.mean(input, dim={{ dim }}, keepdim=True): reduce a single axis by
+// averaging over it, keeping that axis with size 1. The kernel maps over the
+// (row-major contiguous) output, so the input is made contiguous and the output
+// is allocated with the input shape but size 1 along `dim`.
+
+torch::Tensor op_{{ name }} (torch::Tensor Input)
+{
+    auto In = Input.contiguous();
+
+    auto out_sizes = In.sizes().vec();
+    out_sizes[{{ dim }}] = 1;
+    auto Out = torch::empty(out_sizes, In.options());
+
+    at::cuda::CUDAGuard g(Input.device()); kuiops::sync_current_stream();
+
+    {{ sym }} (
+        reinterpret_cast<{{ cpp_et }}*>(In.data_ptr()),
+        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
+        (size_t)Out.numel());
+
+    return Out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{ name }}, "op_{{ name }}");
+}

@@ -796,3 +796,65 @@ class CatImpl(_Family):
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(A, B)
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+
+
+class MeanImpl(_Family):
+    fst_template = "mean/Kuiops.Mean.Inst.fst.j2"
+    wrapper_template = "mean/wrapper_mean.cu.j2"
+    tune_key = "MEAN"
+    tune_params = ()
+
+    def supported(self, func, args, kwargs):
+        # aten.mean.dim(self, dim, keepdim=False, *, dtype=None). The kernel
+        # reduces a single axis and requires keepdim=True (output keeps a size-1
+        # axis at `dim`); only the 1-dim case is supported, so an int[1] tuple
+        # is unpacked as a singleton here.
+        if len(args) < 2:
+            return None
+        Inp = args[0]
+        dim = args[1]
+        keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+        if kwargs.get("dtype", None) is not None:
+            return None
+        if not (isinstance(Inp, torch.Tensor) and Inp.is_cuda):
+            return None
+        if Inp.dtype not in _FLOAT_DTYPES or not keepdim:
+            return None
+        if isinstance(dim, (list, tuple)):
+            if len(dim) != 1:
+                return None
+            dim = dim[0]
+        if dim is None:
+            return None
+        rank = Inp.dim()
+        if rank < 1:
+            return None
+        dim = _norm_dim(int(dim), rank)
+        if not (0 <= dim < rank):
+            return None
+        inp_shape = [int(x) for x in Inp.shape]
+        length = inp_shape[dim]
+        if length < 1:
+            return None
+        out_shape = list(inp_shape)
+        out_shape[dim] = 1
+        if not (0 < _numel(out_shape) <= _MAX_NUMEL):
+            return None
+        return (Inp.dtype, dim, inp_shape, out_shape, length, [Inp])
+
+    def run(self, spec, args, kwargs):
+        dtype, dim, inp_shape, out_shape, length, call = spec
+        et = torch_dtype_to_fstar(dtype)
+        module = (f"Kuiops.Mean.{et.title()}.Dim{dim}"
+                  f".Len{length}.Inp_{_shp(inp_shape)}")
+        name = "mean_jit"
+        fst_ctx = dict(
+            module=module, name=name, r=len(inp_shape),
+            dims_inp=inp_shape, dims_out=out_shape, dim=dim,
+            length=length, et=et,
+            float_ns=torch_dtype_to_fstar_namespace(dtype))
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"), name=name, dim=dim,
+            cpp_et=torch_dtype_to_ctype(dtype))
+        # wrapper: op(Input)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
