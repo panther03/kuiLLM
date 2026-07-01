@@ -805,10 +805,12 @@ class MeanImpl(_Family):
     tune_params = ()
 
     def supported(self, func, args, kwargs):
-        # aten.mean.dim(self, dim, keepdim=False, *, dtype=None). The kernel
-        # reduces a single axis and requires keepdim=True (output keeps a size-1
-        # axis at `dim`); only the 1-dim case is supported, so an int[1] tuple
-        # is unpacked as a singleton here.
+        # aten.mean.dim(self, dim, keepdim=False, *, dtype=None). The parallel
+        # tree reduction (Kuiper.Kernel.HReduce.Block, one block per output row)
+        # works on an [m, n] row-major matrix, so we only reduce the *last* axis
+        # of a contiguous tensor (rank-N -> [prod(leading), last] reshape) and
+        # require keepdim=True. Only the 1-dim case is supported, so an int[1]
+        # tuple is unpacked as a singleton here.
         if len(args) < 2:
             return None
         Inp = args[0]
@@ -830,31 +832,31 @@ class MeanImpl(_Family):
         if rank < 1:
             return None
         dim = _norm_dim(int(dim), rank)
-        if not (0 <= dim < rank):
+        # Only the last axis: reducing a middle axis would need a strided view.
+        if dim != rank - 1:
             return None
-        inp_shape = [int(x) for x in Inp.shape]
-        length = inp_shape[dim]
+        length = int(Inp.shape[dim])
         if length < 1:
             return None
-        out_shape = list(inp_shape)
-        out_shape[dim] = 1
-        if not (0 < _numel(out_shape) <= _MAX_NUMEL):
+        # m = number of output rows (one GPU block each). Gate the kernel's
+        # refinements: m <= max_blocks and m * n <= max_blocks * max_threads.
+        m = Inp.numel() // length
+        if not (0 < m <= _MAX_BLOCKS):
             return None
-        return (Inp.dtype, dim, inp_shape, out_shape, length, [Inp])
+        if m * length > _MAX_NUMEL:
+            return None
+        return (Inp.dtype, length, [Inp])
 
     def run(self, spec, args, kwargs):
-        dtype, dim, inp_shape, out_shape, length, call = spec
+        dtype, length, call = spec
         et = torch_dtype_to_fstar(dtype)
-        module = (f"Kuiops.Mean.{et.title()}.Dim{dim}"
-                  f".Len{length}.Inp_{_shp(inp_shape)}")
+        # Keyed only by (element type, reduced length): m is a runtime arg, so
+        # one module serves every rank/batch size with this last-dim length.
+        module = f"Kuiops.Mean.{et.title()}.Len{length}"
         name = "mean_jit"
-        fst_ctx = dict(
-            module=module, name=name, r=len(inp_shape),
-            dims_inp=inp_shape, dims_out=out_shape, dim=dim,
-            length=length, et=et,
-            float_ns=torch_dtype_to_fstar_namespace(dtype))
+        fst_ctx = dict(module=module, name=name, et=et, length=length)
         wrapper_ctx = dict(
-            module=module.replace(".", "_"), name=name, dim=dim,
+            module=module.replace(".", "_"), name=name,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(Input)
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)

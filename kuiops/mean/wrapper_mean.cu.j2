@@ -1,30 +1,34 @@
+#include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include "kuiops.h"
 
 #include "{{ header }}"
 
-// JIT-GENERATED pybind glue for the verified Kuiper mean kernel. DO NOT EDIT.
-// Generated from kuiops/mean/wrapper_mean.cu.j2
+// JIT-GENERATED pybind glue for the verified Kuiper last-axis mean kernel.
+// DO NOT EDIT. Generated from kuiops/mean/wrapper_mean.cu.j2
 //
-// torch.mean(input, dim={{ dim }}, keepdim=True): reduce a single axis by
-// averaging over it, keeping that axis with size 1. The kernel maps over the
-// (row-major contiguous) output, so the input is made contiguous and the output
-// is allocated with the input shape but size 1 along `dim`.
+// torch.mean(input, dim=-1, keepdim=True): average over the last axis. A
+// contiguous rank-N tensor is, by reshape, an [m, n] row-major matrix
+// (m = product of leading dims, n = reduced last-dim length); the keepdim
+// output is the [m, 1] column. The kernel runs one block per row.
 
 torch::Tensor op_{{ name }} (torch::Tensor Input)
 {
     auto In = Input.contiguous();
 
+    const int64_t n = In.size(-1);
+    const int64_t m = In.numel() / n;
+
     auto out_sizes = In.sizes().vec();
-    out_sizes[{{ dim }}] = 1;
+    out_sizes.back() = 1;
     auto Out = torch::empty(out_sizes, In.options());
 
     at::cuda::CUDAGuard g(Input.device()); kuiops::sync_current_stream();
 
     {{ sym }} (
+        (size_t)m, (size_t)n,
         reinterpret_cast<{{ cpp_et }}*>(In.data_ptr()),
-        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
-        (size_t)Out.numel());
+        reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()));
 
     return Out;
 }
