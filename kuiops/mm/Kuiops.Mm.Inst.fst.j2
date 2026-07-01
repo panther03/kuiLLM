@@ -12,7 +12,7 @@ let {{name}} = spec {{ in_et }} {{ out_et }} {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz
 {% elif impl == "bt2d" and in_et == out_et %}
 open Klas.GEMM.BlockTiling2D.Inst
 // LATER: our own specialized version of bt2d that we don't need to pass alpha, beta to (not used here)
-let {{name}} (rows shared cols: szp) = spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ in_et }} one zero #rows #shared #cols
+let {{name}} (rows cols shared: szp) = spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ in_et }} one zero #rows #cols #shared
 {% else %}
 UNSUPPORTED MM IMPL
 {% endif %}

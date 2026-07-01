@@ -98,17 +98,20 @@ KRML_FLAGS = [
 _NVCC_COMMON_FLAGS = [
     "--expt-relaxed-constexpr",
     "-std=c++17",
-    # Needed so bf16/fp16 arithmetic operators/conversions used by the
-    # generated wrapper code (e.g. casting alpha/beta scalars) are available;
-    # must be present regardless of optimization level.
+    # Needed so bf16/fp16 arithmetic operators/conversions used by generated
+    # device code (e.g. casting alpha/beta scalars) are available; must be
+    # present regardless of optimization level. These only apply to the
+    # device kernel .cu (compiled via nvcc) -- the pybind wrapper is compiled
+    # separately as plain .cpp via the host compiler (see compile.py) and
+    # never sees these flags.
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_HALF2_OPERATORS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
 ]
 
-# TODO: remove: probably does not offer meaningful speedup as apparently 
-# most of the runtime is spent in fstar/karamel.
+# Doesn't make a huge difference, nvcc compilation of the kernel itself is not that slow
+# (seems it's mostly the torch cpp_extension C++ compilation that takes the time)
 if JIT_NVCC_FAST:
     NVCC_BASE_FLAGS = _NVCC_COMMON_FLAGS + [
         "-Xcompiler", "-O0", "-Xptxas", "-O0", "-lineinfo",

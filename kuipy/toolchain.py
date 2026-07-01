@@ -86,21 +86,37 @@ def _ensure_kuiops_checked():
 def extract_cu(module: str, fst_text: str):
     """Verify+extract ``module`` (whose source is ``fst_text``) to a .cu/.h pair.
 
-    Returns ``(cu_path, h_path, header_name)``. Idempotent: if the .cu already
+    Returns ``(cu_path, h_path, decl_path)``. Idempotent: if the .cu already
     exists it is returned without recompiling.
+
+    ``decl_path`` is a declaration-only sibling of ``h_path`` (same launcher
+    prototype, but without ``#include <kuiper.h>``). The kernel .cu needs the
+    full ``kuiper.h`` machinery (device intrinsics, tensor-core types, ...) for
+    its device code, but the pybind wrapper only ever calls the launcher by
+    prototype -- it never touches kuiper.h's CUDA-only symbols. Including the
+    full header in the wrapper forces it to be compiled with nvcc (multi-pass,
+    slow) purely to satisfy kuiper.h's device intrinsics; including only the
+    declaration lets the wrapper be compiled as plain .cpp via the host
+    compiler instead, which is much faster for a file that is otherwise pure
+    torch/pybind glue with no device code.
     """
     _ensure_built()
 
     underscored = module.replace(".", "_")        # e.g. Klas_JitGemm...
     cu_path = C.KUIPY_JIT_CU / f"{underscored}.cu"
     h_path = C.KUIPY_JIT_CU  / f"{underscored}.h"
+    decl_path = C.KUIPY_JIT_CU / f"{underscored}_decl.h"
 
-    if cu_path.exists() and h_path.exists(): 
+    if cu_path.exists() and h_path.exists():
         if C.JIT_FLUSH_CACHE:
             os.remove(cu_path)
             os.remove(h_path)
+            if decl_path.exists():
+                os.remove(decl_path)
         else:
-            return cu_path, h_path, h_path.name
+            if not decl_path.exists():
+                _make_decl_header(h_path, decl_path)
+            return cu_path, h_path, decl_path
 
     fst_path = C.KUIPY_JIT_SRC / f"{module}.fst"
     checked = C.KUIPY_CHECKED_DIR / f"{module}.fst.checked"
@@ -111,7 +127,9 @@ def extract_cu(module: str, fst_text: str):
         # this exact kernel (or, more commonly, just refreshed the shared
         # Kuiops .checked files) while we were waiting.
         if cu_path.exists() and h_path.exists() and not C.JIT_FLUSH_CACHE:
-            return cu_path, h_path, h_path.name
+            if not decl_path.exists():
+                _make_decl_header(h_path, decl_path)
+            return cu_path, h_path, decl_path
 
         fst_path.write_text(fst_text)
         # No .fsti: the single `let` must be exported (it is the host entry
@@ -147,7 +165,21 @@ def extract_cu(module: str, fst_text: str):
         # 4) fixup (sed + indent), matching verify.mk
         _fixup(pre_cu, cu_path)
         _fixup(pre_h, h_path)
-    return cu_path, h_path, h_path.name
+        _make_decl_header(h_path, decl_path)
+    return cu_path, h_path, decl_path
+
+def _make_decl_header(h_path: Path, decl_path: Path):
+    """Strip the ``#include <kuiper.h>`` line from ``h_path``, writing the
+    result to ``decl_path``. karamel always emits this include (via
+    ``-add-early-include <kuiper.h>`` in KRML_FLAGS) so device code in the
+    kernel .cu can use kuiper's CUDA intrinsics/types, but the launcher
+    prototype itself only needs plain C types (uint32_t, float*, ...), so a
+    caller that only wants to declare/call the launcher (i.e. the wrapper)
+    doesn't need kuiper.h and can be compiled without nvcc.
+    """
+    lines = h_path.read_text().splitlines(keepends=True)
+    decl_path.write_text("".join(
+        l for l in lines if "#include <kuiper.h>" not in l))
 
 def _fixup(src: Path, dst: Path):
     sed = subprocess.run(["sed", "-f", str(C.FIXUP_SED), str(src)],

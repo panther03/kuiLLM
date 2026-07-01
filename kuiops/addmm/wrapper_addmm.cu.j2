@@ -2,7 +2,7 @@
 #include <cuda_bf16.h>
 #include "kuiops.h"
 
-#include "{{module}}.h"
+#include "{{ header }}"
 
 // addmm(C, A, B, beta, alpha) = beta*C + alpha*(A@B).
 torch::Tensor op_{{name}} (torch::Tensor C, torch::Tensor A, torch::Tensor B,

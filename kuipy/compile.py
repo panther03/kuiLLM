@@ -93,16 +93,22 @@ def _build_kernel(module, ext_name,
 
     # 1) F* -> .cu/.h
     fst_text = _env.get_template(fst_template).render(**fst_ctx)
-    cu_path, h_path, header_name = toolchain.extract_cu(module, fst_text)
+    cu_path, h_path, decl_path = toolchain.extract_cu(module, fst_text)
 
     # The extracted host symbol is `<module-with-dots-as-underscores>_<letname>`.
     sym = f"{ext_name}_{fst_ctx['name']}"
 
-    # 2) generate wrapper .cu next to the kernel
-    wrapper_path = C.KUIPY_JIT_CU / f"{ext_name}_wrapper.cu"
+    # 2) generate wrapper .cpp next to the kernel. It includes the
+    # declaration-only header (just the launcher prototype, no kuiper.h), so
+    # it can be compiled by the host compiler (g++) instead of nvcc: it's
+    # pure torch/pybind glue with no device code, but nvcc would otherwise
+    # parse the heavy torch/extension.h through its slower multi-pass
+    # pipeline purely to satisfy kuiper.h's CUDA intrinsics pulled in by the
+    # full per-kernel header.
+    wrapper_path = C.KUIPY_JIT_CU / f"{ext_name}_wrapper.cpp"
     if not wrapper_path.exists():
         wctx = dict(wrapper_ctx)
-        wctx.update(sym=sym, header=header_name)
+        wctx.update(sym=sym, header=decl_path.name)
         wrapper_path.write_text(_env.get_template(wrapper_template).render(**wctx))
 
     # 3) compile + load
@@ -110,11 +116,12 @@ def _build_kernel(module, ext_name,
     from torch.utils.cpp_extension import load
     build_dir = C.KUIPY_JIT_BUILD / ext_name
     build_dir.mkdir(parents=True, exist_ok=True)
+    C.log(f"building {ext_name} -> {build_dir}")
     mod = load(
         name=ext_name,
         sources=[str(wrapper_path), str(cu_path)],
         extra_include_paths=[str(C.KUIPY_JIT_CU), str(C.KUIPER_INCLUDE), str(C._REPO_ROOT / "include")],
-        extra_cflags=["-O3", "-std=c++17"],
+        extra_cflags=["-O2", "-std=c++17"],
         extra_cuda_cflags=_nvcc_flags(),
         build_directory=str(build_dir),
         verbose=(C.JIT_VERBOSITY > 0),

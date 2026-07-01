@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include "kuiops.h"
 
-#include "{{module}}.h"
+#include "{{ header }}"
 
 // Efficient SDPA: Q(N,H,L,E) K(N,H,S,E) V(N,H,S,Ev) bias(N,H,L,S) -> out(N,H,L,Ev), lse(N,H,L).
 // The kernel allocates out/lse with cudaMalloc; from_blob takes ownership and frees them.

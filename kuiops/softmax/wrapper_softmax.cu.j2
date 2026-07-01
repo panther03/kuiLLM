@@ -2,7 +2,7 @@
 #include <cuda_bf16.h>
 #include "kuiops.h"
 
-#include "{{module}}.h"
+#include "{{ header }}"
 
 // A is an [m, n] row-major contiguous copy; softmax runs over n, in place.
 torch::Tensor op_{{name}} (torch::Tensor A)
