@@ -3,26 +3,43 @@
 
 #include "{{ header }}"
 
-torch::Tensor op_{{name}}
-{% if arity == 1 %}
-    (torch::Tensor A)
-{% elif arity == 2 %}
-    (torch::Tensor A, torch::Tensor B)
+{% if kind == "map" or kind == "map_nip" %}
+torch::Tensor op_{{name}}(torch::Tensor A)
+{% elif kind == "map2" %}
+torch::Tensor op_{{name}}(torch::Tensor A, torch::Tensor B)
+{% elif kind == "map3" %}
+torch::Tensor op_{{name}}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
 {% else %}
-#error "UNSUPPORTED ELEMENTWISE ARITY"
+#error "UNSUPPORTED ELEMENTWISE KIND"
 {% endif %}
 {
+    at::cuda::CUDAGuard g(A.device());
+{% if kind == "map" %}
     auto out = kuiops::clone_in(A);
-    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
-
-{% if arity == 1 %}
-    {{module}}_{{name}}(out.numel(), reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));
-{% elif arity == 2 %}
-    {{module}}_{{name}}(out.numel(), 
+    kuiops::sync_current_stream();
+    {{sym}}(out.numel(), reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));
+{% elif kind == "map2" %}
+    auto out = kuiops::clone_in(A);
+    kuiops::sync_current_stream();
+    {{sym}}(out.numel(),
         reinterpret_cast<{{cpp_et}}*>(out.data_ptr()),
         reinterpret_cast<{{cpp_et}}*>(B.data_ptr()));
-{% else %}
-#error "UNSUPPORTED ELEMENTWISE ARITY"
+{% elif kind == "map_nip" %}
+    auto in = A.contiguous();
+    auto out = torch::empty(in.sizes(), in.options().dtype({{out_scalar}}));
+    kuiops::sync_current_stream();
+    {{sym}}(out.numel(),
+        reinterpret_cast<{{cpp_et}}*>(in.data_ptr()),
+        reinterpret_cast<{{cpp_ot}}*>(out.data_ptr()));
+{% elif kind == "map3" %}
+    auto cc = C.contiguous(); auto aa = A.contiguous(); auto bb = B.contiguous();
+    auto out = torch::empty(aa.sizes(), aa.options());
+    kuiops::sync_current_stream();
+    {{sym}}(out.numel(),
+        reinterpret_cast<uint8_t*>(cc.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(aa.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(bb.data_ptr()),
+        reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));
 {% endif %}
     return out;
 }
@@ -30,4 +47,3 @@ torch::Tensor op_{{name}}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("run", &op_{{name}}, "op_{{name}}");
 }
-    

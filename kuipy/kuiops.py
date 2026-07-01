@@ -3,7 +3,6 @@ Python bindings for KuiOps kernels. These classes:
  a) check if a given aten op is supported by an instantiation of a KuiOps template
  b) extract the relevant kernel from the template, compile it, and call it.
 """
-import sys
 from . import compile as _compile
 from .config import log
 
@@ -56,7 +55,8 @@ def torch_dtype_to_fstar(dt):
         torch.uint64: "u64",
         torch.uint32: "u32",
         torch.uint16: "u16",
-        torch.uint8: "u8"
+        torch.uint8: "u8",
+        torch.bool: "u8"
     }[dt]
 
 def torch_dtype_to_fstar_namespace(dt):
@@ -88,7 +88,8 @@ def torch_dtype_to_ctype(dt):
         torch.uint64: "uint64_t",
         torch.uint32: "uint32_t",
         torch.uint16: "uint16_t",
-        torch.uint8: "uint8_t"
+        torch.uint8: "uint8_t",
+        torch.bool: "uint8_t"
     }[dt]
 
 def torch_dtype_to_aten_scalar(dt):
@@ -98,6 +99,7 @@ def torch_dtype_to_aten_scalar(dt):
         torch.float32: "torch::kFloat32",
         torch.float64: "torch::kFloat64",
         torch.bfloat16: "torch::kBFloat16",
+        torch.bool: "torch::kBool",
         # todo fill in
     }[dt]
 
@@ -109,8 +111,8 @@ _FLOAT_DTYPES = [torch.float16, torch.float32, torch.float64, torch.bfloat16]
 _SCALAR_DTYPES = _FLOAT_DTYPES + [torch.uint16, torch.uint32, torch.uint64]
                 
 def cast_constarg(c,dt):
-    if isinstance(c, float):
-        return f"(fcast (Kuiper.Float64.is_floating.of_literal \"{c:f}\"))"
+    if dt in _FLOAT_DTYPES:
+        return f"(fcast (Kuiper.Float64.is_floating.of_literal \"{float(c):f}\"))"
     elif isinstance(c, int):    
         cast_typename = {
             torch.int8: "int8",
@@ -133,117 +135,188 @@ def cast_constarg(c,dt):
 # Elementwise (unary, binary, scalar-broadcast)
 # ---------------------------------------------------------------------------
 
+def _const_tag(constargs):
+    """A filename-safe identifier fragment encoding baked-in constants, so two
+    calls with different scalar operands don't collide in the kernel cache."""
+    if not constargs:
+        return ""
+    parts = []
+    for c in constargs:
+        s = repr(c).replace("-", "n").replace(".", "p").replace("+", "")
+        parts.append("".join(ch for ch in s if ch.isalnum()))
+    return "C" + "_".join(parts)
+
+
 class ElementwiseImpl(_Family):
     fst_template = "elementwise/Kuiops.Elementwise.Inst.fst.j2"
     wrapper_template = "elementwise/wrapper_elementwise.cu.j2"
     tune_key = "ELEM"
     tune_params = ()
 
-    # operators all scalar dtypes should be expected to have
-    _floating_ops = [
-        aten.silu.default,
-        aten.neg.default,
-        aten.rsqrt.default,
-        aten.cos.default,
-        aten.sin.default,
-        aten.pow.Tensor_Scalar,
-        aten.add.Tensor,
-        aten.add.Scalar,
-        aten.mul.Tensor,
-        aten.mul.Scalar
-    ]
-    
-    def _aten_fn_to_fstar_impl(self,fn):
-        impl = None
-        try: 
-            impl = { \
-                aten.silu.default:      "silu",     \
-                aten.neg.default:       "neg",      \
-                aten.rsqrt.default:     "rsqrt",    \
-                aten.cos.default:       "cos",      \
-                aten.sin.default:       "sin",      \
-                aten.pow.Tensor_Scalar: "pow", \
-                aten.add.Tensor:        "add", \
-                aten.add.Scalar:        "add", \
-                aten.mul.Tensor:        "mul", \
-                aten.mul.Scalar:        "mul",
-            }[fn]
-        except KeyError:
-            print(f"[kuipy-jit] warning: elementwise function unsupported: {fn}",
-                  file=sys.stderr)
-        return impl
+    # aten op -> F* impl name (arithmetic ops via the scalar/floating typeclass).
+    _IMPL = {
+        aten.silu.default:      "silu",
+        aten.neg.default:       "neg",
+        aten.rsqrt.default:     "rsqrt",
+        aten.cos.default:       "cos",
+        aten.sin.default:       "sin",
+        aten.pow.Tensor_Scalar: "pow",
+        aten.add.Tensor:        "add",
+        aten.add.Scalar:        "add",
+        aten.mul.Tensor:        "mul",
+        aten.mul.Scalar:        "mul",
+        aten.sub.Tensor:        "sub",
+        aten.sub.Scalar:        "sub",
+        aten.div.Tensor:        "div",
+        aten.div.Scalar:        "div",
+    }
+
+    # Ops that require the `floating` typeclass (float dtypes only).
+    _FLOATING_ONLY = {
+        aten.silu.default, aten.neg.default, aten.rsqrt.default,
+        aten.cos.default, aten.sin.default, aten.pow.Tensor_Scalar,
+        aten.sub.Tensor, aten.sub.Scalar, aten.div.Tensor, aten.div.Scalar,
+    }
+
+    # Scalar comparisons: `T op scalar -> bool`, via map_gpu_notinplace.
+    _COMPARE = {
+        aten.eq.Scalar: "eq_u8",
+        aten.le.Scalar: "le_u8",
+        aten.lt.Scalar: "lt_u8",
+    }
+
+    # Bitwise ops, modelled on u8 (torch.bool is a byte); in-place same-type.
+    _BITWISE1 = {aten.bitwise_not.default: "bnot"}
+    _BITWISE2 = {aten.bitwise_and.Tensor: "band", aten.bitwise_or.Tensor: "bor"}
+
+    _BOOL_DTYPES = (torch.bool, torch.uint8)
 
     def supported(self, func, args, kwargs):
-    
-        def unary(X):
-            return (isinstance(X, torch.Tensor) and X.is_cuda
-                    and (0 < X.numel() <= _MAX_NUMEL))
-
-        def binary(A, B):
-            return (isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor)
-                    and A.is_cuda and B.is_cuda and A.dtype == B.dtype
-                    and tuple(A.shape) == tuple(B.shape) and 0 < A.numel() <= _MAX_NUMEL)
-
-        # Not strictly required of map_gpu or map_gpu2, but all the operations 
-        # we support require scalar typeclass, so we filter dtypes that don't match out.
-        if args[0].dtype not in _SCALAR_DTYPES:
-            return None
-        if args[0].dtype not in _FLOAT_DTYPES and (func not in ElementwiseImpl._floating_ops):
+        A = args[0]
+        if not (isinstance(A, torch.Tensor) and A.is_cuda
+                and 0 < A.numel() <= _MAX_NUMEL):
             return None
 
-        impl = self._aten_fn_to_fstar_impl(func)
-        if impl is not None:
-            if len(args) == 1:
-                if unary(args[0]):
-                    return (impl, 1, [], [args[0]])
-            elif len(args) == 2:
-                constargs = []
-                if (func is aten.add.Tensor or 
-                    func is aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
-                    impl += "_alpha"
-                    alpha = _scalar(kwargs["alpha"])
-                    assert alpha is not None
-                    constargs += [alpha]
+        def same(B):
+            return (isinstance(B, torch.Tensor) and B.is_cuda
+                    and B.dtype == A.dtype and tuple(B.shape) == tuple(A.shape))
 
-                # Special case for square, since it seems to have impact on the precision aside from just speed.
-                if ((func is aten.pow.Tensor_Scalar) and
-                    (isinstance(args[1], int)) and args[1] == 2):
-                    return ("square", 1, [], [args[0]])
+        # Unary bitwise (bool), in-place.
+        if func in ElementwiseImpl._BITWISE1:
+            if A.dtype != torch.bool:
+                return None
+            return dict(kind="map", method=ElementwiseImpl._BITWISE1[func],
+                        in_dtypes=[A.dtype], out_dtype=A.dtype,
+                        constargs=[], call=[A])
 
-                # Any binary operator that is supplying a scalar as the second argument
-                # (whether by spec e.g. add.Scalar or by overloading), just 
-                # check that args[0] is a valid unary op input and add the constant to constargs.
-                if unary(args[0]) and (s := _scalar(args[1])):
-                    constargs += [s]
-                    return (impl, 1, constargs, [args[0]])
-                elif binary(args[0], args[1]):
-                    return (impl, 2, constargs, [args[0], args[1]])
-                
+        # Binary bitwise (bool), in-place.
+        if func in ElementwiseImpl._BITWISE2:
+            if A.dtype != torch.bool or not same(args[1]):
+                return None
+            return dict(kind="map2", method=ElementwiseImpl._BITWISE2[func],
+                        in_dtypes=[A.dtype, A.dtype], out_dtype=A.dtype,
+                        constargs=[], call=[A, args[1]])
+
+        # Scalar comparisons -> bool. Only the scalar-rhs form is supported:
+        # there is no not-in-place *binary* map kernel, so the Tensor overloads
+        # (le.Tensor / lt.Tensor) fall through to PyTorch.
+        if func in ElementwiseImpl._COMPARE:
+            if A.dtype not in _FLOAT_DTYPES:
+                return None
+            s = _scalar(args[1])
+            if s is None:
+                return None
+            return dict(kind="map_nip", method=ElementwiseImpl._COMPARE[func],
+                        in_dtypes=[A.dtype], out_dtype=torch.bool,
+                        constargs=[s], call=[A])
+
+        # Ternary select: where(cond, x, y). No broadcasting: shapes must match.
+        if func is aten.where.self:
+            if len(args) < 3:
+                return None
+            Cnd, X, Y = args[0], args[1], args[2]
+            if not all(isinstance(t, torch.Tensor) and t.is_cuda for t in (Cnd, X, Y)):
+                return None
+            if (Cnd.dtype not in ElementwiseImpl._BOOL_DTYPES or X.dtype != Y.dtype
+                    or not (tuple(Cnd.shape) == tuple(X.shape) == tuple(Y.shape))):
+                return None
+            if not (0 < X.numel() <= _MAX_NUMEL):
+                return None
+            return dict(kind="map3", method="bwhere",
+                        in_dtypes=[Cnd.dtype, X.dtype, Y.dtype],
+                        out_dtype=X.dtype, constargs=[], call=[Cnd, X, Y])
+
+        # Arithmetic path (unary / binary / scalar-broadcast).
+        impl = ElementwiseImpl._IMPL.get(func)
+        if impl is None:
+            return None
+        if A.dtype not in _SCALAR_DTYPES:
+            return None
+        if func in ElementwiseImpl._FLOATING_ONLY and A.dtype not in _FLOAT_DTYPES:
+            return None
+
+        if len(args) == 1:
+            return dict(kind="map", method=impl, in_dtypes=[A.dtype],
+                        out_dtype=A.dtype, constargs=[], call=[A])
+
+        constargs = []
+        if func in (aten.add.Tensor, aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
+            impl += "_alpha"
+            alpha = _scalar(kwargs["alpha"])
+            assert alpha is not None
+            constargs += [alpha]
+
+        # Special-case x**2 -> square (better precision than generic pow).
+        if (func is aten.pow.Tensor_Scalar and isinstance(args[1], int)
+                and args[1] == 2):
+            return dict(kind="map", method="square", in_dtypes=[A.dtype],
+                        out_dtype=A.dtype, constargs=[], call=[A])
+
+        # Scalar second operand (by spec e.g. add.Scalar, or by overloading).
+        if (s := _scalar(args[1])) is not None:
+            constargs += [s]
+            return dict(kind="map", method=impl, in_dtypes=[A.dtype],
+                        out_dtype=A.dtype, constargs=constargs, call=[A])
+        if same(args[1]):
+            return dict(kind="map2", method=impl, in_dtypes=[A.dtype, A.dtype],
+                        out_dtype=A.dtype, constargs=constargs, call=[A, args[1]])
         return None
 
     def run(self, spec, args, kwargs):
-        method, arity, constargs, call = spec
-        dtype = torch_dtype_to_fstar(call[0].dtype)
-        args = [f"(i{i}: {dtype})" for i in range(arity)]
-        # TODO: proper handling of PyTorch's type promotion rules for mixed-precision math. 
-        # For now, we just cast the constant to the same type as the tensor.
-        all_args = [f"i{i}" for i in range(arity)] + [cast_constarg(c, call[0].dtype) for c in constargs]
+        kind, method = spec["kind"], spec["method"]
+        in_dtypes, out_dtype = spec["in_dtypes"], spec["out_dtype"]
+        call = spec["call"]
 
-        module = f"Kuiops.Elementwise{arity}.{method.title()}.{dtype.title()}"
-        name = f"elem{arity}_{method}_{dtype}_jit"
-        fst_ctx = dict(
-            module=module,
-            name=name,
-            fun=f"fun {' '.join(args)} -> {method} {' '.join(all_args)}",
-            arity=arity,
-            et=dtype
-        )
-        wrapper_ctx = dict(
-            module=module.replace(".", "_"),
-            name=name,
-            arity=arity,
-            cpp_et=torch_dtype_to_ctype(call[0].dtype),
-        )
+        # TODO: proper PyTorch type promotion. For now constants are cast to the
+        # input element type.
+        fs = [torch_dtype_to_fstar(d) for d in in_dtypes]
+        ins = " ".join(f"(i{i}: {fs[i]})" for i in range(len(in_dtypes)))
+        consts = [cast_constarg(c, in_dtypes[0]) for c in spec["constargs"]]
+        body = [f"i{i}" for i in range(len(in_dtypes))] + consts
+        fun = f"fun {ins} -> {method} {' '.join(body)}"
+
+        tag = "_".join(fs)
+        ctag = _const_tag(spec["constargs"])
+        module = (f"Kuiops.Elementwise.{kind.title().replace('_', '')}"
+                  f".{method.title()}.{tag.title()}" + (f".{ctag}" if ctag else ""))
+        name = f"elem_{kind}_{method}_{tag}_{ctag}_jit".lower()
+
+        fst_ctx = dict(module=module, name=name, kind=kind, fun=fun)
+        wrapper_ctx = dict(module=module.replace(".", "_"), name=name, kind=kind)
+
+        if kind in ("map", "map2"):
+            fst_ctx["et"] = fs[0]
+            wrapper_ctx["cpp_et"] = torch_dtype_to_ctype(in_dtypes[0])
+        elif kind == "map_nip":
+            fst_ctx["et"], fst_ctx["ot"] = fs[0], torch_dtype_to_fstar(out_dtype)
+            wrapper_ctx["cpp_et"] = torch_dtype_to_ctype(in_dtypes[0])
+            wrapper_ctx["cpp_ot"] = torch_dtype_to_ctype(out_dtype)
+            wrapper_ctx["out_scalar"] = torch_dtype_to_aten_scalar(out_dtype)
+        elif kind == "map3":
+            fst_ctx["eta"], fst_ctx["etb"], fst_ctx["etc"] = fs[0], fs[1], fs[2]
+            fst_ctx["eto"] = torch_dtype_to_fstar(out_dtype)
+            wrapper_ctx["cpp_et"] = torch_dtype_to_ctype(in_dtypes[1])
+
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
 
 # ---------------------------------------------------------------------------

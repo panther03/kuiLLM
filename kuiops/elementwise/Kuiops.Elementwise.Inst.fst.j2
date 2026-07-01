@@ -10,12 +10,20 @@ open Kuiper.Float.Casts
 open Kuiper.Kernel.Map
 open Kuiops.Elementwise
 
-{% if arity == 1 %}
-let {{ name }} (lena: szp {lena <= max_blocks * max_threads}) = 
+{% if kind == "map" %}
+let {{ name }} (lena: szp {lena <= max_blocks * max_threads}) =
     map_gpu #({{ et }}) ({{ fun }}) lena #(l1_forward lena)
-{% elif arity == 2 %}
-let {{ name }} (lenab: szp {lenab <= max_blocks * max_threads}) = 
+{% elif kind == "map2" %}
+let {{ name }} (lenab: szp {lenab <= max_blocks * max_threads}) =
     map_gpu2 #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #_ #(l1_forward lenab) #_
+{% elif kind == "map_nip" %}
+let {{ name }} (lena: szp {lena <= max_blocks * max_threads}) =
+    map_gpu_notinplace #({{ et }}) #({{ ot }}) ({{ fun }}) lena
+        #(l1_forward lena) #_ #(l1_forward lena) #_
+{% elif kind == "map3" %}
+let {{ name }} (lena: szp {lena <= max_blocks * max_threads}) =
+    map_gpu3 #({{ eta }}) #({{ etb }}) #({{ etc }}) #({{ eto }}) ({{ fun }}) lena
+        #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_
 {% else %}
-UNSUPPORTED ELEMENTWISE ARITY
+UNSUPPORTED ELEMENTWISE KIND
 {% endif %}

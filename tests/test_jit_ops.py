@@ -209,5 +209,94 @@ def test_sdpa_causal_unsupported():
     assert impl.supported(func, (Q, K, V, None, True), {}) is None
 
 
+# ---------------------------------------------------------------------------
+# elementwise: binary arithmetic, bitwise, comparisons, ternary select
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("func,ref", [
+    (aten.sub.Tensor, torch.sub),
+    (aten.div.Tensor, torch.div),
+])
+def test_elem_binary(dtype, func, ref):
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    torch.manual_seed(0)
+    A = torch.randn(3, 5, 7, device="cuda", dtype=dtype)
+    B = torch.randn(3, 5, 7, device="cuda", dtype=dtype).abs() + 0.5
+    out = _run(impl, func, (A, B))
+    _assert_close(out, ref(A, B), dtype)
+
+
+@pytest.mark.parametrize("func,c,ref", [
+    (aten.sub.Tensor, 1.5, lambda x: x - 1.5),
+    (aten.div.Tensor, 2.0, lambda x: x / 2.0),
+])
+def test_elem_scalar(func, c, ref):
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    torch.manual_seed(0)
+    A = torch.randn(4, 9, device="cuda", dtype=torch.float32)
+    out = _run(impl, func, (A, c))
+    _assert_close(out, ref(A), torch.float32)
+
+
+def test_elem_bitwise():
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    torch.manual_seed(0)
+    A = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
+    B = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
+    assert torch.equal(_run(impl, aten.bitwise_not.default, (A,)), ~A)
+    assert torch.equal(_run(impl, aten.bitwise_and.Tensor, (A, B)), A & B)
+    assert torch.equal(_run(impl, aten.bitwise_or.Tensor, (A, B)), A | B)
+
+
+@pytest.mark.parametrize("func,c,ref", [
+    (aten.le.Scalar, 0.0, lambda x: x <= 0.0),
+    (aten.lt.Scalar, 0.5, lambda x: x < 0.5),
+    (aten.eq.Scalar, 0.0, lambda x: x == 0.0),
+])
+def test_elem_compare_scalar(func, c, ref):
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    torch.manual_seed(0)
+    A = torch.randn(5, 8, device="cuda", dtype=torch.float32)
+    out = _run(impl, func, (A, c))
+    assert out.dtype == torch.bool
+    assert torch.equal(out, ref(A))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_elem_where(dtype):
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    torch.manual_seed(0)
+    C = torch.randint(0, 2, (3, 4, 5), device="cuda", dtype=torch.bool)
+    X = torch.randn(3, 4, 5, device="cuda", dtype=dtype)
+    Y = torch.randn(3, 4, 5, device="cuda", dtype=dtype)
+    out = _run(impl, aten.where.self, (C, X, Y))
+    _assert_close(out, torch.where(C, X, Y), dtype)
+
+
+def test_elem_unsupported():
+    _need_cuda()
+    impl = kuiops.ElementwiseImpl({})
+    A = torch.randn(4, 4, device="cuda")
+    B = torch.randn(4, 4, device="cuda")
+    # Tensor comparisons (bool output) have no not-in-place binary map kernel.
+    assert impl.supported(aten.le.Tensor, (A, B), {}) is None
+    assert impl.supported(aten.lt.Tensor, (A, B), {}) is None
+    # Bitwise requires bool operands.
+    Ai = torch.ones(4, 4, device="cuda", dtype=torch.int64)
+    assert impl.supported(aten.bitwise_and.Tensor, (Ai, Ai), {}) is None
+    # where with mismatched shapes / dtypes is unsupported (no broadcasting).
+    C = torch.randint(0, 2, (4, 4), device="cuda", dtype=torch.bool)
+    Ymis = torch.randn(4, 3, device="cuda")
+    assert impl.supported(aten.where.self, (C, A, Ymis), {}) is None
+    Ybf = torch.randn(4, 4, device="cuda", dtype=torch.bfloat16)
+    assert impl.supported(aten.where.self, (C, A, Ybf), {}) is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-s", "-v"]))
