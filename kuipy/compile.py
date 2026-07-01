@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 
+from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import config as C
@@ -64,8 +65,19 @@ def build_kernel(module: str,
     if failed is not None:
         raise failed
     try:
-        return _build_kernel(module, ext_name, fst_template, fst_ctx,
-                             wrapper_template, wrapper_ctx)
+        # Cross-process lock keyed on the kernel's extension name: this lets
+        # independent kernels build fully in parallel (e.g. parallel pytest
+        # workers, or a batch pre-warming script) while serializing two
+        # processes that race to build the *same* kernel, which would
+        # otherwise corrupt the shared .kuipy_cache/cu and build directories.
+        C.ensure_dirs()
+        lock_path = C.KUIPY_JIT_BUILD / f"{ext_name}.lock"
+        with FileLock(str(lock_path)):
+            mod = _loaded.get(ext_name)
+            if mod is not None:
+                return mod
+            return _build_kernel(module, ext_name, fst_template, fst_ctx,
+                                 wrapper_template, wrapper_ctx)
     except Exception as e:
         _failed[ext_name] = e
         raise

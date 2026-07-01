@@ -95,20 +95,28 @@ KRML_FLAGS = [
 # nvcc base flags
 # --------------------------------------------------------------------------
 
-NVCC_BASE_FLAGS = [
-    "-O3", "--use_fast_math",
-    "-Xcompiler", "-fPIC",
+_NVCC_COMMON_FLAGS = [
     "--expt-relaxed-constexpr",
     "-std=c++17",
-# wtf copilot ?
-# I guess these are to prevent accidental performance hits from casting stuff?
+    # Needed so bf16/fp16 arithmetic operators/conversions used by the
+    # generated wrapper code (e.g. casting alpha/beta scalars) are available;
+    # must be present regardless of optimization level.
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_HALF2_OPERATORS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
 ]
-if not JIT_NVCC_FAST:
-    NVCC_BASE_FLAGS = ["-Xcompiler", "-O0", "-lineinfo"]
+
+# TODO: remove: probably does not offer meaningful speedup as apparently 
+# most of the runtime is spent in fstar/karamel.
+if JIT_NVCC_FAST:
+    NVCC_BASE_FLAGS = _NVCC_COMMON_FLAGS + [
+        "-Xcompiler", "-O0", "-Xptxas", "-O0", "-lineinfo",
+    ]
+else:
+    NVCC_BASE_FLAGS = _NVCC_COMMON_FLAGS + [
+        "-O3", "--use_fast_math", "-Xcompiler", "-fPIC",
+    ]
 
 def nvcc_arch_flag():
     """gencode flag for the current device, or None if torch/CUDA unavailable."""
