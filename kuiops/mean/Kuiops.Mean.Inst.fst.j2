@@ -1,45 +1,15 @@
-{%- macro shape(dims) -%}
-{% for s in dims %}{{ s }} @| {% endfor %}INil
-{%- endmacro -%}
-{%- macro cshape(dims) -%}
-{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
-{%- endmacro -%}
 module {{ module }}
 #lang-pulse
 
-// JIT-GENERATED instantiation of the verified Kuiper mean kernel. DO NOT EDIT.
-// Generated from kuiops/mean/Kuiops.Mean.Inst.fst.j2
+// JIT-GENERATED instantiation of the verified Kuiper last-axis mean kernel.
+// DO NOT EDIT. Generated from kuiops/mean/Kuiops.Mean.Inst.fst.j2
+//
+// One GPU block per output row cooperatively tree-reduces that row's
+// {{ length }} cells (Kuiper.Kernel.HReduce.Block) and divides by the baked
+// length; see Kuiops.Mean.{fst,fsti}. Parameterised only by the element type
+// and the reduced length, so it is reused across all ranks/batch sizes.
 
 open Kuiper
-open Kuiper.Shape
-open Kuiper.Tensor
 open Kuiops.Mean
 
-module SZ = Kuiper.SizeT
-
-let dInp : shape {{ r }} = {{ shape(dims_inp) }}
-let dOut : shape {{ r }} = {{ shape(dims_out) }}
-
-let cdInp : cshape dInp = {{ cshape(dims_inp) }}
-let cdOut : cshape dOut = {{ cshape(dims_out) }}
-
-// `divisor` is the float of the reduced length, baked as a literal so no
-// SizeT->float cast is needed; `dim`/`len` are computed on the literal shapes.
-let divisor : {{ et }} = {{ float_ns }}.is_floating.of_literal "{{ length }}.0"
-
-fn {{ name }}
-    (#lInp : tlayout dInp) (#lOut : tlayout dOut)
-    {| ctlayout lInp, ctlayout lOut |}
-    (gInp : tensor ({{ et }}) lInp {is_global gInp})
-    (gOut : tensor ({{ et }}) lOut {is_global gOut})
-    (n : sz { SZ.v n == sizeof dOut /\ n <= max_blocks * max_threads /\ n > 0 })
-    (eInp : chest dInp ({{ et }}))
-    (#fInp : perm)
-  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp)
-  requires on gpu_loc (live gOut)
-  ensures
-    on gpu_loc (gOut |-> mean_chest dOut dInp {{ dim }} divisor eInp)
-{
-  mean_gpu dOut dInp cdOut cdInp {{ dim }}sz {{ length }}sz divisor
-      gInp gOut n eInp
-}
+let {{ name }} = mean_inst #{{ et }} {{ length }}L
