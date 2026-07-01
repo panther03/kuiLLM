@@ -5,6 +5,7 @@ elementwise
 gather
 index
 isin
+mean
 mm
 reduce
 scatter
