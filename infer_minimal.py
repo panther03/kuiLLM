@@ -19,10 +19,36 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map=DEVICE,
 ).eval()
 
+# Compile out of eager mode. A static KV cache keeps the decode step at a
+# fixed shape, so torch.compile can capture one graph and reuse it every step.
+model.generation_config.cache_implementation = "static"
+model.forward = torch.compile(model.forward, fullgraph=True)
+
 
 def _sync():
     if DEVICE == "cuda":
         torch.cuda.synchronize()
+
+
+def _gen(inputs, n):
+    return model.generate(**inputs, max_new_tokens=n, do_sample=False,
+                          pad_token_id=tokenizer.eos_token_id)
+
+
+def _timed_gen(inputs, n):
+    _sync()
+    t = time.perf_counter()
+    out = _gen(inputs, n)
+    _sync()
+    return out, time.perf_counter() - t
+
+
+def _warm(inputs, n, rounds=3):
+    """torch.compile + the static cache need a couple of passes per generate
+    shape before timings stabilize, so run each measured shape a few times."""
+    for _ in range(rounds):
+        _gen(inputs, n)
+    _sync()
 
 
 @torch.no_grad()
@@ -35,30 +61,15 @@ def main():
     inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
     prompt_tokens = inputs["input_ids"].shape[-1]
 
-    # Warmup so CUDA lazy init / caching doesn't skew the timings.
-    model.generate(**inputs, max_new_tokens=4, do_sample=False,
-                   pad_token_id=tokenizer.eos_token_id)
-    _sync()
+    print("Warming up (compiling graphs)...")
+    _warm(inputs, 1)                 # prefill-only graph
+    _warm(inputs, MAX_NEW_TOKENS)    # decode graph
 
     # Prefill: time to produce the first token.
-    _sync()
-    t0 = time.perf_counter()
-    first = model.generate(
-        **inputs, max_new_tokens=1, do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    _sync()
-    prefill_s = time.perf_counter() - t0
+    _, prefill_s = _timed_gen(inputs, 1)
 
     # Full generation; decode time is the remainder.
-    _sync()
-    t1 = time.perf_counter()
-    out = model.generate(
-        **inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    _sync()
-    total_s = time.perf_counter() - t1
+    out, total_s = _timed_gen(inputs, MAX_NEW_TOKENS)
 
     gen_tokens = out.shape[-1] - prompt_tokens
     decode_s = max(total_s - prefill_s, 1e-9)
