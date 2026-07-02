@@ -70,7 +70,7 @@ ensures
   let idx' = conc_set_at2 cdi cdo dim idx i;
   let inp = tensor_read gInp idx';
 
-  return inp;
+  inp
 }
 
 inline_for_extraction noextract
