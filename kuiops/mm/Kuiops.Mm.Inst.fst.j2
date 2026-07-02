@@ -8,7 +8,9 @@ open Kuiper
 
 {% if impl == "tc2d"%} 
 open Klas.GEMM.TensorCore2D.Inst
-let {{name}} = spec {{ in_et }} {{ out_et }} {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz 
+// bind (rows cols shared) and forward in the spec's native (rows shared cols)
+// order so the extracted signature matches the (M, N, K) wrapper (and bt2d).
+let {{name}} (rows cols shared: szp) = spec {{ in_et }} {{ out_et }} {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz rows shared cols
 {% elif impl == "bt2d" and in_et == out_et %}
 open Klas.GEMM.BlockTiling2D.Inst
 // LATER: our own specialized version of bt2d that we don't need to pass alpha, beta to (not used here)
