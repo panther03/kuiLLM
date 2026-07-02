@@ -18,7 +18,7 @@
 // NOTE: duplicate indices make scatter nondeterministic (as in PyTorch); the
 // verified kernel assumes the index map is injective.
 
-torch::Tensor op_{{ name }} (torch::Tensor Self, torch::Tensor Index, torch::Tensor Src)
+torch::Tensor op_{{ module }} (torch::Tensor Self, torch::Tensor Index, torch::Tensor Src)
 {
     at::cuda::CUDAGuard g(Self.device());
     auto Out = kuiops::clone_in(Self);
@@ -38,6 +38,4 @@ torch::Tensor op_{{ name }} (torch::Tensor Self, torch::Tensor Index, torch::Ten
     return Out;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{ name }}, "op_{{ name }}");
-}
+{% include "_pybind.cu.j2" %}

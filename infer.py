@@ -63,6 +63,7 @@ def generate_batch(
     timing: bool = False,
     verify: bool = False,
     verify_tol: float = 2e-2,
+    capture_build: bool = False,
 ) -> List[str]:
     """Generate responses for many prompts in one batched forward pass.
 
@@ -134,6 +135,27 @@ def generate_batch(
 
     if DEVICE == "cuda":
         torch.cuda.synchronize()
+
+    if capture_build and kuipy.is_available() and use_kuiper and DEVICE == "cuda":
+        # Warm-up pass: extract every eligible kernel this generation touches
+        # (running the pass on stock PyTorch), then compile them all into one
+        # extension so torch/extension.h is parsed once for the whole batch (see
+        # kuipy.batch_capture). This happens before timing; the compiled kernels
+        # then serve the measured pass below.
+        tcap = time.perf_counter()
+        with kuipy.KuiperMode(), kuipy.batch_capture():
+            model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=temperature > 0,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+        print(f"[batch-compile] captured + built all kernels in "
+              f"{time.perf_counter() - tcap:.1f}s")
+
     t0 = time.perf_counter()
     with prof_ctx as prof, kernel_ctx:
         outputs = model.generate(
@@ -309,6 +331,11 @@ def _main() -> int:
                          "and report numerical divergences (forces Kuiper on).")
     ap.add_argument("--verify-tol", type=float, default=2e-2,
                     help="Relative-norm tolerance for --verify (default 0.02).")
+    ap.add_argument("--batch-compile", action="store_true",
+                    help="Run a warm-up pass that extracts every eligible Kuiper "
+                         "kernel and compiles them all into a single extension "
+                         "(one torch/extension.h parse for the whole run), then "
+                         "run the real generation on the compiled kernels.")
     args = ap.parse_args()
 
     if args.prompt and args.prompts:
@@ -316,6 +343,9 @@ def _main() -> int:
 
     if args.verify and not args.use_kuiper:
         ap.error("--verify requires Kuiper kernels; do not combine it with --no-kuiper")
+
+    if args.batch_compile and not args.use_kuiper:
+        ap.error("--batch-compile requires Kuiper kernels; do not combine it with --no-kuiper")
 
     if args.prompts is not None:
         prompts = _read_prompts(args.prompts)
@@ -340,6 +370,7 @@ def _main() -> int:
         timing=args.timing,
         verify=args.verify,
         verify_tol=args.verify_tol,
+        capture_build=args.batch_compile,
     )
 
     show_n = len(responses) if args.show else min(3, len(responses))

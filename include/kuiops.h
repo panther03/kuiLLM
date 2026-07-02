@@ -19,6 +19,9 @@ inline void sync_current_stream() {
 
 inline torch::Tensor clone_in(const torch::Tensor& X) { return X.contiguous().clone(); }
 
+// from_blob deleter for buffers a kernel allocated with cudaMalloc.
+inline void cuda_free(void *p) { cudaFree(p); }
+
 // Narrow a contiguous int64 index tensor to uint32 (Kuiper's `size_t` extracts to
 // uint32_t). Copies the low 4 bytes of each little-endian int64 word: gather /
 // scatter indices are non-negative and bounded by a dimension size, so they

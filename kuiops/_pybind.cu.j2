@@ -1,0 +1,9 @@
+{# Single-kernel pybind footer. In batch mode the op functions are concatenated
+   into one translation unit and a single combined PYBIND11_MODULE (emitted by
+   compile.py) registers each op_<module> under its module key, so no per-kernel
+   footer is emitted here. #}
+{% if not batch %}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &op_{{ module }}, "run");
+}
+{% endif %}

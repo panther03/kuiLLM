@@ -5,7 +5,7 @@
 #include "{{ header }}"
 
 // addmm(C, A, B, beta, alpha) = beta*C + alpha*(A@B).
-torch::Tensor op_{{name}} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
+torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
                            double alpha, double beta)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
@@ -26,6 +26,4 @@ torch::Tensor op_{{name}} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
     return Cout;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{name}}, "op_{{name}}");
-}
+{% include "_pybind.cu.j2" %}

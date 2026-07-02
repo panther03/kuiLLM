@@ -13,7 +13,7 @@
 // and B's size along `dim` are passed as runtime arguments (the kernel is
 // instantiated once per element type, rank and axis).
 
-torch::Tensor op_{{ name }} (torch::Tensor A, torch::Tensor B)
+torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     at::cuda::CUDAGuard g(A.device());
     auto Ac = A.contiguous();
@@ -36,6 +36,4 @@ torch::Tensor op_{{ name }} (torch::Tensor A, torch::Tensor B)
     return Out;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{ name }}, "op_{{ name }}");
-}
+{% include "_pybind.cu.j2" %}

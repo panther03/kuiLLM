@@ -7,6 +7,7 @@ the caller falls through to stock PyTorch.
 from .kuiops import (ElementwiseImpl, MmImpl, BmmImpl, AddmmImpl, SoftmaxImpl,
                      SdpaImpl, GatherImpl, ScatterImpl, CatImpl, MeanImpl)
 from . import config as C
+from . import compile as C_compile
 
 # Lazily populated on first use (needs torch.ops.aten).
 _REGISTRY = None
@@ -81,4 +82,9 @@ def try_dispatch(func, args, kwargs):
     spec = impl.supported(func, args, kwargs)
     if spec is None:
         return None
-    return impl.run(spec, args, kwargs)
+    try:
+        return impl.run(spec, args, kwargs)
+    except C_compile.CaptureDeferred:
+        # A batch capture is active: the kernel was extracted and queued for the
+        # combined build; fall back to stock PyTorch for this call.
+        return None

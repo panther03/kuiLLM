@@ -12,7 +12,7 @@
 // (m = product of leading dims, n = reduced last-dim length); the keepdim
 // output is the [m, 1] column. The kernel runs one block per row.
 
-torch::Tensor op_{{ name }} (torch::Tensor Input)
+torch::Tensor op_{{ module }} (torch::Tensor Input)
 {
     auto In = Input.contiguous();
 
@@ -33,6 +33,4 @@ torch::Tensor op_{{ name }} (torch::Tensor Input)
     return Out;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{ name }}, "op_{{ name }}");
-}
+{% include "_pybind.cu.j2" %}

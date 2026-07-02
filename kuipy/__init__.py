@@ -47,6 +47,60 @@ def is_available() -> bool:
         return False
     return (C.KUIPER_INST / "bin" / "fstar.exe").exists()
 
+
+# ---------------------------------------------------------------------------
+# Batch compile
+# ---------------------------------------------------------------------------
+#
+# Normally each distinct kernel instantiation is compiled into its own torch
+# extension the first time it is dispatched (an F* extraction + a full nvcc/g++
+# build, dominated by parsing torch/extension.h once per kernel). Batch mode
+# amortizes that: under ``batch_capture()`` matched ops are only *extracted* and
+# their execution falls back to stock PyTorch, then on exit every captured
+# wrapper is concatenated into one translation unit and compiled together into a
+# single shared extension -- so torch/extension.h is parsed once for the whole
+# run. Typical use: one warm-up pass under ``batch_capture()`` to discover and
+# build every kernel, then the real workload runs on the compiled kernels.
+#
+#     with kuipy.KuiperMode():
+#         with kuipy.batch_capture():
+#             model(warmup_inputs)   # extracts everything, runs via PyTorch
+#         model(real_inputs)         # runs the batch-compiled Kuiper kernels
+
+def start_batch_capture():
+    """Begin capturing matched kernels for a single combined build. While active,
+    matched ops are extracted but deferred to stock PyTorch."""
+    from . import compile as _c
+    _c.start_capture()
+
+
+def finalize_batch_capture():
+    """Compile every captured kernel into one shared extension and return it
+    (or None if nothing was captured)."""
+    from . import compile as _c
+    return _c.finalize_capture()
+
+
+def is_batch_capturing() -> bool:
+    from . import compile as _c
+    return _c.is_capturing()
+
+
+def batch_capture():
+    """Context manager wrapping ``start_batch_capture`` / ``finalize_batch_capture``."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        start_batch_capture()
+        try:
+            yield
+        finally:
+            finalize_batch_capture()
+
+    return _cm()
+
+
 _jit_dispatch = None
 _jit_warned = False
 

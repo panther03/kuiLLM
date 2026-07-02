@@ -4,11 +4,11 @@
 #include "{{ header }}"
 
 {% if kind == "map" or kind == "map_nip" %}
-torch::Tensor op_{{name}}(torch::Tensor A)
+torch::Tensor op_{{ module }}(torch::Tensor A)
 {% elif kind == "map2" %}
-torch::Tensor op_{{name}}(torch::Tensor A, torch::Tensor B)
+torch::Tensor op_{{ module }}(torch::Tensor A, torch::Tensor B)
 {% elif kind == "map3" %}
-torch::Tensor op_{{name}}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
+torch::Tensor op_{{ module }}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
 {% else %}
 #error "UNSUPPORTED ELEMENTWISE KIND"
 {% endif %}
@@ -44,6 +44,4 @@ torch::Tensor op_{{name}}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
     return out;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{name}}, "op_{{name}}");
-}
+{% include "_pybind.cu.j2" %}

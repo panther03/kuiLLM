@@ -3,7 +3,7 @@
 
 #include "{{ header }}"
 
-torch::Tensor op_{{name}} (torch::Tensor A, torch::Tensor B)
+torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
@@ -21,6 +21,4 @@ torch::Tensor op_{{name}} (torch::Tensor A, torch::Tensor B)
     return C;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{name}}, "op_{{name}}");
-}
+{% include "_pybind.cu.j2" %}

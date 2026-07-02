@@ -14,7 +14,7 @@
 // The input/index shape dims are passed as runtime arguments (the kernel is
 // instantiated once per element type, rank and axis).
 
-torch::Tensor op_{{ name }} (torch::Tensor Input, torch::Tensor Index)
+torch::Tensor op_{{ module }} (torch::Tensor Input, torch::Tensor Index)
 {
     at::cuda::CUDAGuard g(Input.device());
     auto Inp = Input.contiguous();
@@ -34,6 +34,4 @@ torch::Tensor op_{{ name }} (torch::Tensor Input, torch::Tensor Index)
     return Out;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("run", &op_{{ name }}, "op_{{ name }}");
-}
+{% include "_pybind.cu.j2" %}
