@@ -74,6 +74,7 @@ FSTAR_FLAGS = [
 # --------------------------------------------------------------------------
 KRML_FLAGS = [
     "-add-early-include", "<kuiper.h>",
+    "-add-early-include", "<kuiops_compat.h>",
     "-fc++-compat",
     "-fcast-allocations",
     "-skip-compilation",

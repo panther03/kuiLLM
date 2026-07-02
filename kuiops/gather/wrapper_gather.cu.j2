@@ -10,21 +10,26 @@
 // pointwise no larger than `input`; every output cell reads `input` at the same
 // coordinates with axis {{ dim }} replaced by the index value. Inputs are made
 // contiguous; the output is freshly allocated with `index`'s shape and `input`'s
-// dtype. The index tensor holds machine-word offsets (size_t) into `input`.
+// dtype. The int64 index is narrowed to uint32 (Kuiper's index element type).
+// The input/index shape dims are passed as runtime arguments (the kernel is
+// instantiated once per element type, rank and axis).
 
 torch::Tensor op_{{ name }} (torch::Tensor Input, torch::Tensor Index)
 {
+    at::cuda::CUDAGuard g(Input.device());
     auto Inp = Input.contiguous();
-    auto Idx = Index.contiguous();
-    auto Out = torch::empty(Idx.sizes(), Inp.options());
+    auto Idx = kuiops::index_to_u32(Index);
+    auto Out = torch::empty(Index.sizes(), Inp.options());
 
-    at::cuda::CUDAGuard g(Input.device()); kuiops::sync_current_stream();
+    kuiops::sync_current_stream();
 
     {{ sym }} (
+        {% for k in range(r) %}(uint32_t)Inp.size({{ k }}), {% endfor %}
+        {% for k in range(r) %}(uint32_t)Index.size({{ k }}), {% endfor %}
         reinterpret_cast<{{ cpp_et }}*>(Inp.data_ptr()),
-        reinterpret_cast<size_t*>(Idx.data_ptr()),
+        reinterpret_cast<uint32_t*>(Idx.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
-        (size_t)Out.numel());
+        (uint32_t)Out.numel());
 
     return Out;
 }

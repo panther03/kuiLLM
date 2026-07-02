@@ -1,8 +1,18 @@
-{%- macro shape(dims) -%}
-{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- macro shp(p) -%}
+{% for k in range(r) %}(SZ.v {{ p }}{{ k }}) @| {% endfor %}INil
 {%- endmacro -%}
-{%- macro cshape(dims) -%}
-{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- macro prod(p) -%}
+{% for k in range(r) %}{{ p }}{{ k }}{% if not loop.last %} * {% endif %}{% endfor %}
+{%- endmacro -%}
+{%- macro cs(p) -%}
+{% for k in range(r) %}CCons {{ p }}{{ k }} ({% endfor %}CNil{% for k in range(r) %}){% endfor %}
+{%- endmacro -%}
+{%- macro rm(p) -%}
+{%- if r == 1 -%}l1_forward (SZ.v {{ p }}0)
+{%- elif r == 2 -%}l2_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1)
+{%- elif r == 3 -%}l3_batched_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1) (SZ.v {{ p }}2)
+{%- elif r == 4 -%}l4_batched_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1) (SZ.v {{ p }}2) (SZ.v {{ p }}3)
+{%- endif -%}
 {%- endmacro -%}
 module {{ module }}
 #lang-pulse
@@ -13,33 +23,37 @@ module {{ module }}
 open Kuiper
 open Kuiper.Shape
 open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg
+open Kuiops.Common
 open Kuiops.Gather
 
 module SZ = Kuiper.SizeT
 
-// `dInp` is the (pointwise larger) input shape; `dIdx` is the index/output shape
-// and `dim` the gathered axis. `shape_le dIdx dInp` holds by computation on the
-// literal shapes, so the binder refinement is discharged at the call. The
-// concrete cshapes are passed inline so extraction reduces them away (cshape is
-// `inline_for_extraction noextract`; a top-level `let` would not extract).
-let dInp : shape {{ r }} = {{ shape(dims_inp) }}
-let dIdx : shape {{ r }} = {{ shape(dims_idx) }}
-
+// Dims are passed as *runtime* `szp` parameters (like the batched-GEMM kernel),
+// not baked in as literals. This lets each tensor use a *concrete* row-major
+// layout (`l2_row_major (SZ.v m) (SZ.v n)`, ...): the `ctlayout` instance -- and
+// its `cimap` index function -- resolves symbolically and inlines at extraction,
+// so the delinearized `conc` index tuple is consumed structurally. Baking literal
+// dims instead normalises `SZ.v 5sz` to `5`, which the `SZ.t`-indexed `ctlayout`
+// instances (`c_l2_row_major`, ...) cannot match; abstract `tlayout` implicits
+// (the previous approach) extract `cimap` as an opaque `any` function pointer,
+// which forces the concrete index tuple to be cast to the Top type -- rejected by
+// karamel (Warning 26). `o*` are the input shape, `i*` the index/output shape.
 fn {{ name }}
-    (#lInp : tlayout dInp) (#lIdx #lOut : tlayout dIdx)
-    {| ctlayout lInp, ctlayout lIdx, ctlayout lOut |}
-    (gInp : tensor ({{ et }}) lInp {is_global gInp})
-    (gIdx : tensor (szlt (dInp @! {{ dim }})) lIdx {is_global gIdx})
-    (gOut : tensor ({{ et }}) lOut {is_global gOut})
-    (n : sz { SZ.v n == sizeof dIdx /\ n <= max_blocks * max_threads /\ n > 0 })
-    (eInp : chest dInp ({{ et }}))
-    (eIdx : chest dIdx (szlt (dInp @! {{ dim }})))
+    {% for k in range(r) %}(o{{ k }} : szp{% if loop.last %} { SZ.fits ({{ prod('o') }}) }{% endif %})
+    {% endfor %}{% for k in range(r) %}(i{{ k }} : szp{% if loop.last %} { SZ.fits ({{ prod('i') }}) /\ shape_le ({{ shp('i') }}) ({{ shp('o') }}) }{% endif %})
+    {% endfor %}(gInp : tensor ({{ et }}) ({{ rm('o') }}) {is_global gInp})
+    (gIdx : tensor (szlt (({{ shp('o') }}) @! {{ dim }})) ({{ rm('i') }}) {is_global gIdx})
+    (gOut : tensor ({{ et }}) ({{ rm('i') }}) {is_global gOut})
+    (n : sz { SZ.v n == sizeof ({{ shp('i') }}) /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eInp : chest ({{ shp('o') }}) ({{ et }}))
+    (eIdx : chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})))
     (#fInp #fIdx : perm)
   preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx eIdx)
   requires on gpu_loc (live gOut)
   ensures
-    on gpu_loc (gOut |-> gather_chest dIdx dInp eInp {{ dim }} eIdx)
+    on gpu_loc (gOut |-> gather_chest ({{ shp('i') }}) ({{ shp('o') }}) eInp {{ dim }} eIdx)
 {
-  gather_gpu dIdx dInp ({{ cshape(dims_idx) }}) ({{ cshape(dims_inp) }}) {{ dim }}sz
+  gather_gpu ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
     gInp gIdx gOut n eInp eIdx
 }

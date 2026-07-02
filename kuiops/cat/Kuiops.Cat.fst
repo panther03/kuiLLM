@@ -11,53 +11,58 @@ open Kuiper.Tensor
 open Kuiper.Shareable
 
 open Kuiper.Kernel.TMap
+open Kuiops.Common
 
 module SZ = Kuiper.SizeT
 
 (* ----------------------------------------------------------------------- *)
-(* Index machinery: split/rebuild a concrete index across dimension `dim`,
-   carrying the abstract round-trip relationship in the return type (so the
-   per-element function below verifies by unfolding the spec). *)
+(* Index machinery: the cat kernel reads, for each output coordinate `i`, the
+   coordinate `j` along `dim` (via `abs_get_at`) and rebuilds the input index by
+   narrowing across `dim` (via `abs_narrow`, copying the off-`dim` coordinates).
+   This lemma re-expresses the abstract spec `abs_cat` -- defined through the
+   `abs_bring_forward_bij` split -- in those coordinate terms, so the concrete
+   `conc_get_at`/`conc_narrow` used in `fcat` (both of which commute with the
+   abstract ops by construction) discharge the per-element contract. Crucially,
+   it never mentions `conc (modulo_i dim d)`, the type karamel cannot extract. *)
 
-let rec gg_eq (#r : nat) (dim : natlt r) (d : shape r)
-  (j : szlt (d @! dim)) (m : conc (modulo_i dim d))
-  : Lemma (ensures c_bring_forward_gg dim d j m == (conc_bring_forward_bij dim d).gg (j, m))
+(* `abs_get_at` reads the same coordinate the bijection peels off along `dim`. *)
+let rec get_at_is_ff (#r : nat) (dim : natlt r) (d : shape r) (x : abs d)
+  : Lemma (ensures abs_get_at #r #d dim x == fst ((abs_bring_forward_bij dim d).ff x))
           (decreases dim)
-  = if dim = 0 then ()
-    else (let (h2, t2) = m <: szlt (d @! 0) & conc (tail (modulo_i dim d)) in
-          gg_eq #(r-1) (dim - 1) (tail d) j t2)
+  = let (h, t) = x <: natlt (d @! 0) & abs (tail d) in
+    if dim = 0 then ()
+    else get_at_is_ff #(r-1) (dim - 1) (tail d) t
 
-let rec roundtrip (#r : nat) (dim : natlt r) (d : shape r) (idx : conc d)
-  : Lemma (ensures (let (j, m) = c_bring_forward_ff dim d idx in
-                    c_bring_forward_gg dim d j m == idx))
+(* `abs_narrow` into `d1` reinserts `v` along `dim` over the off-`dim` remainder
+   that the bijection on `d2` peels off (the remainders coincide via the
+   `modulo_i` equality). *)
+let rec narrow_is_gg (#r : nat) (dim : natlt r) (d1 d2 : shape r)
+  (v : natlt (d1 @! dim)) (x : abs d2 { modulo_i dim d1 == modulo_i dim d2 })
+  : Lemma (ensures abs_narrow dim d1 d2 v x ==
+                   (abs_bring_forward_bij dim d1).gg (v, snd ((abs_bring_forward_bij dim d2).ff x)))
           (decreases dim)
-  = if dim = 0 then ()
-    else (let (h, t) = idx <: szlt (d @! 0) & conc (tail d) in
-          roundtrip #(r-1) (dim - 1) (tail d) t)
+  = let (h, t) = x <: natlt (d2 @! 0) & abs (tail d2) in
+    if dim = 0 then (modulo_zero d1; modulo_zero d2)
+    else (modulo_succ dim d1; modulo_succ dim d2;
+          narrow_is_gg #(r-1) (dim - 1) (tail d1) (tail d2) v t)
 
-(* Rebuild a concrete index of `d` from `(j, m)`. `j` is taken as a bare size_t
-   with its bound supplied separately, so callers can narrow a coordinate of a
-   wider shape (the output) without a rigid refinement-type conversion. *)
-inline_for_extraction noextract
-let conc_unsplit (#r : nat) (dim : natlt r) (d : shape r)
-  (j : sz) (_ : squash (SZ.v j < d @! dim)) (m : conc (modulo_i dim d))
-  : (c : conc d { up c == (abs_bring_forward_bij dim d).gg (SZ.v j, up m) })
-  = let jj : szlt (d @! dim) = j in
-    gg_eq dim d jj m;
-    bring_forward_commute2 dim d jj m;
-    c_bring_forward_gg dim d jj m
-
-(* From a concrete index `i : conc d`, peel the coordinate `j` along `dim` and
-   the rest `m`, with `up i == (abs_bring_forward_bij dim d).gg (v j, up m)`. *)
-inline_for_extraction noextract
-let conc_split (#r : nat) (dim : natlt r) (d : shape r) (i : conc d)
-  : (res : (szlt (d @! dim) & conc (modulo_i dim d))
-        { let (j, m) = res in up i == (abs_bring_forward_bij dim d).gg (SZ.v j, up m) })
-  = let res = c_bring_forward_ff dim d i in
-    let (j, m) = res in
-    roundtrip dim d i;
-    let _ = conc_unsplit dim d j () m in
-    res
+let cat_via_narrow (#et: Type0) (#r : nat)
+  (dim : natlt r) (dA dB dout : shape r)
+  (eA : chest dA et) (eB : chest dB et)
+  (na : nat { na == dA @! dim })
+  (pf_sz : squash ((dout @! dim) == (dA @! dim) + (dB @! dim)))
+  (pfA : squash (modulo_i dim dA == modulo_i dim dout))
+  (pfB : squash (modulo_i dim dB == modulo_i dim dout))
+  (x : abs dout)
+  : Lemma (ensures
+      (let j = abs_get_at #r #dout dim x in
+       abs_cat dim dA dB dout eA eB na pf_sz pfA pfB x ==
+         (if j < na then acc eA (abs_narrow dim dA dout j x)
+          else acc eB (abs_narrow dim dB dout (j - na) x))))
+  = get_at_is_ff dim dout x;
+    let (j, m) = (abs_bring_forward_bij dim dout).ff x in
+    if j < na then narrow_is_gg dim dA dout j x
+    else narrow_is_gg dim dB dout (j - na) x
 
 (* ----------------------------------------------------------------------- *)
 (* The per-element value relation (links abs_cat to the map's contract). *)
@@ -108,7 +113,9 @@ instance cat_frame_shareable
 inline_for_extraction noextract
 fn fcat
   (#et : Type0) (#r : nat)
-  (dim : natlt r) (dA dB dout : shape r)
+  (dim : natlt r) (dimsz : szlt r { SZ.v dimsz == dim })
+  (dA dB dout : shape r)
+  (cdA : cshape dA) (cdB : cshape dB) (cdout : cshape dout)
   (#lA : tlayout dA) (#lB : tlayout dB) {| ctlayout lA, ctlayout lB |}
   (gA : tensor et lA {is_global gA})
   (gB : tensor et lB {is_global gB})
@@ -128,15 +135,15 @@ returns
 ensures
   pure (vcat dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB (up i) x res)
 {
-  let jm = conc_split dim dout i;
-  let (j, m) = jm;
-  let b = j <^ na;
+  cat_via_narrow dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB (up i);
+  let jc = conc_get_at cdout dimsz i;
+  let b = jc <^ na;
   if b {
-    let ia = conc_unsplit dim dA j () m;
+    let ia = conc_narrow dimsz cdA cdout () jc () i;
     let v = tensor_read gA ia;
     v
   } else {
-    let ib = conc_unsplit dim dB (j -^ na) () m;
+    let ib = conc_narrow dimsz cdB cdout () (jc -^ na) () i;
     let v = tensor_read gB ib;
     v
   }
@@ -150,7 +157,7 @@ fn cat_gpu
   (#et : Type0) (#r : nat)
   (dA dB dout : shape r)
   (cdA : cshape dA) (cdB : cshape dB) (cdout : cshape dout)
-  (dim : natlt r)
+  (dim : natlt r) (dimsz : szlt r { SZ.v dimsz == dim })
   (na : sz { SZ.v na == dA @! dim })
   (pf_sz : squash ((dout @! dim) == (dA @! dim) + (dB @! dim)))
   (pfA : squash (modulo_i dim dA == modulo_i dim dout))
@@ -170,14 +177,13 @@ fn cat_gpu
     on gpu_loc (gOut |-> cat_chest dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB)
 {
   with eOut. assert on gpu_loc (gOut |-> eOut);
-  let kfun = (kmap cdout
+  launch_sync
+    (kmap cdout
       (cat_frame dA dB #lA #lB gA gB eA eB fA fB)
       #(cat_frame_shareable dA dB #lA #lB gA gB eA eB fA fB)
       (vcat dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB)
-      (fcat dim dA dB dout #lA #lB gA gB na pf_sz pfA pfB eA eB)
+      (fcat dim dimsz dA dB dout cdA cdB cdout #lA #lB gA gB na pf_sz pfA pfB eA eB)
       n gOut #eOut #_ #(fA +. fB));
-  launch_sync
-    kfun;
   with eOut'. assert on gpu_loc (gOut |-> eOut');
   assert pure (Kuiper.Chest.equal eOut'
                  (cat_chest dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB));

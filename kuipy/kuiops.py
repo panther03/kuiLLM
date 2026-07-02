@@ -619,14 +619,6 @@ class SdpaImpl(_Family):
 # the F* instantiation (hence the module name encodes them), and the output is
 # allocated on the C++ side per the wrapper conventions.
 
-# dtypes these movement ops accept (everything with both an F* element type and
-# a C type); the kernels need no `scalar` typeclass, only a layout.
-_MOVE_DTYPES = _FLOAT_DTYPES + [
-    torch.int64, torch.int32, torch.int16, torch.int8,
-    torch.uint8, torch.uint16, torch.uint32, torch.uint64,
-]
-
-
 def _shape_le(small, large):
     """Pointwise ``small[d] <= large[d]`` over equal ranks (Kuiper ``shape_le``)."""
     return len(small) == len(large) and all(s <= l for s, l in zip(small, large))
@@ -657,7 +649,7 @@ class GatherImpl(_Family):
         if not (isinstance(Inp, torch.Tensor) and isinstance(Idx, torch.Tensor)
                 and Inp.is_cuda and Idx.is_cuda):
             return None
-        if Inp.dtype not in _MOVE_DTYPES or Idx.dtype != torch.int64:
+        if Idx.dtype != torch.int64:
             return None
         rank = Inp.dim()
         if Idx.dim() != rank or rank < 1:
@@ -677,14 +669,13 @@ class GatherImpl(_Family):
     def run(self, spec, args, kwargs):
         dtype, dim, inp_shape, idx_shape, call = spec
         et = torch_dtype_to_fstar(dtype)
-        module = (f"Kuiops.Gather.{et.title()}.Dim{dim}"
-                  f".Idx_{_shp(idx_shape)}.Inp_{_shp(inp_shape)}")
+        rank = len(inp_shape)
+        # Dims flow at runtime, so one module per (element type, rank, axis).
+        module = f"Kuiops.Gather.{et.title()}.R{rank}.Dim{dim}"
         name = "gather_jit"
-        fst_ctx = dict(
-            module=module, name=name, r=len(inp_shape),
-            dims_inp=inp_shape, dims_idx=idx_shape, dim=dim, et=et)
+        fst_ctx = dict(module=module, name=name, r=rank, dim=dim, et=et)
         wrapper_ctx = dict(
-            module=module.replace(".", "_"), name=name, dim=dim,
+            module=module.replace(".", "_"), name=name, dim=dim, r=rank,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(Input, Index)
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
@@ -705,7 +696,7 @@ class ScatterImpl(_Family):
             return None
         if not (Self.is_cuda and Idx.is_cuda and Src.is_cuda):
             return None
-        if Self.dtype not in _MOVE_DTYPES or Src.dtype != Self.dtype:
+        if Src.dtype != Self.dtype:
             return None
         if Idx.dtype != torch.int64:
             return None
@@ -732,14 +723,12 @@ class ScatterImpl(_Family):
         dtype, dim, src_shape, self_shape, call = spec
         Self, Idx, Src = call
         et = torch_dtype_to_fstar(dtype)
-        module = (f"Kuiops.Scatter.{et.title()}.Dim{dim}"
-                  f".Src_{_shp(src_shape)}.Self_{_shp(self_shape)}")
+        rank = len(self_shape)
+        module = f"Kuiops.Scatter.{et.title()}.R{rank}.Dim{dim}"
         name = "scatter_jit"
-        fst_ctx = dict(
-            module=module, name=name, r=len(self_shape),
-            dims_inp=src_shape, dims_out=self_shape, dim=dim, et=et)
+        fst_ctx = dict(module=module, name=name, r=rank, dim=dim, et=et)
         wrapper_ctx = dict(
-            module=module.replace(".", "_"), name=name, dim=dim,
+            module=module.replace(".", "_"), name=name, dim=dim, r=rank,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(Self, Index, Src) -> clone(Self) updated in place
         return self._mod(module, fst_ctx, wrapper_ctx).run(Self, Idx, Src)
@@ -762,7 +751,7 @@ class CatImpl(_Family):
         A, B = tensors
         if not all(isinstance(t, torch.Tensor) and t.is_cuda for t in (A, B)):
             return None
-        if A.dtype != B.dtype or A.dtype not in _MOVE_DTYPES:
+        if A.dtype != B.dtype:
             return None
         rank = A.dim()
         if B.dim() != rank or rank < 1:
@@ -784,15 +773,12 @@ class CatImpl(_Family):
     def run(self, spec, args, kwargs):
         dtype, dim, a_shape, b_shape, out_shape, call = spec
         et = torch_dtype_to_fstar(dtype)
-        module = (f"Kuiops.Cat.{et.title()}.Dim{dim}"
-                  f".A_{_shp(a_shape)}.B_{_shp(b_shape)}")
+        rank = len(out_shape)
+        module = f"Kuiops.Cat.{et.title()}.R{rank}.Dim{dim}"
         name = "cat_jit"
-        fst_ctx = dict(
-            module=module, name=name, r=len(out_shape),
-            dims_a=a_shape, dims_b=b_shape, dims_out=out_shape,
-            dim=dim, na=a_shape[dim], et=et)
+        fst_ctx = dict(module=module, name=name, r=rank, dim=dim, et=et)
         wrapper_ctx = dict(
-            module=module.replace(".", "_"), name=name, dim=dim,
+            module=module.replace(".", "_"), name=name, dim=dim, r=rank,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(A, B)
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)

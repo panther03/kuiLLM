@@ -9,10 +9,13 @@
 // Binary torch.cat(A, B, dim={{ dim }}): A and B agree on every dimension except
 // `dim`; the output keeps that shape with size A.size(dim) + B.size(dim) along
 // `dim`. The kernel maps over the (row-major contiguous) output, so the inputs
-// are made contiguous and the output is allocated with the input dtype.
+// are made contiguous and the output is allocated with the input dtype. A's dims
+// and B's size along `dim` are passed as runtime arguments (the kernel is
+// instantiated once per element type, rank and axis).
 
 torch::Tensor op_{{ name }} (torch::Tensor A, torch::Tensor B)
 {
+    at::cuda::CUDAGuard g(A.device());
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
 
@@ -20,13 +23,15 @@ torch::Tensor op_{{ name }} (torch::Tensor A, torch::Tensor B)
     out_sizes[{{ dim }}] = Ac.size({{ dim }}) + Bc.size({{ dim }});
     auto Out = torch::empty(out_sizes, Ac.options());
 
-    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+    kuiops::sync_current_stream();
 
     {{ sym }} (
+        {% for k in range(r) %}(uint32_t)Ac.size({{ k }}), {% endfor %}
+        (uint32_t)Bc.size({{ dim }}),
         reinterpret_cast<{{ cpp_et }}*>(Ac.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Bc.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
-        (size_t)Out.numel());
+        (uint32_t)Out.numel());
 
     return Out;
 }

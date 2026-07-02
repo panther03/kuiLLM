@@ -45,7 +45,7 @@ fn cat_gpu
   (#et : Type0) (#r : nat)
   (dA dB dout : shape r)
   (cdA : cshape dA) (cdB : cshape dB) (cdout : cshape dout)
-  (dim : natlt r)
+  (dim : natlt r) (dimsz : szlt r { SZ.v dimsz == dim })
   (na : sz { SZ.v na == dA @! dim })
   (pf_sz : squash ((dout @! dim) == (dA @! dim) + (dB @! dim)))
   (pfA : squash (modulo_i dim dA == modulo_i dim dout))

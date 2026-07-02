@@ -1,8 +1,18 @@
-{%- macro shape(dims) -%}
-{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- macro shp(p) -%}
+{% for k in range(r) %}(SZ.v {{ p }}{{ k }}) @| {% endfor %}INil
 {%- endmacro -%}
-{%- macro cshape(dims) -%}
-{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- macro prod(p) -%}
+{% for k in range(r) %}{{ p }}{{ k }}{% if not loop.last %} * {% endif %}{% endfor %}
+{%- endmacro -%}
+{%- macro cs(p) -%}
+{% for k in range(r) %}CCons {{ p }}{{ k }} ({% endfor %}CNil{% for k in range(r) %}){% endfor %}
+{%- endmacro -%}
+{%- macro rm(p) -%}
+{%- if r == 1 -%}l1_forward (SZ.v {{ p }}0)
+{%- elif r == 2 -%}l2_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1)
+{%- elif r == 3 -%}l3_batched_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1) (SZ.v {{ p }}2)
+{%- elif r == 4 -%}l4_batched_row_major (SZ.v {{ p }}0) (SZ.v {{ p }}1) (SZ.v {{ p }}2) (SZ.v {{ p }}3)
+{%- endif -%}
 {%- endmacro -%}
 module {{ module }}
 #lang-pulse
@@ -13,39 +23,39 @@ module {{ module }}
 open Kuiper
 open Kuiper.Shape
 open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg
+open Kuiops.Common
 open Kuiops.Scatter
 
 module SZ = Kuiper.SizeT
 
-// `dInp` is the src/index shape; `dOut` the (pointwise larger) self/output shape
-// and `dim` the scattered axis. `shape_le dInp dOut` holds by computation on the
-// literal shapes, so the binder refinement is discharged at the call. The
-// concrete cshapes are passed inline so extraction reduces them away (cshape is
-// `inline_for_extraction noextract`; a top-level `let` would not extract).
-let dInp : shape {{ r }} = {{ shape(dims_inp) }}
-let dOut : shape {{ r }} = {{ shape(dims_out) }}
-
+// Dims are passed as *runtime* `szp` parameters (like the batched-GEMM kernel),
+// so every tensor uses a *concrete* row-major layout (`l2_row_major (SZ.v m)
+// (SZ.v n)`, ...). This lets the `ctlayout` instance -- and its `cimap` index
+// function -- resolve symbolically and inline at extraction, so the delinearized
+// `conc` index tuple is consumed structurally rather than cast to the Top type
+// (karamel Warning 26). `o*` is the self/output shape, `i*` the src/index shape.
 fn {{ name }}
-    (#lInp #lIdx : tlayout dInp) (#lOut : tlayout dOut)
-    {| ctlayout lInp, ctlayout lIdx, ctlayout lOut |}
-    (gInp : tensor ({{ et }}) lInp {is_global gInp})
-    (gIdx : tensor (szlt (dOut @! {{ dim }})) lIdx {is_global gIdx})
-    (gOut : tensor ({{ et }}) lOut {is_global gOut})
-    (n : sz { SZ.v n == sizeof dInp /\ n <= max_blocks * max_threads /\ n > 0 })
-    (eInp : chest dInp ({{ et }}))
-    (eIdx : chest dInp (szlt (dOut @! {{ dim }})) { chest_inj dInp dOut {{ dim }} eIdx })
+    {% for k in range(r) %}(o{{ k }} : szp{% if loop.last %} { SZ.fits ({{ prod('o') }}) }{% endif %})
+    {% endfor %}{% for k in range(r) %}(i{{ k }} : szp{% if loop.last %} { SZ.fits ({{ prod('i') }}) /\ shape_le ({{ shp('i') }}) ({{ shp('o') }}) }{% endif %})
+    {% endfor %}(gInp : tensor ({{ et }}) ({{ rm('i') }}) {is_global gInp})
+    (gIdx : tensor (szlt (({{ shp('o') }}) @! {{ dim }})) ({{ rm('i') }}) {is_global gIdx})
+    (gOut : tensor ({{ et }}) ({{ rm('o') }}) {is_global gOut})
+    (n : sz { SZ.v n == sizeof ({{ shp('i') }}) /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eInp : chest ({{ shp('i') }}) ({{ et }}))
+    (eIdx : chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})) { chest_inj ({{ shp('i') }}) ({{ shp('o') }}) {{ dim }} eIdx })
     (#fInp #fIdx : perm)
-  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest dInp (szlt (dOut @! {{ dim }}))))
+  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }}))))
   requires on gpu_loc (live gOut)
   ensures
     exists* eOut.
       on gpu_loc (gOut |-> eOut) **
-      pure (vscatter_chest dInp dOut {{ dim }} eInp eIdx eOut)
+      pure (vscatter_chest ({{ shp('i') }}) ({{ shp('o') }}) {{ dim }} eInp eIdx eOut)
 {
   // Index injectivity is a *runtime* property of `eIdx`, carried here as the
   // `chest_inj` refinement on its type. PyTorch leaves scatter with duplicate
   // indices nondeterministic, so at this trusted C boundary it is assumed; the
   // refinement is erased and never reaches the extracted kernel nor its ABI.
-  scatter_gpu dInp dOut ({{ cshape(dims_inp) }}) ({{ cshape(dims_out) }}) {{ dim }}sz
+  scatter_gpu ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
     gInp gIdx gOut n eInp eIdx
 }

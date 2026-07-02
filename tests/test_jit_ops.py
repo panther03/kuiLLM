@@ -209,5 +209,122 @@ def test_sdpa_causal_unsupported():
     assert impl.supported(func, (Q, K, V, None, True), {}) is None
 
 
+# ---------------------------------------------------------------------------
+# gather
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
+def test_gather(dtype, shape, dim):
+    _need_cuda()
+    impl = kuiops.GatherImpl({})
+    torch.manual_seed(0)
+    Inp = torch.randn(*shape, device="cuda", dtype=dtype)
+    idx_shape = list(shape)
+    idx_shape[dim] = max(1, shape[dim] - 1)  # index pointwise <= input
+    Idx = torch.randint(0, shape[dim], idx_shape, device="cuda", dtype=torch.int64)
+    out = _run(impl, aten.gather.default, (Inp, dim, Idx))
+    ref = torch.gather(Inp, dim, Idx)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, dtype)
+
+
+def test_gather_unsupported():
+    _need_cuda()
+    impl = kuiops.GatherImpl({})
+    Inp = torch.randn(4, 4, device="cuda")
+    # index must be int64
+    Idx_f = torch.zeros(4, 4, device="cuda", dtype=torch.int32)
+    assert impl.supported(aten.gather.default, (Inp, 1, Idx_f), {}) is None
+    # index rank must match input rank
+    Idx_r = torch.zeros(4, device="cuda", dtype=torch.int64)
+    assert impl.supported(aten.gather.default, (Inp, 1, Idx_r), {}) is None
+    # index must be pointwise <= input on every axis
+    Idx_big = torch.zeros(4, 5, device="cuda", dtype=torch.int64)
+    assert impl.supported(aten.gather.default, (Inp, 1, Idx_big), {}) is None
+
+
+# ---------------------------------------------------------------------------
+# scatter
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
+def test_scatter(dtype, shape, dim):
+    _need_cuda()
+    impl = kuiops.ScatterImpl({})
+    torch.manual_seed(0)
+    Self = torch.randn(*shape, device="cuda", dtype=dtype)
+    Src = torch.randn(*shape, device="cuda", dtype=dtype)
+    # A per-row permutation along `dim` makes the scatter injective (no two
+    # source cells target the same output location), matching the kernel's
+    # assumption.
+    n = shape[dim]
+    view = [1] * len(shape)
+    view[dim] = n
+    perm = torch.stack([torch.randperm(n, device="cuda")
+                        for _ in range(Self.numel() // n)])
+    Idx = perm.reshape([s for d, s in enumerate(shape) if d != dim] + [n])
+    Idx = Idx.movedim(-1, dim).contiguous()
+    out = _run(impl, aten.scatter.src, (Self, dim, Idx, Src))
+    ref = Self.clone().scatter_(dim, Idx, Src)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, dtype)
+
+
+def test_scatter_unsupported():
+    _need_cuda()
+    impl = kuiops.ScatterImpl({})
+    Self = torch.randn(4, 4, device="cuda")
+    Idx = torch.zeros(4, 4, device="cuda", dtype=torch.int64)
+    Src = torch.randn(4, 4, device="cuda")
+    # src dtype must match self dtype
+    Src_bf = torch.randn(4, 4, device="cuda", dtype=torch.bfloat16)
+    assert impl.supported(aten.scatter.src, (Self, 1, Idx, Src_bf), {}) is None
+    # index must be int64
+    Idx_i32 = torch.zeros(4, 4, device="cuda", dtype=torch.int32)
+    assert impl.supported(aten.scatter.src, (Self, 1, Idx_i32, Src), {}) is None
+    # src and index shapes must match
+    Src_big = torch.randn(4, 5, device="cuda")
+    Idx_big = torch.zeros(4, 4, device="cuda", dtype=torch.int64)
+    assert impl.supported(aten.scatter.src, (Self, 1, Idx_big, Src_big), {}) is None
+
+
+# ---------------------------------------------------------------------------
+# cat (binary)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dim", [0, 1, 2])
+def test_cat(dtype, dim):
+    _need_cuda()
+    impl = kuiops.CatImpl({})
+    torch.manual_seed(0)
+    a_shape = [4, 3, 6]
+    b_shape = list(a_shape)
+    b_shape[dim] = a_shape[dim] + 2  # differ only along `dim`
+    A = torch.randn(*a_shape, device="cuda", dtype=dtype)
+    B = torch.randn(*b_shape, device="cuda", dtype=dtype)
+    out = _run(impl, aten.cat.default, ([A, B], dim))
+    ref = torch.cat([A, B], dim=dim)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, dtype)
+
+
+def test_cat_unsupported():
+    _need_cuda()
+    impl = kuiops.CatImpl({})
+    A = torch.randn(4, 4, device="cuda")
+    B = torch.randn(4, 4, device="cuda")
+    # only binary cat is supported
+    assert impl.supported(aten.cat.default, ([A, B, A], 0), {}) is None
+    # non-`dim` axes must agree
+    Bmis = torch.randn(4, 5, device="cuda")
+    assert impl.supported(aten.cat.default, ([A, Bmis], 0), {}) is None
+    # dtypes must match
+    Bbf = torch.randn(4, 4, device="cuda", dtype=torch.bfloat16)
+    assert impl.supported(aten.cat.default, ([A, Bbf], 0), {}) is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-s", "-v"]))

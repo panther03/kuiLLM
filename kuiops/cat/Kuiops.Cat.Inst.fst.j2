@@ -1,8 +1,24 @@
-{%- macro shape(dims) -%}
-{% for s in dims %}{{ s }} @| {% endfor %}INil
+{%- macro ax(k, w) -%}
+{%- if w == 'a' -%}a{{ k }}
+{%- elif w == 'b' -%}{% if k == dim %}bd{% else %}a{{ k }}{% endif %}
+{%- else -%}{% if k == dim %}(a{{ dim }} +^ bd){% else %}a{{ k }}{% endif %}
+{%- endif -%}
 {%- endmacro -%}
-{%- macro cshape(dims) -%}
-{% for s in dims %}CCons {{ s }}sz ({% endfor %}CNil{% for s in dims %}){% endfor %}
+{%- macro shp(w) -%}
+{% for k in range(r) %}(SZ.v {{ ax(k, w) }}) @| {% endfor %}INil
+{%- endmacro -%}
+{%- macro prod(w) -%}
+{% for k in range(r) %}({{ ax(k, w) }}){% if not loop.last %} * {% endif %}{% endfor %}
+{%- endmacro -%}
+{%- macro cs(w) -%}
+{% for k in range(r) %}CCons {{ ax(k, w) }} ({% endfor %}CNil{% for k in range(r) %}){% endfor %}
+{%- endmacro -%}
+{%- macro rm(w) -%}
+{%- if r == 1 -%}l1_forward (SZ.v {{ ax(0, w) }})
+{%- elif r == 2 -%}l2_row_major (SZ.v {{ ax(0, w) }}) (SZ.v {{ ax(1, w) }})
+{%- elif r == 3 -%}l3_batched_row_major (SZ.v {{ ax(0, w) }}) (SZ.v {{ ax(1, w) }}) (SZ.v {{ ax(2, w) }})
+{%- elif r == 4 -%}l4_batched_row_major (SZ.v {{ ax(0, w) }}) (SZ.v {{ ax(1, w) }}) (SZ.v {{ ax(2, w) }}) (SZ.v {{ ax(3, w) }})
+{%- endif -%}
 {%- endmacro -%}
 module {{ module }}
 #lang-pulse
@@ -13,34 +29,33 @@ module {{ module }}
 open Kuiper
 open Kuiper.Shape
 open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg
 open Kuiops.Cat
 
 module SZ = Kuiper.SizeT
 
-let dA : shape {{ r }} = {{ shape(dims_a) }}
-let dB : shape {{ r }} = {{ shape(dims_b) }}
-let dOut : shape {{ r }} = {{ shape(dims_out) }}
-
-let cdA : cshape dA = {{ cshape(dims_a) }}
-let cdB : cshape dB = {{ cshape(dims_b) }}
-let cdOut : cshape dOut = {{ cshape(dims_out) }}
-
-// `dim` and `na` are baked from the concrete request; the three shape side
-// conditions hold by computation on the literal shapes (hence the `()` proofs).
+// Dims are passed as *runtime* `szp` parameters (like the batched-GEMM kernel),
+// so every tensor uses a *concrete* row-major layout: the `ctlayout` instance
+// (and its `cimap` index function) resolves symbolically and inlines at
+// extraction, rather than becoming an opaque `any` function pointer that forces
+// the concrete index tuple to be cast to the Top type (karamel Warning 26).
+// A's dims (`a*`) are the basis; only B's size along the concatenated axis
+// {{ dim }} (`bd`) is extra, so A/B/output agree on the other axes by
+// construction and the three shape side conditions hold (discharged as `()`).
 fn {{ name }}
-    (#lA : tlayout dA) (#lB : tlayout dB) (#lOut : tlayout dOut)
-    {| ctlayout lA, ctlayout lB, ctlayout lOut |}
-    (gA : tensor ({{ et }}) lA {is_global gA})
-    (gB : tensor ({{ et }}) lB {is_global gB})
-    (gOut : tensor ({{ et }}) lOut {is_global gOut})
-    (n : sz { SZ.v n == sizeof dOut /\ n <= max_blocks * max_threads /\ n > 0 })
-    (eA : chest dA ({{ et }})) (eB : chest dB ({{ et }}))
+    {% for k in range(r) %}(a{{ k }} : szp)
+    {% endfor %}(bd : szp { SZ.fits ({{ prod('a') }}) /\ SZ.fits ({{ prod('b') }}) /\ SZ.fits ({{ prod('o') }}) /\ SZ.fits (a{{ dim }} + bd) })
+    (gA : tensor ({{ et }}) ({{ rm('a') }}) {is_global gA})
+    (gB : tensor ({{ et }}) ({{ rm('b') }}) {is_global gB})
+    (gOut : tensor ({{ et }}) ({{ rm('o') }}) {is_global gOut})
+    (n : sz { SZ.v n == sizeof ({{ shp('o') }}) /\ n <= max_blocks * max_threads /\ n > 0 })
+    (eA : chest ({{ shp('a') }}) ({{ et }})) (eB : chest ({{ shp('b') }}) ({{ et }}))
     (#fA #fB : perm)
   preserves cpu ** on gpu_loc (gA |-> Frac fA eA) ** on gpu_loc (gB |-> Frac fB eB)
   requires on gpu_loc (live gOut)
   ensures
-    on gpu_loc (gOut |-> cat_chest {{ dim }} dA dB dOut eA eB {{ na }} () () ())
+    on gpu_loc (gOut |-> cat_chest {{ dim }} ({{ shp('a') }}) ({{ shp('b') }}) ({{ shp('o') }}) eA eB (SZ.v a{{ dim }}) () () ())
 {
-  cat_gpu dA dB dOut cdA cdB cdOut {{ dim }} {{ na }}sz () () ()
+  cat_gpu ({{ shp('a') }}) ({{ shp('b') }}) ({{ shp('o') }}) ({{ cs('a') }}) ({{ cs('b') }}) ({{ cs('o') }}) {{ dim }} {{ dim }}sz a{{ dim }} () () ()
       gA gB gOut n eA eB
 }

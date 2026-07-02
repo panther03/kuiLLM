@@ -10,25 +10,30 @@
 // shape; each src cell is written to `self` at the same coordinates with axis
 // {{ dim }} replaced by the index value. `index`/`src` are pointwise no larger
 // than `self`. The output is a copy of `self` (so untouched cells keep `self`'s
-// values), which the kernel updates in place. The index tensor holds machine-word
-// offsets (size_t) into the scattered axis.
+// values), which the kernel updates in place. The int64 index is narrowed to
+// uint32 (Kuiper's index element type). The self/src shape dims are passed as
+// runtime arguments (the kernel is instantiated once per element type, rank and
+// axis).
 //
 // NOTE: duplicate indices make scatter nondeterministic (as in PyTorch); the
 // verified kernel assumes the index map is injective.
 
 torch::Tensor op_{{ name }} (torch::Tensor Self, torch::Tensor Index, torch::Tensor Src)
 {
+    at::cuda::CUDAGuard g(Self.device());
     auto Out = kuiops::clone_in(Self);
-    auto Idx = Index.contiguous();
+    auto Idx = kuiops::index_to_u32(Index);
     auto S   = Src.contiguous();
 
-    at::cuda::CUDAGuard g(Self.device()); kuiops::sync_current_stream();
+    kuiops::sync_current_stream();
 
     {{ sym }} (
+        {% for k in range(r) %}(uint32_t)Self.size({{ k }}), {% endfor %}
+        {% for k in range(r) %}(uint32_t)Src.size({{ k }}), {% endfor %}
         reinterpret_cast<{{ cpp_et }}*>(S.data_ptr()),
-        reinterpret_cast<size_t*>(Idx.data_ptr()),
+        reinterpret_cast<uint32_t*>(Idx.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
-        (size_t)S.numel());
+        (uint32_t)S.numel());
 
     return Out;
 }
