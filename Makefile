@@ -1,11 +1,15 @@
-.PHONY: infer infer-kuiper infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys test verify-kuiops install-kuiper
+.PHONY: infer infer-kuiper infer-kuiper-batched infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys test verify-kuiops install-kuiper
 
 # Default install location (cwd/inst), matching install_kuiper.sh.
 KUIPER_INST ?= $(CURDIR)/inst
 
-infer: infer-kuiper
 infer-kuiper:
 	python3 infer.py
+
+infer-kuiper-batched:
+	python3 infer.py --batch-compile
+
+infer: infer-kuiper-batched
 
 infer-no-kuiper:
 	python3 infer.py --no-kuiper
