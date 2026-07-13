@@ -9,7 +9,7 @@ to CUDA. The polymorphic kernels live in a separate repo (`$KUIPER_HOME`,
 ## Build / run / test
 
 Always use the project virtualenv interpreter — there is no system install:
-`/home/julien/work/kuiLLM/.venv/bin/python` (Makefile targets just call `python3`,
+`./.venv/bin/python` (Makefile targets just call `python3`,
 so run them with the venv active or use the venv python directly).
 
 - `make install-kuiper` — copy the built F* toolchain + Kuiper sources from

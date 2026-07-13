@@ -90,8 +90,8 @@ let cat_frame (#et : Type0) (#r : erased nat) (dA dB : shape r)
   (eA : chest dA et)
   (eB : chest dB et)
   (fA fB : perm) (fr : perm) : slprop =
-    (tensor_pts_to gA #((fA /. (fA +. fB)) *. fr) eA) **
-    (tensor_pts_to gB #((fB /. (fA +. fB)) *. fr) eB)
+    (tensor_pts_to gA #(fA *. fr) eA) **
+    (tensor_pts_to gB #(fB *. fr) eB)
 
 instance cat_frame_shareable
   (#et : Type0) (#r : erased nat) (dA dB : shape r)
@@ -105,7 +105,7 @@ instance cat_frame_shareable
     double_shareable
       (fun fr -> tensor_pts_to gA #fr eA)
       (fun fr -> tensor_pts_to gB #fr eB)
-      (fA /. (fA +. fB)) (fB /. (fA +. fB))
+      fA fB
 
 (* ----------------------------------------------------------------------- *)
 (* Per-element function: read the right input for one output coordinate. *)
@@ -129,6 +129,7 @@ fn fcat
   (#fr : perm) (i : conc dout) (x : et)
 norewrite
 preserves
+  gpu **
   (cat_frame dA dB #lA #lB gA gB eA eB fA fB fr)
 returns
   res : et
@@ -183,7 +184,7 @@ fn cat_gpu
       #(cat_frame_shareable dA dB #lA #lB gA gB eA eB fA fB)
       (vcat dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB)
       (fcat dim dimsz dA dB dout cdA cdB cdout #lA #lB gA gB na pf_sz pfA pfB eA eB)
-      n gOut #eOut #_ #(fA +. fB));
+      n gOut #eOut #_ #1.0R);
   with eOut'. assert on gpu_loc (gOut |-> eOut');
   assert pure (Kuiper.Chest.equal eOut'
                  (cat_chest dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB));

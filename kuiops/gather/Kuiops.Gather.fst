@@ -29,8 +29,8 @@ let gather_frame (#et : Type0) (#r : erased nat) (di do : shape r { shape_le di 
   (eIdx: chest di (szlt (do @! (SZ.v dim))))
   (fInp fIdx: perm)
   (fr: perm): slprop =
-    (tensor_pts_to gInp #((fInp /. (fInp +. fIdx)) *. fr) eInp) **
-    (tensor_pts_to gIdx #((fIdx /. (fInp +. fIdx)) *. fr) eIdx) 
+    (tensor_pts_to gInp #(fInp *. fr) eInp) **
+    (tensor_pts_to gIdx #(fIdx *. fr) eIdx)
 
 instance gather_frame_shareable
   (#et : Type0) (#r : erased nat) (di do : shape r { shape_le di do }) (cdi: cshape di)
@@ -45,7 +45,7 @@ instance gather_frame_shareable
     double_shareable 
     (fun fr -> tensor_pts_to gInp #fr eInp) 
     (fun fr -> tensor_pts_to gIdx #fr eIdx)
-    (fInp /. (fInp +. fIdx)) (fIdx /. (fInp +. fIdx))
+    fInp fIdx
 
 inline_for_extraction noextract
 fn fgather (#et : Type0) (#r : erased nat) (di do : shape r { shape_le di do }) (cdi: cshape di) (cdo: cshape do)
@@ -60,6 +60,7 @@ fn fgather (#et : Type0) (#r : erased nat) (di do : shape r { shape_le di do }) 
   (#fr: perm) (i: conc di) (x : et) 
 norewrite
 preserves
+  gpu **
   (gather_frame di do cdi dim #lInp #lIdx gInp gIdx eInp eIdx fInp fIdx fr)
 returns 
   r: et
@@ -92,11 +93,16 @@ fn gather_gpu
   with eOut. assert on gpu_loc (gOut |-> eOut);
   launch_sync
     (kmap cdi
-      (gather_frame di do cdi dim #lInp #lIdx gInp gIdx eInp eIdx fInp fIdx)
-      #(gather_frame_shareable di do cdi dim #lInp #lIdx gInp gIdx eInp eIdx fInp fIdx)
+      (fun fr ->
+        (gInp |-> Frac (fInp *. fr) eInp) **
+        (gIdx |-> Frac (fIdx *. fr) eIdx))
+      #(double_shareable
+        (fun fr -> gInp |-> Frac fr eInp)
+        (fun fr -> gIdx |-> Frac fr eIdx)
+        fInp fIdx)
       (vfgather di do dim eInp eIdx) 
       (fgather di do cdi cdo dim #lInp #lIdx #lOut gInp gIdx gOut eInp eIdx #fInp #fIdx)
-      n gOut #eOut #_ #(fInp +. fIdx));
+      n gOut #eOut #_ #1.0R);
   with eOut'. assert on gpu_loc (gOut |-> eOut');
   assert pure (Kuiper.Chest.equal eOut' (gather_chest di do eInp dim eIdx)); 
 }
