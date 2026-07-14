@@ -15,15 +15,15 @@ let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
     map_gpu #({{ et }}) ({{ fun }}) lena #(l1_forward lena)
 {% elif kind == "map2" %}
 let {{ name }} (lenab: szp {lenab <= max_blocks * max_threads /\ lenab > 0}) =
-    map_gpu2 #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #(l1_forward lenab)
+    map_gpu2 #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #_ #(l1_forward lenab) #_
 {% elif kind == "map_nip" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
     map_gpu_to #({{ et }}) #({{ ot }}) ({{ fun }}) lena
-        #(l1_forward lena) #(l1_forward lena)
+        #(l1_forward lena) #_ #(l1_forward lena) #_
 {% elif kind == "map3" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
     map_gpu3_to #({{ eta }}) #({{ etb }}) #({{ etc }}) #({{ eto }}) ({{ fun }}) lena
-        #(l1_forward lena) #(l1_forward lena) #(l1_forward lena) #(l1_forward lena)
+        #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_
 {% else %}
 UNSUPPORTED ELEMENTWISE KIND
 {% endif %}

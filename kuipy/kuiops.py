@@ -156,6 +156,7 @@ class ElementwiseImpl(_Family):
     # aten op -> F* impl name (arithmetic ops via the scalar/floating typeclass).
     _IMPL = {
         aten.silu.default:      "silu",
+        aten.relu.default:      "relu",
         aten.neg.default:       "neg",
         aten.rsqrt.default:     "rsqrt",
         aten.cos.default:       "cos",
