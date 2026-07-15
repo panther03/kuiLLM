@@ -104,14 +104,17 @@ def batch_capture():
 _jit_dispatch = None
 _jit_warned = False
 
-def _jit_try(func, args, kwargs, VERY_STRICT=False):
+def _jit_try(func, args, kwargs, VERY_STRICT=False, trace=False):
     """Attempt JIT Kuiper dispatch. Returns None on failure."""
     global _jit_dispatch, _jit_warned
     if _jit_dispatch is None:
         from .registry import try_dispatch as _jit_dispatch  # noqa: F811
     ret = None
     try:
-        ret = _jit_dispatch(func, args, kwargs)
+        if trace:
+            ret = _jit_dispatch(func, args, kwargs, trace=True)
+        else:
+            ret = _jit_dispatch(func, args, kwargs)
     except Exception as e:
         if C.JIT_STRICTNESS > 0:
             raise
@@ -134,6 +137,9 @@ def _jit_try(func, args, kwargs, VERY_STRICT=False):
 def __getattr__(name):
     if name == "KuiperMode":
         return _KuiperMode_cls()
+    if name == "compile_graph":
+        from .graph import compile_graph
+        return compile_graph
     raise AttributeError(name)
 
 
@@ -201,18 +207,26 @@ def _KuiperMode_cls():
         """
         dummy_print_mode = False  # only profile, never use Kuiper
 
-        def __init__(self, verify=False, verify_tol=2e-2):
+        @classmethod
+        def ignore_compile_internals(cls):
+            return True
+
+        def __init__(self, verify=False, verify_tol=2e-2, use_kuiper=True,
+                     trace=False):
             super().__init__()
             self.verify = verify
             self.verify_tol = verify_tol
+            self.use_kuiper = use_kuiper
+            self.trace = trace
 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
 
-            if self.dummy_print_mode:
+            used_kuiper = False
+            if self.dummy_print_mode or not self.use_kuiper:
                 out = func(*args, **kwargs)
             else:
-                out = _jit_try(func, args, kwargs)
+                out = _jit_try(func, args, kwargs, trace=self.trace)
                 used_kuiper = out is not None
                 if not used_kuiper:
                     out = func(*args, **kwargs)
@@ -225,7 +239,8 @@ def _KuiperMode_cls():
                                   tuple([arg_data(a) for a in args]),
                                   tuple(kwargs.keys()),
                                   tuple([arg_data(v) for v in kwargs.values()]),
-                                  arg_data(out)))
+                                  arg_data(out),
+                                  used_kuiper))
             return out
 
     _KuiperMode_class = KuiperMode
@@ -306,12 +321,13 @@ def print_verify_report(out_dev=sys.stdout, tol=2e-2):
 def print_profile_data(out_dev=sys.stdout):
     global profile_data
     out = {}
-    for func, args, kwargs_keys, kwargs_values, ret in profile_data:
-        l = out.get(func, [])
+    for func, args, kwargs_keys, kwargs_values, ret, used_kuiper in profile_data:
+        l = out.get((func, used_kuiper), [])
         l.append(print_call_data_aux(args, kwargs_keys, kwargs_values, ret))
-        out[func] = l
-    for func, calls in out.items():
+        out[(func, used_kuiper)] = l
+    for (func, used_kuiper), calls in out.items():
         tag = "" if _has_cuda_kernel(func) else "  [no CUDA kernel: composite — internal GPU sub-ops not interceptable]"
-        print(f"Function {func}:{tag}", file=out_dev)
+        backend = "kuiper" if used_kuiper else "torch"
+        print(f"Function {func} [{backend}]:{tag}", file=out_dev)
         for call in calls:
             print(f"  {call}", file=out_dev)
