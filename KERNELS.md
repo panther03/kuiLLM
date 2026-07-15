@@ -1,5 +1,9 @@
 # Kernel implementation checklist
 
+Graph-mode inference uses the registered `kuiper` Dynamo/AOT backend. It keeps
+ATen calls visible to `KuiperMode`, does not invoke Inductor or Triton, and
+currently owns the Kuiper-gated `mm + add -> addmm` fusion rule.
+
 | Op                                                        | Args                                                      | Out                                                        | Kwargs                                              | Connected? |
 | --------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------- | ---------- |
 | \[e3] aten.where.self                                     | T(2,bool,c), T(2,f32,c), T(2,f32,c)                       | T(2,f32,c)                                                 |                                                     | yes        |

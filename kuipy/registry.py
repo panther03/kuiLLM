@@ -29,6 +29,7 @@ def _build_registry(tune_params):
     # _SDPA = SdpaImpl(tune_params)
     return {
         aten.silu.default: _ELEM,
+        aten.relu.default: _ELEM,
         aten.neg.default: _ELEM,
         aten.rsqrt.default: _ELEM,
         aten.cos.default: _ELEM,
@@ -65,7 +66,7 @@ def _tune_impls(tune_params):
         tune_params = impl.tune(tune_params)
     return tune_params
 
-def try_dispatch(func, args, kwargs):
+def try_dispatch(func, args, kwargs, trace=False):
     """Return a result Tensor if a JIT Kuiper kernel handles ``func``, else None."""
     global _REGISTRY
     if _REGISTRY is None:
@@ -83,6 +84,10 @@ def try_dispatch(func, args, kwargs):
     if spec is None:
         return None
     try:
+        if trace:
+            import torch
+            with torch.autograd.profiler.record_function(f"kuiper::{func.name()}"):
+                return impl.run(spec, args, kwargs)
         return impl.run(spec, args, kwargs)
     except C_compile.CaptureDeferred:
         # A batch capture is active: the kernel was extracted and queued for the

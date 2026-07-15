@@ -5,6 +5,8 @@ import time
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+import kuipy
+
 MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -22,7 +24,7 @@ model = AutoModelForCausalLM.from_pretrained(
 # Compile out of eager mode. A static KV cache keeps the decode step at a
 # fixed shape, so torch.compile can capture one graph and reuse it every step.
 model.generation_config.cache_implementation = "static"
-model.forward = torch.compile(model.forward, fullgraph=True)
+model.forward = kuipy.compile_graph(model.forward, fullgraph=True)
 
 
 def _sync():
@@ -31,8 +33,9 @@ def _sync():
 
 
 def _gen(inputs, n):
-    return model.generate(**inputs, max_new_tokens=n, do_sample=False,
-                          pad_token_id=tokenizer.eos_token_id)
+    with kuipy.KuiperMode():
+        return model.generate(**inputs, max_new_tokens=n, do_sample=False,
+                              pad_token_id=tokenizer.eos_token_id)
 
 
 def _timed_gen(inputs, n):

@@ -35,6 +35,9 @@ model = AutoModelForCausalLM.from_pretrained(
     attn_implementation="flash_attention_2" if use_flash_attn else "sdpa",
 )
 model.eval()
+_EAGER_FORWARD = model.forward
+_EAGER_CACHE_IMPLEMENTATION = model.generation_config.cache_implementation
+_COMPILED_FORWARD = None
 
 print(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 if DEVICE == "cuda":
@@ -53,6 +56,18 @@ def _pad_batch_to_multiple(prompts: Sequence[str], multiple: int) -> List[str]:
     return list(prompts) + ["."] * pad
 
 
+def _set_graph_mode(enabled: bool) -> None:
+    global _COMPILED_FORWARD
+    if enabled:
+        model.generation_config.cache_implementation = "static"
+        if _COMPILED_FORWARD is None:
+            _COMPILED_FORWARD = kuipy.compile_graph(_EAGER_FORWARD, fullgraph=True)
+        model.forward = _COMPILED_FORWARD
+    else:
+        model.generation_config.cache_implementation = _EAGER_CACHE_IMPLEMENTATION
+        model.forward = _EAGER_FORWARD
+
+
 @torch.no_grad()
 def generate_batch(
     prompts: Sequence[str],
@@ -64,6 +79,7 @@ def generate_batch(
     verify: bool = False,
     verify_tol: float = 2e-2,
     capture_build: bool = False,
+    graph_mode: bool = True,
 ) -> List[str]:
     """Generate responses for many prompts in one batched forward pass.
 
@@ -74,6 +90,10 @@ def generate_batch(
     calls (mm / addmm / bmm) to the verified Kuiper CUDA kernels. Tensors
     remain on the regular CUDA device — only the kernel implementation
     changes.
+
+    When ``graph_mode`` is true (default), Qwen uses a static KV cache and its
+    forward method is captured by the Kuiper torch.compile backend. The backend
+    applies Kuiper-supported fusions without invoking Inductor or Triton.
 
     When ``verify`` is true, every op Kuiper handles is also run through stock
     PyTorch and the two results are compared (relative Frobenius norm); a
@@ -87,6 +107,7 @@ def generate_batch(
     if real_n == 0:
         return []
 
+    _set_graph_mode(graph_mode)
     padded_prompts = _pad_batch_to_multiple(prompts, pad_to_multiple)
     texts = [
         tokenizer.apply_chat_template(
@@ -109,16 +130,21 @@ def generate_batch(
         verify = False
 
     if kuipy.is_available() and ((use_kuiper and DEVICE == "cuda") or (ENABLE_PRINT_PROFILING)):
-        kernel_ctx = kuipy.KuiperMode(verify=verify, verify_tol=verify_tol)
+        kernel_ctx = kuipy.KuiperMode(
+            verify=verify,
+            verify_tol=verify_tol,
+            use_kuiper=use_kuiper and DEVICE == "cuda",
+            trace=timing,
+        )
         if ENABLE_PRINT_PROFILING:
-            kernel_ctx.dummy_print_mode = True
-            kernel_tag = "torch"
+            kernel_tag = "kuiper" if use_kuiper and DEVICE == "cuda" else "torch"
         else:
             kernel_tag = "kuiper+verify" if verify else "kuiper"
     else:
         from contextlib import nullcontext
         kernel_ctx = nullcontext()
         kernel_tag = "torch"
+    kernel_tag += "-graph" if graph_mode else "-eager"
 
     if verify:
         kuipy.reset_verify()
@@ -262,12 +288,14 @@ def _report_timing(prof, wall_s: float) -> None:
 
 def generate(prompt: str, max_new_tokens: int = 256, temperature: float = 0.7,
              use_kuiper: bool = True, timing: bool = False,
-             verify: bool = False, verify_tol: float = 2e-2) -> str:
+             verify: bool = False, verify_tol: float = 2e-2,
+             graph_mode: bool = True) -> str:
     """Single-prompt convenience wrapper."""
     return generate_batch([prompt], max_new_tokens=max_new_tokens,
                           temperature=temperature, pad_to_multiple=1,
                           use_kuiper=use_kuiper, timing=timing,
-                          verify=verify, verify_tol=verify_tol)[0]
+                          verify=verify, verify_tol=verify_tol,
+                          graph_mode=graph_mode)[0]
 
 
 def _read_prompts(path: Path) -> List[str]:
@@ -336,6 +364,9 @@ def _main() -> int:
                          "kernel and compiles them all into a single extension "
                          "(one torch/extension.h parse for the whole run), then "
                          "run the real generation on the compiled kernels.")
+    ap.add_argument("--eager", dest="graph_mode", action="store_false",
+                    help="Disable torch.compile graph execution.")
+    ap.set_defaults(graph_mode=True)
     args = ap.parse_args()
 
     if args.prompt and args.prompts:
@@ -371,6 +402,7 @@ def _main() -> int:
         verify=args.verify,
         verify_tol=args.verify_tol,
         capture_build=args.batch_compile,
+        graph_mode=args.graph_mode,
     )
 
     show_n = len(responses) if args.show else min(3, len(responses))
