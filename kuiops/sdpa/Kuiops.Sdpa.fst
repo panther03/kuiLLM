@@ -14,6 +14,7 @@ open Kuiper.Float.Casts
 
 module SZ = Kuiper.SizeT
 module MS = Kuiper.Spec.GEMM
+module MU = Kuiper.Kernel.GEMM.Util
 
 open Kuiper.Spec.Attention
 open Kuiper.Kernel.BatchedGEMM
@@ -34,6 +35,39 @@ let fold_unfold_chest_id (#et:Type0) (#r:nat{r>1}) (#d:shape r) (m : chest d et)
     );
     Kuiper.Chest.lemma_equal_intro (unfold_chest #et #r #d (fold_chest #et #r #d m)) m;
     Kuiper.Chest.ext (unfold_chest #et #r #d (fold_chest #et #r #d m)) m
+
+let fold_chest_slice_page
+  (#et: Type0)
+  (#d0 #d1 #d2 #d3 : nat)
+  (m : chest4 et d0 d1 d2 d3)
+  (i : natlt d0)
+  (j : natlt d1)
+  : Lemma (
+      slice_page #et #(d0 * d1) #d2 #d3
+        (fold_chest #et #4 #(d0 @| d1 @| d2 @| d3 @| INil) m)
+        (i * d1 + j) ==
+      slice_page4 m i j) =
+  let ij : natlt (d0 * d1) = i * d1 + j in
+  FStar.Math.Lemmas.lemma_div_plus j i d1;
+  FStar.Math.Lemmas.lemma_mod_plus j i d1;
+  FStar.Math.Lemmas.small_div j d1;
+  FStar.Math.Lemmas.small_mod j d1;
+  introduce forall (idx : abs (d2 @| d3 @| INil)).
+    acc (slice_page #et #(d0 * d1) #d2 #d3
+      (fold_chest #et #4 #(d0 @| d1 @| d2 @| d3 @| INil) m) ij) idx ==
+    acc (slice_page4 m i j) idx
+  with (
+    assert (unfold_index #4 #(d0 @| d1 @| d2 @| d3 @| INil) (ij, idx) ==
+      (i, (j, idx)))
+  );
+  Kuiper.Chest.lemma_equal_intro
+    (slice_page #et #(d0 * d1) #d2 #d3
+      (fold_chest #et #4 #(d0 @| d1 @| d2 @| d3 @| INil) m) ij)
+    (slice_page4 m i j);
+  Kuiper.Chest.ext
+    (slice_page #et #(d0 * d1) #d2 #d3
+      (fold_chest #et #4 #(d0 @| d1 @| d2 @| d3 @| INil) m) ij)
+    (slice_page4 m i j)
 
 let sdpa_scores_spec 
   (#n #h : szp)
@@ -61,7 +95,78 @@ let sdpa_naive_aux
     (sdpa_scores_spec rQ rK rS rscale)
     == 
     (unfold_chest (MS.bmmcomb (fun bias_qk score -> bias_qk +. (score *. rscale)) 
-      #(SZ.v (n *^ h)) #l #e #s (fold_chest rS) (fold_chest rQ) (fold_chest rK)))) = admit ()
+      #(SZ.v (n *^ h)) #l #e #s (fold_chest rS) (fold_chest rQ) (fold_chest rK)))) =
+  let lhs = sdpa_scores_spec rQ rK rS rscale in
+  let rhs = unfold_chest (MS.bmmcomb
+    (fun bias_qk score -> bias_qk +. (score *. rscale))
+    #(SZ.v (n *^ h)) #l #e #s
+    (fold_chest rS) (fold_chest rQ) (fold_chest rK)) in
+  introduce forall (idx : abs (n @| h @| l @| s @| INil)).
+    acc lhs idx == acc rhs idx
+  with (
+    let (i, (j, (_, (_, ())))) = idx in
+    let ij : natlt (n * h) = i * h + j in
+    FStar.Math.Lemmas.lemma_div_plus j i h;
+    FStar.Math.Lemmas.lemma_mod_plus j i h;
+    FStar.Math.Lemmas.small_div j h;
+    FStar.Math.Lemmas.small_mod j h;
+    fold_chest_slice_page rS i j;
+    fold_chest_slice_page rQ i j;
+    fold_chest_slice_page rK i j
+  );
+  Kuiper.Chest.lemma_equal_intro lhs rhs;
+  Kuiper.Chest.ext lhs rhs
+
+let scaled_add_approx
+  (#et: Type0) {| scalar et, real_like et |}
+  (scale : et)
+  : Lemma (
+      approx2
+        (fun x y -> x `add` (y `mul` scale))
+        (fun x y -> x +. (y *. to_real scale))) =
+  let aux (x y : et) (rx ry : real)
+    : Lemma
+        (requires x %~ rx /\ y %~ ry)
+        (ensures (x `add` (y `mul` scale)) %~ (rx +. (ry *. to_real scale))) =
+    to_real_ok scale;
+    a_mul y scale ry (to_real scale);
+    a_add x (y `mul` scale) rx (ry *. to_real scale)
+  in
+  Classical.forall_intro_4
+    (fun x y rx ry -> Classical.move_requires (aux x y rx) ry)
+
+let bmmcomb_approx_real
+  (#et: Type0) {| scalar et, real_like et |}
+  (comb : binop et)
+  (comb_r : binop real)
+  (#batch #rows #shared #cols : nat)
+  (eC : chest3 et batch rows cols)
+  (eA : chest3 et batch rows shared)
+  (eB : chest3 et batch shared cols)
+  (rC : chest3 real batch rows cols)
+  (rA : chest3 real batch rows shared)
+  (rB : chest3 real batch shared cols)
+  : Lemma
+      (requires
+        approx2 comb comb_r /\
+        eC %~ rC /\ eA %~ rA /\ eB %~ rB)
+      (ensures
+        MS.bmmcomb comb eC eA eB %~
+        MS.bmmcomb comb_r rC rA rB) =
+  let aux (idx : abs (batch @| rows @| cols @| INil))
+    : Lemma
+        (requires
+          approx2 comb comb_r /\
+          eC %~ rC /\ eA %~ rA /\ eB %~ rB)
+        (ensures
+          acc (MS.bmmcomb comb eC eA eB) idx %~
+          acc (MS.bmmcomb comb_r rC rA rB) idx) =
+    let (i, (j, (k, ()))) = idx in
+    MU.mmcomb_approx_real comb comb_r
+      (slice_page eC i) (slice_page eA i) (slice_page eB i)
+      (slice_page rA i) (slice_page rB i) (slice_page rC i)
+  in
+  Classical.forall_intro (fun idx -> Classical.move_requires aux idx)
 
 inline_for_extraction noextract
 fn sdpa_naive_scores
@@ -151,7 +256,7 @@ fn sdpa_naive_scores
   map_loc gpu_loc (fun () -> tensor_unfold_outer gQf #fQ);
   map_loc gpu_loc (fun () -> tensor_unfold_outer gKf #fK);
   map_loc gpu_loc (fun () -> tensor_unfold_outer gSf);
-  
+
   // This is stupid and should just be a trade; fold and then restore when done.
   fold_unfold_chest_id eQ;
   rewrite (on gpu_loc ((from_array lQ (core gQf)) |-> Frac fQ (unfold_chest eQf))) 
@@ -163,9 +268,22 @@ fn sdpa_naive_scores
   // This should also be a trade, similar to the ghosts that we have for tiling and slices etc.
   rewrite (on gpu_loc ((from_array lS (core gSf)) |-> unfold_chest eSf')) 
     as (on gpu_loc (gS |-> unfold_chest eSf'));
-  assume pure (unfold_chest eSf' %~ 
-    (unfold_chest (MS.bmmcomb (fun bias_qk score -> bias_qk +. (score *. (to_real scale))) 
-      #(SZ.v (n *^ h)) #l #e #s (fold_chest rS) (fold_chest rQ) (fold_chest rK))));
+  lemma_to_real_chest_approximates eQ;
+  lemma_to_real_chest_approximates eK;
+  lemma_to_real_chest_approximates eS;
+  assert pure (eQf %~ rQf);
+  assert pure (eKf %~ rKf);
+  assert pure (eSf %~ rSf);
+  scaled_add_approx scale;
+  bmmcomb_approx_real
+    #et
+    (fun bias_qk score -> bias_qk `add` (score `mul` scale))
+    (fun bias_qk score -> bias_qk +. (score *. to_real scale))
+    #(n * h) #l #e #s
+    eSf eQf eKf rSf rQf rKf;
+  assert pure (eSf' %~ (MS.bmmcomb
+    (fun bias_qk score -> bias_qk +. (score *. to_real scale))
+    #(n * h) #l #e #s rSf rQf rKf));
   sdpa_naive_aux rQ rK rS (to_real scale);
   assert pure (unfold_chest eSf' %~ sdpa_scores_spec rQ rK rS (to_real scale));
 
