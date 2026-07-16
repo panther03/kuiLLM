@@ -1,7 +1,10 @@
-.PHONY: infer infer-kuiper infer-kuiper-batched infer-eager infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys test verify-kuiops install-kuiper
+.PHONY: infer infer-kuiper infer-kuiper-batched infer-eager infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys golden profile-golden profile-golden-triton profile-golden-no-triton test verify-kuiops install-kuiper
 
 # Default install location (cwd/inst), matching install_kuiper.sh.
 KUIPER_INST ?= $(CURDIR)/inst
+
+NSYS := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node
+NSYS_RANGE := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop
 
 infer-kuiper:
 	python3 infer.py
@@ -24,10 +27,27 @@ profile-no-kuiper-calls:
 	KUIPY_PRINT_PROFILING=1 python3 infer.py --no-kuiper
 
 profile-kuiper-nsys:
-	nsys profile -o data/kuiper.nsys-rep --force-overwrite=true -t cuda python3 infer.py
+	$(NSYS) -o data/kuiper.nsys-rep python3 infer.py
 
 profile-no-kuiper-nsys:
-	nsys profile -o data/no-kuiper.nsys-rep --force-overwrite=true -t cuda python3 infer.py --no-kuiper
+	$(NSYS) -o data/no-kuiper.nsys-rep python3 infer.py --no-kuiper
+
+# --- Steelman pure-PyTorch reference (etc/infer_golden.py) ---
+# Hand-written Qwen2 forward, single hyper-optimized path (batch 256, bf16),
+# manual fully-folded decode CUDA graph. No flags / no A-B modes.
+golden:
+	python3 etc/infer_golden.py --batch 256
+
+profile-golden:
+	$(NSYS_RANGE) -o data/golden.nsys-rep python3 etc/infer_golden.py --nsys --batch 256
+
+# The old flag-laden A/B experiment (transformers + monkeypatch) lives in
+# infer_golden_exp.py: Inductor/Triton reduce-overhead vs forced no-triton path.
+profile-golden-triton:
+	$(NSYS_RANGE) -o data/golden-triton.nsys-rep python3 etc/infer_golden_exp.py --nsys --batch 256
+
+profile-golden-no-triton:
+	$(NSYS_RANGE) -o data/golden-no-triton.nsys-rep python3 etc/infer_golden_exp.py --nsys --no-triton --manual-cudagraph --batch 256
 
 # control # of fstar worker processes for JIT generation in tests
 NPROCS ?= 4
