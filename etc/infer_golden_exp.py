@@ -1,4 +1,4 @@
-# Steelman PyTorch speed test for Qwen2.5-0.5B.
+# Steelman PyTorch speed test for Qwen2.5-0.5B. (EXPERIMENTS)
 #
 # This is the *pure PyTorch* baseline: no Kuiper, no kuipy dispatch. The point
 # is a fair, hyper-optimized comparison of "we ran Qwen2.5 in PyTorch with its
