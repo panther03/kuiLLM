@@ -8,6 +8,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include "tc_kernels.h"
 
 static inline const __nv_bfloat16* bf16_ptr(const torch::Tensor& t) {
@@ -17,45 +18,35 @@ static inline __nv_bfloat16* bf16_ptr_mut(torch::Tensor& t) {
     return reinterpret_cast<__nv_bfloat16*>(t.data_ptr());
 }
 
-// C = A @ W^T (+ bias). A may have any leading dims; only the last is the
-// contraction. Mirrors torch.nn.functional.linear.
-torch::Tensor linear(torch::Tensor A, torch::Tensor W, c10::optional<torch::Tensor> bias,
-                     bool no_splitk) {
-    TORCH_CHECK(A.dtype() == torch::kBFloat16 && W.dtype() == torch::kBFloat16,
-                "tc linear expects bf16 A/W");
-    TORCH_CHECK(W.dim() == 2, "W must be 2D (N, K)");
-    TORCH_CHECK(A.size(-1) == W.size(1), "A last dim must equal W.size(1)");
+static inline const half* half_ptr(const torch::Tensor& t) {
+    return reinterpret_cast<const half*>(t.data_ptr());
+}
+static inline half* half_ptr_mut(torch::Tensor& t) {
+    return reinterpret_cast<half*>(t.data_ptr());
+}
+
+// C = A @ B, a plain tensor-core matmul (no bias, no transpose) backed by the
+// Kuiper TensorCore2D kernel. A:(M,K) B:(K,N) C:(M,N), all fp16 row-major. To
+// reproduce torch.nn.functional.linear(A, W) the caller passes B = W^T (K,N).
+torch::Tensor matmul(torch::Tensor A, torch::Tensor B) {
+    TORCH_CHECK(A.dtype() == torch::kFloat16 && B.dtype() == torch::kFloat16,
+                "tc2d matmul expects fp16 A/B");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A/B must be 2D");
+    TORCH_CHECK(A.size(1) == B.size(0), "A.size(1) must equal B.size(0)");
 
     auto Ac = A.contiguous();
-    auto Wc = W.contiguous();
-    const int64_t K = Wc.size(1);
-    const int64_t N = Wc.size(0);
-    const int64_t M = Ac.numel() / K;
+    auto Bc = B.contiguous();
+    const int64_t M = Ac.size(0);
+    const int64_t K = Ac.size(1);
+    const int64_t N = Bc.size(1);
+    TORCH_CHECK(M % 128 == 0 && N % 128 == 0 && K % 32 == 0,
+                "tc2d matmul requires M%128==0, N%128==0, K%32==0");
 
-    auto out_shape = A.sizes().vec();
-    out_shape.back() = N;
-    auto C = torch::empty(out_shape, Ac.options());
-
-    const __nv_bfloat16* bptr = nullptr;
-    torch::Tensor bc;
-    if (bias.has_value() && bias->defined()) {
-        TORCH_CHECK(bias->dtype() == torch::kBFloat16, "bias must be bf16");
-        TORCH_CHECK(bias->numel() == N, "bias must have N elements");
-        bc = bias->contiguous();
-        bptr = bf16_ptr(bc);
-    }
+    auto C = torch::empty({M, N}, Ac.options());
 
     at::cuda::CUDAGuard g(A.device());
-    auto stream = c10::cuda::getCurrentCUDAStream().stream();
-
-    torch::Tensor ws;
-    float* wsptr = nullptr;
-    if (!no_splitk && tc_linear_splitk((int)M, (int)N, (int)K) > 1) {
-        ws = torch::empty({M * N}, Ac.options().dtype(torch::kFloat32));
-        wsptr = ws.data_ptr<float>();
-    }
-    tc_linear_launch(bf16_ptr(Ac), bf16_ptr(Wc), bptr, bf16_ptr_mut(C), wsptr,
-                     (int)M, (int)N, (int)K, no_splitk, stream);
+    tc2d_matmul_launch(half_ptr(Ac), half_ptr(Bc), half_ptr_mut(C),
+                       (int)M, (int)N, (int)K);
     C10_CUDA_CHECK(cudaGetLastError());
     return C;
 }
@@ -105,9 +96,8 @@ torch::Tensor sdpa(torch::Tensor q, torch::Tensor k, torch::Tensor v,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("linear", &linear, "bf16 tensor-core linear (CUDA)",
-          py::arg("A"), py::arg("W"), py::arg("bias") = c10::nullopt,
-          py::arg("no_splitk") = false);
+    m.def("matmul", &matmul, "fp16 Kuiper TensorCore2D matmul (CUDA)",
+          py::arg("A"), py::arg("B"));
     m.def("sdpa", &sdpa, "bf16 tensor-core flash attention (CUDA)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = c10::nullopt,
           py::arg("scale"), py::arg("causal"), py::arg("force_decode_kernel") = false);
