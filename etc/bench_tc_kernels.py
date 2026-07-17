@@ -99,6 +99,7 @@ def bench_linear(mod):
         ("up_proj",         BATCH, HID, INTER),
         ("down_proj",       BATCH, INTER, HID),
         ("lm_head",         BATCH, HID, VOCAB),
+        ("square_4096",     4096,  4096, 4096),
     ]
     ok = True
     for name, M, K, N in cases:
@@ -112,9 +113,13 @@ def bench_linear(mod):
         t_ref = time_call(lambda: F.linear(A, W))
         flag = "ok " if err < 5e-2 else "BAD"
         ok &= err < 5e-2
+        flops = 2.0 * M * N * K  # multiply-add per output element
+        gf_ours = flops / (t_ours * 1e-3) / 1e9
+        gf_ref = flops / (t_ref * 1e-3) / 1e9
         print(f"  [{flag}] {name:<16} M={M:>4} K={K:>5} N={N:>6} "
               f"| rel-err {err:.2e} | ours {t_ours*1e3:8.1f}us  ref {t_ref*1e3:8.1f}us"
-              f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%")
+              f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%"
+              f"  | ours {gf_ours:8.1f} GFLOP/s  ref {gf_ref:8.1f} GFLOP/s")
     return ok
 
 

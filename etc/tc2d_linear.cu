@@ -1,5 +1,5 @@
 // Kuiper TensorCore2D GEMM used as the drop-in replacement for tc_linear.cu in
-// bench_tc_kernels.py. This is the fp16xfp16->fp16 `128x128x32_16x16x16_4x4`
+// bench_tc_kernels.py. This is the fp16xfp16->fp16 `128x128x32_16x16x16_8x4`
 // instantiation extracted verbatim from the Kuiper distribution
 // ($KUIPER_HOME/dist/Klas_GEMM_TensorCore2D.{cu,h}); only the surrounding launch
 // wrapper (tc2d_matmul_launch) is local glue.
@@ -13,10 +13,10 @@
 
 __global__
 /**
-  hoisted when extracting g_gemm_f16_f16_128x128x32_16x16x16_4x4
+  hoisted when extracting g_gemm_f16_f16_128x128x32_16x16x16_8x4
 */
 static void
-__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
+__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
                                                    uint32_t cols,
                                                    half *gA, half *gB, half *gC)
 {
@@ -30,15 +30,15 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
         aFrags =
         KPR_INIT_ARR(kpr_fragment
                      (wmma::matrix_a, 16U, 16U, 16U, half, wmma::row_major),
-                     4U);
+                     8U);
     auto & bFrags =
         KPR_INIT_ARR(kpr_fragment
                      (wmma::matrix_b, 16U, 16U, 16U, half, wmma::row_major),
                      4U);
     auto & accFrags =
-        KPR_INIT_ARR(kpr_fragment(wmma::accumulator, 16U, 16U, 16U, half), 16U);
+        KPR_INIT_ARR(kpr_fragment(wmma::accumulator, 16U, 16U, 16U, half), 32U);
     uint32_t fi = 0U;
-    for (; fi < 16U; fi++)
+    for (; fi < 32U; fi++)
         wmma::fill_fragment(accFrags[fi], __float2half_rn(0.0f));
     uint32_t bkIdx = 0U;
     for (; bkIdx < num_k_tiles; bkIdx++) {
@@ -46,7 +46,7 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
         uint32_t __anf03 = bkIdx;
         half *tileA = gA;
         uint32_t i2 = 0U;
-        for (; i2 < 4096U; i2 += 1024U) {
+        for (; i2 < 4096U; i2 += 512U) {
             half local[8U];
             for (uint32_t _i = 0U; _i < 8U; ++_i)
                 local[_i] = __float2half_rn(0.0f);
@@ -61,7 +61,7 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
         }
         half *tileB = gB;
         uint32_t i = 0U;
-        for (; i < 4096U; i += 1024U) {
+        for (; i < 4096U; i += 512U) {
             half local[8U];
             for (uint32_t _i = 0U; _i < 8U; ++_i)
                 local[_i] = __float2half_rn(0.0f);
@@ -80,10 +80,10 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
             uint32_t __anf010 = dotIdx;
             half *tile_for_tc_a_tiles = sA;
             uint32_t i0 = 0U;
-            for (; i0 < 4U; i0++)
+            for (; i0 < 8U; i0++)
                 wmma::load_matrix_sync(aFrags[i0],
                                        tile_for_tc_a_tiles +
-                                       (32U * (threadIdx.x / 32U / 2U) * 64U +
+                                       (32U * (threadIdx.x / 32U / 2U) * 128U +
                                         __anf010 * 16U + 32U * i0 * 16U), 32U);
             uint32_t __anf011 = dotIdx;
             half *tile_for_tc_b_tiles = sB;
@@ -95,7 +95,7 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
                                         threadIdx.x / 32U % 2U * 64U +
                                         i1 * 16U), 128U);
             uint32_t resIdxM = 0U;
-            for (; resIdxM < 4U; resIdxM++) {
+            for (; resIdxM < 8U; resIdxM++) {
                 uint32_t resIdxN = 0U;
                 for (; resIdxN < 4U; resIdxN++) {
                     auto & acc_frag = accFrags[resIdxM * 4U + resIdxN];
@@ -106,13 +106,13 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
         }
     }
     uint32_t i = 0U;
-    for (; i < 4U; i++) {
+    for (; i < 8U; i++) {
         uint32_t j = 0U;
         for (; j < 4U; j++)
             wmma::store_matrix_sync(gC +
                                     (cols * (blockIdx.x / (cols / 128U)) *
                                      128U + blockIdx.x % (cols / 128U) * 128U +
-                                     cols * (threadIdx.x / 32U / 2U) * 64U +
+                                     cols * (threadIdx.x / 32U / 2U) * 128U +
                                      threadIdx.x / 32U % 2U * 64U +
                                      cols * i * 16U + j * 16U),
                                     accFrags[i * 4U + j], cols,
@@ -121,7 +121,7 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0(uint32_t shared,
 }
 
 void
-Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_4x4(uint32_t rows,
+Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(uint32_t rows,
                                                               uint32_t shared,
                                                               uint32_t cols,
                                                               half *gA,
@@ -135,9 +135,9 @@ Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_4x4(uint32_t rows,
     KPR_ASSERT(nblk <= 2097152U);
     KPR_SHMEM_FITS(16384U);
     MUST(cudaFuncSetAttribute
-         (__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0,
+         (__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0,
           cudaFuncAttributeMaxDynamicSharedMemorySize, 16384U));
-    KPR_KCALL(__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_4x4_0, nblk, 128U,
+    KPR_KCALL(__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0, nblk, 64U,
               16384U, shared, cols, gA, gB, gC);
     MUST(cudaDeviceSynchronize());
 }
@@ -145,7 +145,7 @@ Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_4x4(uint32_t rows,
 void tc2d_matmul_launch(const half* A, const half* B, half* C,
                         int M, int N, int K) {
     if (M == 0 || N == 0 || K == 0) return;
-    Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_4x4(
+    Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(
         (uint32_t)M, (uint32_t)K, (uint32_t)N,
         const_cast<half*>(A), const_cast<half*>(B), C);
 }
