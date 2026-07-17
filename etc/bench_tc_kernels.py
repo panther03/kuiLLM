@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Validate + benchmark the etc/ tensor-core reference kernels (tc_linear,
-tc_flash_attn) as drop-in replacements for the exact stock kernels they target
-in the infer_golden.py trace:
+"""Validate + benchmark the etc/ tensor-core reference kernels (Kuiper
+TensorCore2D matmul, tc_flash_attn) as drop-in replacements for the stock
+kernels they target in the infer_golden.py trace:
 
-  * linear -> cuBLAS bf16 tensor-core GEMM (F.linear)
+  * matmul -> cuBLAS fp16 tensor-core GEMM (F.linear, bias-free cases only)
   * sdpa   -> cuDNN flash_fprop SDPA (F.scaled_dot_product_attention)
+
+The matmul path dispatches Kuiper's verified TensorCore2D
+f16_f16_128x128x32_16x16x16_4x4 kernel (see tc2d_linear.cu). Since TensorCore2D
+is a plain matmul (no bias) and has no bf16xbf16->bf16 instantiation, the linear
+cases run in fp16 and the bias-carrying qkv_proj projection is skipped.
 
 For every case it reports the max relative-Frobenius divergence vs the stock
 kernel and the mean per-call latency of each. Shapes are Qwen2.5-0.5B at the
-production batch of 256, bf16.
+production batch of 256.
 
     python3 etc/bench_tc_kernels.py
 """
@@ -27,7 +32,15 @@ from torch.utils.cpp_extension import load
 
 DEV = "cuda"
 DT = torch.bfloat16
+LINEAR_DT = torch.float16  # Kuiper TensorCore2D matmul is fp16 (no bf16xbf16->bf16 yet)
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+# Kuiper headers: prefer the project's installed copy (make install-kuiper),
+# fall back to the Kuiper source tree ($KUIPER_HOME/include).
+_INST_INC = os.path.join(ROOT, "inst", "include", "kuiper")
+_KH = os.environ.get("KUIPER_HOME", os.path.expanduser("~/work/kuiper"))
+KUIPER_INC = _INST_INC if os.path.exists(os.path.join(_INST_INC, "kuiper.h")) \
+    else os.path.join(_KH, "include")
 
 # Qwen2.5-0.5B-Instruct config.
 HID, NH, NKV, HEAD_DIM = 896, 14, 2, 64
@@ -42,9 +55,14 @@ def build():
     return load(
         name="tc_kernels",
         sources=[os.path.join(HERE, "tc_kernels_wrapper.cu"),
-                 os.path.join(HERE, "tc_linear.cu"),
+                 os.path.join(HERE, "tc2d_linear.cu"),
                  os.path.join(HERE, "tc_flash_attn.cu")],
-        extra_include_paths=[HERE],
+        extra_include_paths=[HERE, KUIPER_INC],
+        # Kuiper headers rely on implicit int->half conversion (fragment `{0}`
+        # init); undo the torch defaults that would disable it.
+        extra_cuda_cflags=["-U__CUDA_NO_HALF_OPERATORS__",
+                           "-U__CUDA_NO_HALF_CONVERSIONS__",
+                           "-U__CUDA_NO_HALF2_OPERATORS__"],
         verbose=False,
     )
 
@@ -68,34 +86,40 @@ def time_call(fn, iters=50, warmup=10):
     return s.elapsed_time(e) / iters  # ms/call
 
 
-def bench_linear(mod, no_splitk=False):
-    print("=== linear: C = A @ W^T (+bias)   vs F.linear (cuBLAS bf16) ==="
-          + ("   [split-K disabled]" if no_splitk else ""))
+def bench_linear(mod):
+    print("=== matmul: C = A @ W^T   vs F.linear (fp16)   "
+          "[Kuiper TensorCore2D, bias-free matmul only] ===")
     g = torch.Generator(device=DEV).manual_seed(0)
-    # (name, M, K, N, bias) covering every GEMM in the decode step (batch 256).
+    # (name, M, K, N) covering every bias-free GEMM in the decode step (batch
+    # 256). qkv_proj is excluded: it needs a bias, and TensorCore2D is a plain
+    # matmul, not a GEMM.
     cases = [
-        ("qkv_proj (bias)", BATCH, HID, QKV_OUT, True),
-        ("o_proj",          BATCH, HID, HID,     False),
-        ("gate_proj",       BATCH, HID, INTER,   False),
-        ("up_proj",         BATCH, HID, INTER,   False),
-        ("down_proj",       BATCH, INTER, HID,   False),
-        ("lm_head",         BATCH, HID, VOCAB,   False),
+        ("o_proj",          BATCH, HID, HID),
+        ("gate_proj",       BATCH, HID, INTER),
+        ("up_proj",         BATCH, HID, INTER),
+        ("down_proj",       BATCH, INTER, HID),
+        ("lm_head",         BATCH, HID, VOCAB),
+        ("square_4096",     4096,  4096, 4096),
     ]
     ok = True
-    for name, M, K, N, use_bias in cases:
-        A = torch.randn(M, K, device=DEV, dtype=DT, generator=g) * 0.1
-        W = torch.randn(N, K, device=DEV, dtype=DT, generator=g) * 0.1
-        b = torch.randn(N, device=DEV, dtype=DT, generator=g) * 0.1 if use_bias else None
-        ref = F.linear(A, W, b)
-        got = mod.linear(A, W, b, no_splitk)
+    for name, M, K, N in cases:
+        A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        W = torch.randn(N, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        Wt = W.t().contiguous()  # (K, N): the matmul RHS, prepared outside timing
+        ref = F.linear(A, W)
+        got = mod.matmul(A, Wt)
         err = rel_fro(got, ref)
-        t_ours = time_call(lambda: mod.linear(A, W, b, no_splitk))
-        t_ref = time_call(lambda: F.linear(A, W, b))
+        t_ours = time_call(lambda: mod.matmul(A, Wt))
+        t_ref = time_call(lambda: F.linear(A, W))
         flag = "ok " if err < 5e-2 else "BAD"
         ok &= err < 5e-2
+        flops = 2.0 * M * N * K  # multiply-add per output element
+        gf_ours = flops / (t_ours * 1e-3) / 1e9
+        gf_ref = flops / (t_ref * 1e-3) / 1e9
         print(f"  [{flag}] {name:<16} M={M:>4} K={K:>5} N={N:>6} "
               f"| rel-err {err:.2e} | ours {t_ours*1e3:8.1f}us  ref {t_ref*1e3:8.1f}us"
-              f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%")
+              f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%"
+              f"  | ours {gf_ours:8.1f} GFLOP/s  ref {gf_ref:8.1f} GFLOP/s")
     return ok
 
 
@@ -151,8 +175,6 @@ def bench_sdpa(mod, force_decode_kernel=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--no-splitk", action="store_true",
-                    help="force the single-pass GEMM (never use the split-K path)")
     ap.add_argument("--force-decode-kernel", action="store_true",
                     help="always use tc_flash_attn_kernel (the decode/GQA kernel), "
                          "never the specialized prefill kernel")
@@ -165,8 +187,9 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
     print("Building etc/ tensor-core kernels...", file=sys.stderr)
     mod = build()
-    print(f"device: {torch.cuda.get_device_name(0)}   dtype: bf16   batch: {BATCH}\n")
-    ok = bench_linear(mod, no_splitk=args.no_splitk)
+    print(f"device: {torch.cuda.get_device_name(0)}   "
+          f"dtype: matmul fp16 / sdpa bf16   batch: {BATCH}\n")
+    ok = bench_linear(mod)
     print()
     ok &= bench_sdpa(mod, force_decode_kernel=args.force_decode_kernel)
     print("\n" + ("ALL PASSED" if ok else "SOME FAILED (rel-err >= 5e-2)"))

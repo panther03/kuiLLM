@@ -12,48 +12,23 @@
 // Kuiper implementation against, not to match cuDNN/cuBLAS throughput.
 #pragma once
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cstdint>
 
-// C = A @ W^T (+ bias), i.e. torch.nn.functional.linear semantics.
-//   A    : (M, K)        bf16   row-major
-//   W    : (N, K)        bf16   row-major (the transposed weight, as in F.linear)
-//   bias : (N,)          bf16   or nullptr
-//   C    : (M, N)        bf16   row-major
-// Contraction accumulates in fp32; the output is rounded to bf16. When the
-// output tile grid is too small to fill the GPU but K is large (e.g. down_proj),
-// the launcher splits K across gridDim.z: each slice atomic-adds its partial
-// product into `workspace` (M*N fp32), which a finalize pass casts to bf16 (+bias).
-// `workspace` may be null iff tc_linear_splitk(M,N,K) == 1. Pass no_splitk=true
-// to force the single-pass (split=1) kernel regardless of the heuristic.
-void tc_linear_launch(
-    const __nv_bfloat16* A,
-    const __nv_bfloat16* W,
-    const __nv_bfloat16* bias,   // nullable
-    __nv_bfloat16* C,
-    float* workspace,            // nullable when splitk == 1
-    int M, int N, int K,
-    bool no_splitk,
-    cudaStream_t stream);
-
-// GEMM block tile (kept in sync with tc_linear.cu) and the split-K heuristic,
-// shared so the wrapper can size/zero the fp32 workspace.
-#define TC_GEMM_BM 128
-#define TC_GEMM_BN 64
-#define TC_GEMM_BK 32
-
-inline int tc_linear_splitk(int M, int N, int K) {
-    long base = (long)((M + TC_GEMM_BM - 1) / TC_GEMM_BM) *
-                ((N + TC_GEMM_BN - 1) / TC_GEMM_BN);
-    if (base <= 0) return 1;
-    if (base >= 84) return 1;                 // enough blocks to fill the SMs
-    int s = (int)((168 + base - 1) / base);    // aim for ~2 waves of blocks
-    int maxs = K / TC_GEMM_BK;
-    if (maxs < 1) maxs = 1;
-    if (s > maxs) s = maxs;
-    if (s > 8) s = 8;
-    if (s < 1) s = 1;
-    return s;
-}
+// Plain tensor-core matmul C = A @ B, backed by the Kuiper TensorCore2D
+// `f16_f16_128x128x32_16x16x16_4x4` instantiation (see tc2d_linear.cu). This is
+// a matmul, not a GEMM: there is no bias and no built-in transpose, so the
+// caller passes B already laid out as (K, N) -- i.e. the transposed F.linear
+// weight. fp16 in / fp16 out (bf16xbf16->bf16 is not available in Kuiper yet).
+//   A : (M, K)  half  row-major
+//   B : (K, N)  half  row-major
+//   C : (M, N)  half  row-major
+// Requires M % 128 == 0, N % 128 == 0, K % 32 == 0.
+void tc2d_matmul_launch(
+    const half* A,
+    const half* B,
+    half* C,
+    int M, int N, int K);
 
 // FlashAttention forward matching F.scaled_dot_product_attention (bf16, GQA,
 // optional additive mask, optional causal). Layout is the dense 4D SDPA layout:
