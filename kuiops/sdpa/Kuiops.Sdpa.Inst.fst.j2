@@ -5,6 +5,6 @@ module {{ module }}
 // Generated from kuiops/sdpa/Kuiops.Sdpa.Inst.fst.j2
 
 open Kuiper
-open Kuiops.Sdpa
+open Kuiper.Kernel.SDPA.Naive
 
-let {{ name }} = sdpa_lse_rm #{{ et }}
+let {{ name }} = sdpa_naive #{{ et }}
