@@ -1,5 +1,5 @@
-// Kuiper TensorCore2D GEMM used as the drop-in replacement for tc_linear.cu in
-// bench_tc_kernels.py. This is the fp16xfp16->fp16 `128x128x32_16x16x16_8x4`
+// Kuiper TensorCore2D GEMM used as the linear/matmul reference in
+// bench_tc_kernels.py (it replaces the earlier hand-written tc_linear kernels). This is the fp16xfp16->fp16 `128x128x32_16x16x16_8x4`
 // instantiation extracted verbatim from the Kuiper distribution
 // ($KUIPER_HOME/dist/Klas_GEMM_TensorCore2D.{cu,h}); only the surrounding launch
 // wrapper (tc2d_matmul_launch) is local glue.
