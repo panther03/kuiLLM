@@ -116,7 +116,7 @@ def bench_sdpa(mod, force_decode_kernel=False):
 
     # Decode: one query token, full KV context, explicit additive causal mask
     # ([1,1,1,Sk]) -- exactly the golden hot path.
-    for ctx in (128, 512, 1024):
+    for ctx in (128, 512, 1024, 16384):
         q = rand(BATCH, NH, 1, HEAD_DIM)
         kk = rand(BATCH, NKV, ctx, HEAD_DIM)
         vv = rand(BATCH, NKV, ctx, HEAD_DIM)

@@ -1,30 +1,47 @@
-// FlashAttention forward with bf16 tensor cores, drop-in for the cuDNN
-// flash_fprop SDPA in the trace (F.scaled_dot_product_attention). See
-// tc_kernels.h for the operator shape.
+// FlashAttention-2 style forward with bf16 tensor cores (WMMA 16x16x16, fp32
+// accumulate), a drop-in replacement for the cuDNN flash_fprop SDPA in the
+// infer_golden.py trace (F.scaled_dot_product_attention). See tc_kernels.h for
+// the operator shape.
 //
-// One block owns a 16-row query tile for a single (batch, KV head) and holds
-// NWARPS warps that split the KEY dimension. Crucially the 16 rows batch the
-// whole GQA group together: row r maps to (q_head_in_group = r / Sq,
-// q_pos = r % Sq), so the `group` query heads that share this KV head read K/V
-// exactly once instead of `group` times -- the win that makes the memory-bound
-// decode path (Sq=1, one row per head) fast. Each warp keeps its own online-
-// softmax partial (running max `Msh[w]`, denominator `Lsh[w]`, accumulator
-// `Osh[w]`); a final combine merges the NWARPS partials (m = max, rescale by
-// exp(m_w - m)). The two matmuls run on tensor cores: S = Q@K^T (contracted
-// over D in 16-wide chunks) and P@V (per 16-wide output chunk).
+// The two regimes of the trace are handled by two kernels, both FA2-style:
+// register-resident O accumulator (kept in WMMA fragments across the whole key
+// loop -- no shared-memory O traffic), online softmax, and a single delayed
+// normalization at the end.
+//
+//   * DECODE (Sq==1, the trace-dominant, memory-bound path): one warp per block
+//     owns a 16-row query tile that BATCHES THE WHOLE GQA GROUP (row r -> q head
+//     kvh*group + r/Sq, q pos r%Sq) so K/V are streamed from DRAM exactly once
+//     per (batch, kv head). K/V tiles are prefetched with a DEC_STAGES-deep
+//     cp.async software pipeline so a single warp keeps enough memory requests in
+//     flight to saturate DRAM bandwidth (the bottleneck here) without needing
+//     high occupancy. The tiny shared footprint lets many blocks stay resident.
+//     This kernel also handles general Sq (used by force_decode_kernel).
+//   * PREFILL (Sq>1, compute-bound): FA2 split-Q. One block owns BLOCK_M query
+//     rows; each of PM_WARPS warps owns 16 rows and iterates all keys. K/V tiles
+//     are loaded once into shared and reused by every warp; each 16-wide key
+//     subtile is folded in with an online-softmax update (one score fragment
+//     live at a time -> low register pressure).
+//
+// The register-resident O trick relies on the WMMA fp32 accumulator layout
+// (verified empirically, see probe_wmma_layout.cu): each lane's 8 elements map
+// to exactly two output rows -- row = lane/4 for elements {0,1,4,5} and
+// row = lane/4 + 8 for {2,3,6,7} -- so a per-row softmax correction is applied
+// by scaling those element groups, and per-row max/sum are finished with a
+// shuffle reduction across the 4 lanes of a group (which hold different columns
+// of the same row).
 //
 // ---------------------------------------------------------------------------
 // VERIFICATION INVARIANT -- DO NOT "FIX" WITH EXTENDED REALS. Read before
 // touching the causal / masking logic.
 //
-// The eventual verified Kuiper port of *this* flash-attention kernel must
-// discharge the precondition of the tensor-core matmul primitive it launches:
-// mma_sync' (specified by `emma` in Kuiper.TensorCore.Base.fsti) requires its
-// fragment operands to approximate *real* matrices. Kuiper has no extended
-// reals -- it cannot say what real value a float +/-inf approximates. This
-// kernel is deliberately structured so that requirement is never triggered by
-// causal masking, and it can be verified with ordinary reals exactly like
-// kfonline_softmax (Kuiper.Kernel.OnlineSoftmax.fst). The invariant:
+// The eventual verified Kuiper port of this flash-attention kernel launches a
+// tensor-core matmul primitive, mma_sync' (specified by `emma` in
+// Kuiper.TensorCore.Base.fsti), whose precondition requires its fragment
+// operands to approximate *real* matrices. Kuiper has no extended reals -- it
+// cannot say what real value a float +/-inf approximates. This kernel is
+// deliberately structured so causal masking never triggers that requirement,
+// and it can be verified with ordinary reals exactly like kfonline_softmax
+// (Kuiper.Kernel.OnlineSoftmax.fst). The invariant:
 //
 //   1. -INFINITY NEVER ENTERS AN mma_sync' OPERAND. Both tensor-core matmuls
 //      take only finite fragments: Q@K^T sees finite Q,K; P@V sees P whose
@@ -44,7 +61,7 @@
 //      same skirt kfonline_softmax uses for its initial max: fmax(-inf, x) = x,
 //      so the approximation relation on the max is only asserted once it has
 //      absorbed >=1 finite score. Under is_causal the diagonal key kj == qpos
-//      is always valid, so every emitted row has a finite max; the fully-masked
+//      is always valid, so every emitted row has a finite max; a fully-masked
 //      row (max stays -inf) cannot occur for causal, and is anyway guarded by
 //      `inv = (l > 0) ? 1/l : 0` -> a defined finite 0 output for which we
 //      simply claim no real-softmax approximation.
@@ -52,26 +69,61 @@
 // Consequence: keep masking as a post-QK^T select. If you ever fold a -inf bias
 // into the score matmul or compute exp(score + (-inf)) without the branch, you
 // reintroduce the extended-reals obligation and this kernel becomes
-// unverifiable in Kuiper. (Note: this argument is about the is_causal path,
-// which derives -inf from an index comparison. A caller-supplied additive mask
-// tensor that itself contains -inf is a separate obligation -- the golden's
-// causal generation uses is_causal with no mask tensor, so the clean path is
-// the one that matters.)
+// unverifiable in Kuiper. (This argument is about the is_causal path, which
+// derives -inf from an index comparison. A caller-supplied additive mask tensor
+// that itself contains -inf is a separate obligation -- the golden's causal
+// generation uses is_causal with no mask tensor, so the clean path matters.)
 // ---------------------------------------------------------------------------
 #include "tc_kernels.h"
 #include <mma.h>
 #include <cuda_runtime.h>
+#include <cuda_pipeline.h>
 #include <math.h>
 
 using namespace nvcuda;
 
 #define WARP 32
-#define NWARPS 4
-#define BM 16
-#define BN 16
-#define HD 64        // shared tile width (head_dim <= 64)
+#define HD 64            // head dim (Qwen2.5 HEAD_DIM), D <= 64, D % 16 == 0
+#define OD (HD / 16)     // output/head-dim fragments = 4
+#define DEC_STAGES 2     // decode cp.async pipeline depth (swept: 2 is best on A6000)
 
-__global__ void tc_flash_attn_kernel(
+// WMMA fp32 accumulator layout (verified with probe_wmma_layout.cu):
+//   row = lane/4 + (i&2 ? 8 : 0),  col = 2*(lane&3) + (i&1) + (i&4 ? 8 : 0)
+__device__ __forceinline__ int frag_row(int lane, int i) { return (lane >> 2) + ((i & 2) ? 8 : 0); }
+__device__ __forceinline__ int frag_col(int lane, int i) { return ((lane & 3) << 1) + (i & 1) + ((i & 4) ? 8 : 0); }
+
+// finish a per-row reduction across the 4 lanes of a group (they hold different
+// columns of the same row).
+__device__ __forceinline__ float grpmax(float v) {
+    v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, 1));
+    v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, 2));
+    return v;
+}
+__device__ __forceinline__ float grpsum(float v) {
+    v += __shfl_xor_sync(0xffffffff, v, 1);
+    v += __shfl_xor_sync(0xffffffff, v, 2);
+    return v;
+}
+
+// cp.async-stage a 16-key x HD bf16 tile into shared. Each 16-byte (8 bf16)
+// chunk with an in-bounds key row is issued as an async copy; OOB chunks are
+// skipped, leaving whatever the ring buffer held before -- those scores are
+// masked to the -INFINITY sentinel below, so stale K/V never affects the result
+// (and never enters a matmul as a real -inf; see header invariant).
+__device__ __forceinline__ void cp_tile(__nv_bfloat16* dst, const __nv_bfloat16* base,
+                                        int k0, int Sk, int lane) {
+    for (int c = lane; c < 16 * (HD / 8); c += WARP) {
+        int j = c / (HD / 8), off = (c % (HD / 8)) * 8;
+        if (k0 + j < Sk)
+            __pipeline_memcpy_async(dst + j * HD + off,
+                                    base + (int64_t)(k0 + j) * HD + off, 16);
+    }
+}
+
+// -------------------------------- decode -------------------------------------
+// One warp per block; a 16-row query tile of R = group*Sq batched query rows for
+// one (batch, kv head). Handles Sq==1 (hot path) and general Sq.
+__global__ void tc_flash_attn_decode_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -82,177 +134,158 @@ __global__ void tc_flash_attn_kernel(
     int64_t ms_b, int64_t ms_h, int64_t ms_q, int64_t ms_k)
 {
     const int group = Hq / Hkv;
-    const int R = group * Sq;                 // batched query rows for this KV head
+    const int R = group * Sq;
     const int rt = blockIdx.x, kvh = blockIdx.y, bi = blockIdx.z;
-    const int tid = threadIdx.x, w = tid / WARP, lane = tid % WARP;
-    const int r0 = rt * BM;
+    const int lane = threadIdx.x;
+    const int r0 = rt * 16;
 
     const __nv_bfloat16* kbase = k + (((int64_t)bi * Hkv + kvh) * Sk) * D;
     const __nv_bfloat16* vbase = v + (((int64_t)bi * Hkv + kvh) * Sk) * D;
 
-    __shared__ __nv_bfloat16 Qs[BM * HD];
-    __shared__ __nv_bfloat16 Ksh[NWARPS][BN * HD];
-    __shared__ __nv_bfloat16 Vsh[NWARPS][BN * HD];
-    __shared__ float Ssh[NWARPS][BM * BN];
-    __shared__ __nv_bfloat16 Psh[NWARPS][BM * BN];
-    __shared__ float Osh[NWARPS][BM * HD];
-    __shared__ float PVc[NWARPS][BM * 16];
-    __shared__ float Msh[NWARPS][BM], Lsh[NWARPS][BM], cw[NWARPS][BM];
-    __shared__ float gm_sh[BM], gl_sh[BM], scale_sh[NWARPS][BM];
+    __shared__ __nv_bfloat16 Qsh[16 * HD];
+    __shared__ __nv_bfloat16 Ksh[DEC_STAGES][16 * HD];
+    __shared__ __nv_bfloat16 Vsh[DEC_STAGES][16 * HD];
+    __shared__ __nv_bfloat16 Psh[16 * 16];
+    __shared__ float Osh[16 * 16];
 
-    // row i -> (q head, q position); q_head = kvh*group + i_head.
-    for (int idx = tid; idx < BM * D; idx += blockDim.x) {
-        int i = idx / D, d = idx % D, r = r0 + i;
+    for (int idx = lane; idx < 16 * HD; idx += WARP) {
+        int i = idx / HD, d = idx % HD, r = r0 + i;
         __nv_bfloat16 val = __float2bfloat16(0.0f);
         if (r < R) {
             int qh = kvh * group + r / Sq, qpos = r % Sq;
             val = q[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d];
         }
-        Qs[i * HD + d] = val;
+        Qsh[idx] = val;
     }
-    if (lane < BM) { Msh[w][lane] = -INFINITY; Lsh[w][lane] = 0.0f; }
-    for (int idx = lane; idx < BM * HD; idx += WARP) Osh[w][idx] = 0.0f;
-    __syncthreads();
+    __syncwarp();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> qf[OD];
+    for (int dc = 0; dc < OD; ++dc)
+        wmma::load_matrix_sync(qf[dc], Qsh + dc * 16, HD);
 
-    // Causal early-exit: this tile's rows never attend past key `kmax`.
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> oacc[OD];
+    for (int od = 0; od < OD; ++od) wmma::fill_fragment(oacc[od], 0.0f);
+    float m_[2] = {-INFINITY, -INFINITY};
+    float l_[2] = {0.0f, 0.0f};
+
     int kmax = Sk;
     if (causal) {
         int maxpos = -1;
-        for (int i = 0; i < BM; ++i) {
-            int r = r0 + i;
-            if (r < R) maxpos = max(maxpos, r % Sq);
-        }
+        for (int i = 0; i < 16; ++i) { int r = r0 + i; if (r < R) maxpos = max(maxpos, r % Sq); }
         kmax = min(Sk, maxpos + (Sk - Sq) + 1);
     }
-    const int nkt = (kmax + BN - 1) / BN;
-    for (int jt = w; jt < nkt; jt += NWARPS) {
-        const int k0 = jt * BN;
-        for (int idx = lane; idx < BN * D; idx += WARP) {
-            int j = idx / D, d = idx % D;
-            bool ok = (k0 + j) < Sk;
-            Ksh[w][j * HD + d] = ok ? kbase[(int64_t)(k0 + j) * D + d] : __float2bfloat16(0.0f);
-            Vsh[w][j * HD + d] = ok ? vbase[(int64_t)(k0 + j) * D + d] : __float2bfloat16(0.0f);
+    const int ntiles = (kmax + 15) / 16;
+
+    // prime the software pipeline (DEC_STAGES-1 tiles in flight)
+    for (int s = 0; s < DEC_STAGES - 1 && s < ntiles; ++s) {
+        cp_tile(Ksh[s], kbase, s * 16, Sk, lane);
+        cp_tile(Vsh[s], vbase, s * 16, Sk, lane);
+        __pipeline_commit();
+    }
+
+    for (int t = 0; t < ntiles; ++t) {
+        int buf = t % DEC_STAGES;
+        int pft = t + DEC_STAGES - 1;          // tile to prefetch this step
+        if (pft < ntiles) {
+            cp_tile(Ksh[pft % DEC_STAGES], kbase, pft * 16, Sk, lane);
+            cp_tile(Vsh[pft % DEC_STAGES], vbase, pft * 16, Sk, lane);
         }
+        __pipeline_commit();
+        __pipeline_wait_prior(DEC_STAGES - 1);
         __syncwarp();
 
+        int k0 = t * 16;
         wmma::fragment<wmma::accumulator, 16, 16, 16, float> sacc;
         wmma::fill_fragment(sacc, 0.0f);
-        for (int dc = 0; dc < D; dc += 16) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> qf;
+        for (int dc = 0; dc < OD; ++dc) {
             wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> kf;
-            wmma::load_matrix_sync(qf, Qs + dc, HD);
-            wmma::load_matrix_sync(kf, Ksh[w] + dc, HD);
-            wmma::mma_sync(sacc, qf, kf, sacc);
+            wmma::load_matrix_sync(kf, Ksh[buf] + dc * 16, HD);
+            wmma::mma_sync(sacc, qf[dc], kf, sacc);
         }
-        wmma::store_matrix_sync(Ssh[w], sacc, BN, wmma::mem_row_major);
-        __syncwarp();
 
-        if (lane < BM) {
-            int i = lane, r = r0 + i;
-            int qh = kvh * group + (r < R ? r / Sq : 0);
-            int qpos = (r < R) ? r % Sq : 0;
-            float rowmax = -INFINITY;
-            for (int j = 0; j < BN; ++j) {
-                int kj = k0 + j;
-                bool valid = (r < R) && kj < Sk;
-                if (causal && kj > qpos + (Sk - Sq)) valid = false;
-                float s;
-                if (valid) {
-                    s = Ssh[w][i * BN + j] * scale;
-                    if (mask)
-                        s += __bfloat162float(mask[(int64_t)bi * ms_b + (int64_t)qh * ms_h +
-                                                   (int64_t)qpos * ms_q + (int64_t)kj * ms_k]);
-                } else {
-                    s = -INFINITY;   // masked: sentinel only; never fed to a matmul (see header invariant)
-                }
-                Ssh[w][i * BN + j] = s;
-                rowmax = fmaxf(rowmax, s);   // fmax(-inf,x)=x -- skirtable like kfonline_softmax
+        float rmax[2] = {-INFINITY, -INFINITY};
+        for (int i = 0; i < 8; ++i) {
+            int row = frag_row(lane, i), col = frag_col(lane, i);
+            int r = r0 + row, kpos = k0 + col;
+            float s = sacc.x[i] * scale;
+            bool valid = (r < R) && (kpos < Sk);
+            int qh = 0, qpos = 0;
+            if (r < R) { qh = kvh * group + r / Sq; qpos = r % Sq; }
+            if (causal && kpos > qpos + (Sk - Sq)) valid = false;
+            if (valid) {
+                if (mask)
+                    s += __bfloat162float(mask[(int64_t)bi * ms_b + (int64_t)qh * ms_h +
+                                               (int64_t)qpos * ms_q + (int64_t)kpos * ms_k]);
+            } else {
+                s = -INFINITY;   // masking sentinel; never enters a matmul (see header invariant)
             }
-            float mnew = fmaxf(Msh[w][i], rowmax);
-            float corr = __expf(Msh[w][i] - mnew);
-            if (!isfinite(corr)) corr = 0.0f;
-            float rowsum = 0.0f;
-            for (int j = 0; j < BN; ++j) {
-                float sv = Ssh[w][i * BN + j];
-                // Select-to-zero: masked prob is the literal 0.0, NOT exp(-inf).
-                // This is what lets P@V take a finite operand and keeps -inf out
-                // of the reals (see header invariant).
-                float p = (sv == -INFINITY) ? 0.0f : __expf(sv - mnew);
-                Psh[w][i * BN + j] = __float2bfloat16(p);
-                rowsum += p;
-            }
-            Lsh[w][i] = Lsh[w][i] * corr + rowsum;
-            cw[w][i] = corr;
-            Msh[w][i] = mnew;
+            sacc.x[i] = s;
+            rmax[(i & 2) ? 1 : 0] = fmaxf(rmax[(i & 2) ? 1 : 0], s);   // fmax(-inf,x)=x
         }
+        rmax[0] = grpmax(rmax[0]);
+        rmax[1] = grpmax(rmax[1]);
+        float mnew[2] = {fmaxf(m_[0], rmax[0]), fmaxf(m_[1], rmax[1])};
+        float corr[2];
+        for (int t = 0; t < 2; ++t) {
+            corr[t] = __expf(m_[t] - mnew[t]);
+            if (!isfinite(corr[t])) corr[t] = 0.0f;
+        }
+        for (int od = 0; od < OD; ++od)
+            for (int i = 0; i < 8; ++i)
+                oacc[od].x[i] *= corr[(i & 2) ? 1 : 0];
+
+        float rsum[2] = {0.0f, 0.0f};
+        for (int i = 0; i < 8; ++i) {
+            int row = frag_row(lane, i), col = frag_col(lane, i);
+            int ridx = (i & 2) ? 1 : 0;
+            float s = sacc.x[i];
+            // select-to-zero: masked prob is the literal 0.0, NOT exp(-inf), so
+            // P@V takes a finite operand (see header invariant).
+            float p = (s == -INFINITY) ? 0.0f : __expf(s - mnew[ridx]);
+            rsum[ridx] += p;
+            Psh[row * 16 + col] = __float2bfloat16(p);
+        }
+        rsum[0] = grpsum(rsum[0]);
+        rsum[1] = grpsum(rsum[1]);
+        l_[0] = l_[0] * corr[0] + rsum[0];
+        l_[1] = l_[1] * corr[1] + rsum[1];
+        m_[0] = mnew[0]; m_[1] = mnew[1];
         __syncwarp();
 
-        for (int idx = lane; idx < BM * HD; idx += WARP)
-            Osh[w][idx] *= cw[w][idx / HD];
-        __syncwarp();
-
-        for (int dc = 0; dc < D; dc += 16) {
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> pvacc;
-            wmma::fill_fragment(pvacc, 0.0f);
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> pf;
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> pf;
+        wmma::load_matrix_sync(pf, Psh, 16);
+        for (int od = 0; od < OD; ++od) {
             wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> vf;
-            wmma::load_matrix_sync(pf, Psh[w], BN);
-            wmma::load_matrix_sync(vf, Vsh[w] + dc, HD);
-            wmma::mma_sync(pvacc, pf, vf, pvacc);
-            wmma::store_matrix_sync(PVc[w], pvacc, 16, wmma::mem_row_major);
-            __syncwarp();
-            for (int idx = lane; idx < BM * 16; idx += WARP) {
-                int i = idx / 16, jj = idx % 16;
-                Osh[w][i * HD + dc + jj] += PVc[w][idx];
+            wmma::load_matrix_sync(vf, Vsh[buf] + od * 16, HD);
+            wmma::mma_sync(oacc[od], pf, vf, oacc[od]);
+        }
+        __syncwarp();
+    }
+
+    float inv[2];
+    inv[0] = (l_[0] > 0.0f) ? 1.0f / l_[0] : 0.0f;
+    inv[1] = (l_[1] > 0.0f) ? 1.0f / l_[1] : 0.0f;
+    for (int od = 0; od < OD; ++od) {
+        for (int i = 0; i < 8; ++i)
+            oacc[od].x[i] *= inv[(i & 2) ? 1 : 0];
+        wmma::store_matrix_sync(Osh, oacc[od], 16, wmma::mem_row_major);
+        __syncwarp();
+        for (int idx = lane; idx < 16 * 16; idx += WARP) {
+            int row = idx / 16, c = idx % 16, r = r0 + row, d = od * 16 + c;
+            if (r < R) {
+                int qh = kvh * group + r / Sq, qpos = r % Sq;
+                out[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d] =
+                    __float2bfloat16(Osh[row * 16 + c]);
             }
-            __syncwarp();
         }
-    }
-    __syncthreads();
-
-    // Combine the NWARPS key-split partials for each query row.
-    if (w == 0 && lane < BM) {
-        int i = lane;
-        float gm = -INFINITY;
-#pragma unroll
-        for (int ww = 0; ww < NWARPS; ++ww) gm = fmaxf(gm, Msh[ww][i]);
-        float gl = 0.0f;
-#pragma unroll
-        for (int ww = 0; ww < NWARPS; ++ww) {
-            float sc = __expf(Msh[ww][i] - gm);
-            if (!isfinite(sc)) sc = 0.0f;
-            scale_sh[ww][i] = sc;
-            gl += sc * Lsh[ww][i];
-        }
-        gm_sh[i] = gm;
-        gl_sh[i] = gl;
-    }
-    __syncthreads();
-
-    if (w == 0) {
-        for (int idx = lane; idx < BM * D; idx += WARP) {
-            int i = idx / D, d = idx % D, r = r0 + i;
-            if (r >= R) continue;
-            int qh = kvh * group + r / Sq, qpos = r % Sq;
-            float acc = 0.0f;
-#pragma unroll
-            for (int ww = 0; ww < NWARPS; ++ww)
-                acc += scale_sh[ww][i] * Osh[ww][i * HD + d];
-            float inv = (gl_sh[i] > 0.0f) ? (1.0f / gl_sh[i]) : 0.0f;
-            out[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d] = __float2bfloat16(acc * inv);
-        }
+        __syncwarp();
     }
 }
 
-// Prefill path (Sq > 1). Here every query row does real work and all queries in
-// a block share the same keys, so we invert the strategy: one block owns a
-// P_QROWS-row query tile for a single (batch, q head) and each of the P_NWARPS
-// warps owns 16 of those rows. K/V tiles are streamed once into shared memory
-// and reused by every warp (no `group`-fold or key-split redundancy), and each
-// warp runs an independent online softmax over all keys -- so there is no
-// cross-warp combine. Causal early-exit skips key tiles beyond the tile's rows.
-#define P_NWARPS 4
-#define P_QROWS (P_NWARPS * 16)   // 64 query rows per block
+// -------------------------------- prefill ------------------------------------
+#define PM_WARPS 8                 // query-row warps
+#define PM (PM_WARPS * 16)         // BLOCK_M query rows per block
+#define PKN 2                      // key subtiles (of 16) per shared chunk
+#define PKW (PKN * 16)
 
 __global__ void tc_flash_attn_prefill_kernel(
     const __nv_bfloat16* __restrict__ q,
@@ -267,128 +300,130 @@ __global__ void tc_flash_attn_prefill_kernel(
     const int group = Hq / Hkv;
     const int qt = blockIdx.x, qh = blockIdx.y, bi = blockIdx.z;
     const int kvh = qh / group;
-    const int tid = threadIdx.x, w = tid / WARP, lane = tid % WARP;
-    const int q0 = qt * P_QROWS;
+    const int w = threadIdx.x / WARP, lane = threadIdx.x % WARP;
+    const int wrow0 = qt * PM + w * 16;    // first query row this warp owns
 
     const __nv_bfloat16* kbase = k + (((int64_t)bi * Hkv + kvh) * Sk) * D;
     const __nv_bfloat16* vbase = v + (((int64_t)bi * Hkv + kvh) * Sk) * D;
 
-    __shared__ __nv_bfloat16 Qs[P_QROWS * HD];
-    __shared__ __nv_bfloat16 Ksh[BN * HD];
-    __shared__ __nv_bfloat16 Vsh[BN * HD];
-    __shared__ float Ssh[P_NWARPS][16 * BN];
-    __shared__ __nv_bfloat16 Psh[P_NWARPS][16 * BN];
-    __shared__ float Osh[P_QROWS * HD];
-    __shared__ float PVc[P_NWARPS][16 * 16];
-    __shared__ float Msh[P_QROWS], Lsh[P_QROWS], cwsh[P_QROWS];
+    __shared__ __nv_bfloat16 Qsh[PM * HD];
+    __shared__ __nv_bfloat16 Ksh[PKW * HD];
+    __shared__ __nv_bfloat16 Vsh[PKW * HD];
+    __shared__ __nv_bfloat16 Psh[PM_WARPS][16 * 16];
+    __shared__ float Osh[PM_WARPS][16 * 16];
 
-    for (int idx = tid; idx < P_QROWS * D; idx += blockDim.x) {
-        int i = idx / D, d = idx % D, qpos = q0 + i;
-        __nv_bfloat16 val = __float2bfloat16(0.0f);
-        if (qpos < Sq)
-            val = q[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d];
-        Qs[i * HD + d] = val;
+    for (int idx = threadIdx.x; idx < PM * HD; idx += blockDim.x) {
+        int i = idx / HD, d = idx % HD, qpos = qt * PM + i;
+        Qsh[idx] = (qpos < Sq) ? q[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d]
+                               : __float2bfloat16(0.0f);
     }
-    for (int i = tid; i < P_QROWS; i += blockDim.x) { Msh[i] = -INFINITY; Lsh[i] = 0.0f; }
-    for (int idx = tid; idx < P_QROWS * HD; idx += blockDim.x) Osh[idx] = 0.0f;
     __syncthreads();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> qf[OD];
+    for (int dc = 0; dc < OD; ++dc)
+        wmma::load_matrix_sync(qf[dc], Qsh + w * 16 * HD + dc * 16, HD);
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> oacc[OD];
+    for (int od = 0; od < OD; ++od) wmma::fill_fragment(oacc[od], 0.0f);
+    float m_[2] = {-INFINITY, -INFINITY};
+    float l_[2] = {0.0f, 0.0f};
 
     int kmax = Sk;
     if (causal) {
-        int maxpos = min(Sq - 1, q0 + P_QROWS - 1);
-        kmax = min(Sk, maxpos + (Sk - Sq) + 1);
+        int lastq = min(Sq - 1, qt * PM + PM - 1);
+        kmax = min(Sk, lastq + (Sk - Sq) + 1);
     }
-    const int nkt = (kmax + BN - 1) / BN;
-    for (int jt = 0; jt < nkt; ++jt) {
-        const int k0 = jt * BN;
-        for (int idx = tid; idx < BN * D; idx += blockDim.x) {
-            int j = idx / D, d = idx % D;
-            bool ok = (k0 + j) < Sk;
-            Ksh[j * HD + d] = ok ? kbase[(int64_t)(k0 + j) * D + d] : __float2bfloat16(0.0f);
-            Vsh[j * HD + d] = ok ? vbase[(int64_t)(k0 + j) * D + d] : __float2bfloat16(0.0f);
+
+    for (int k0 = 0; k0 < kmax; k0 += PKW) {
+        for (int idx = threadIdx.x; idx < PKW * HD; idx += blockDim.x) {
+            int j = idx / HD, d = idx % HD;
+            int kk = min(k0 + j, Sk - 1);   // clamp; OOB keys neutralised by mask below
+            Ksh[idx] = kbase[(int64_t)kk * D + d];
+            Vsh[idx] = vbase[(int64_t)kk * D + d];
         }
         __syncthreads();
 
-        wmma::fragment<wmma::accumulator, 16, 16, 16, float> sacc;
-        wmma::fill_fragment(sacc, 0.0f);
-        for (int dc = 0; dc < D; dc += 16) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> qf;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> kf;
-            wmma::load_matrix_sync(qf, Qs + w * 16 * HD + dc, HD);
-            wmma::load_matrix_sync(kf, Ksh + dc, HD);
-            wmma::mma_sync(sacc, qf, kf, sacc);
-        }
-        wmma::store_matrix_sync(Ssh[w], sacc, BN, wmma::mem_row_major);
-        __syncwarp();
+        for (int kn = 0; kn < PKN; ++kn) {
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> sacc;
+            wmma::fill_fragment(sacc, 0.0f);
+            for (int dc = 0; dc < OD; ++dc) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> kf;
+                wmma::load_matrix_sync(kf, Ksh + kn * 16 * HD + dc * 16, HD);
+                wmma::mma_sync(sacc, qf[dc], kf, sacc);
+            }
 
-        if (lane < 16) {
-            int i = w * 16 + lane, qpos = q0 + i;
-            float rowmax = -INFINITY;
-            for (int j = 0; j < BN; ++j) {
-                int kj = k0 + j;
-                bool valid = (qpos < Sq) && kj < Sk;
-                if (causal && kj > qpos + (Sk - Sq)) valid = false;
-                float s;
+            float rmax[2] = {-INFINITY, -INFINITY};
+            for (int i = 0; i < 8; ++i) {
+                int row = frag_row(lane, i), col = frag_col(lane, i);
+                int qpos = wrow0 + row, kpos = k0 + kn * 16 + col;
+                float s = sacc.x[i] * scale;
+                bool valid = (qpos < Sq) && (kpos < Sk);
+                if (causal && kpos > qpos + (Sk - Sq)) valid = false;
                 if (valid) {
-                    s = Ssh[w][lane * BN + j] * scale;
                     if (mask)
                         s += __bfloat162float(mask[(int64_t)bi * ms_b + (int64_t)qh * ms_h +
-                                                   (int64_t)qpos * ms_q + (int64_t)kj * ms_k]);
+                                                   (int64_t)qpos * ms_q + (int64_t)kpos * ms_k]);
                 } else {
-                    s = -INFINITY;   // masked: sentinel only; never fed to a matmul (see header invariant)
+                    s = -INFINITY;   // masking sentinel; never enters a matmul (see header invariant)
                 }
-                Ssh[w][lane * BN + j] = s;
-                rowmax = fmaxf(rowmax, s);   // fmax(-inf,x)=x -- skirtable like kfonline_softmax
+                sacc.x[i] = s;
+                rmax[(i & 2) ? 1 : 0] = fmaxf(rmax[(i & 2) ? 1 : 0], s);   // fmax(-inf,x)=x
             }
-            float mnew = fmaxf(Msh[i], rowmax);
-            float corr = __expf(Msh[i] - mnew);
-            if (!isfinite(corr)) corr = 0.0f;
-            float rowsum = 0.0f;
-            for (int j = 0; j < BN; ++j) {
-                float sv = Ssh[w][lane * BN + j];
-                // Select-to-zero: masked prob is the literal 0.0, NOT exp(-inf),
-                // so P@V takes a finite operand (see header invariant).
-                float p = (sv == -INFINITY) ? 0.0f : __expf(sv - mnew);
-                Psh[w][lane * BN + j] = __float2bfloat16(p);
-                rowsum += p;
+            rmax[0] = grpmax(rmax[0]);
+            rmax[1] = grpmax(rmax[1]);
+            float mnew[2] = {fmaxf(m_[0], rmax[0]), fmaxf(m_[1], rmax[1])};
+            float corr[2];
+            for (int t = 0; t < 2; ++t) {
+                corr[t] = __expf(m_[t] - mnew[t]);
+                if (!isfinite(corr[t])) corr[t] = 0.0f;
             }
-            Lsh[i] = Lsh[i] * corr + rowsum;
-            cwsh[i] = corr;
-            Msh[i] = mnew;
-        }
-        __syncwarp();
+            for (int od = 0; od < OD; ++od)
+                for (int i = 0; i < 8; ++i)
+                    oacc[od].x[i] *= corr[(i & 2) ? 1 : 0];
 
-        for (int idx = lane; idx < 16 * HD; idx += WARP)
-            Osh[(w * 16 + idx / HD) * HD + idx % HD] *= cwsh[w * 16 + idx / HD];
-        __syncwarp();
+            float rsum[2] = {0.0f, 0.0f};
+            for (int i = 0; i < 8; ++i) {
+                int row = frag_row(lane, i), col = frag_col(lane, i);
+                int ridx = (i & 2) ? 1 : 0;
+                float s = sacc.x[i];
+                // select-to-zero: masked prob is the literal 0.0 (see header invariant).
+                float p = (s == -INFINITY) ? 0.0f : __expf(s - mnew[ridx]);
+                rsum[ridx] += p;
+                Psh[w][row * 16 + col] = __float2bfloat16(p);
+            }
+            rsum[0] = grpsum(rsum[0]);
+            rsum[1] = grpsum(rsum[1]);
+            l_[0] = l_[0] * corr[0] + rsum[0];
+            l_[1] = l_[1] * corr[1] + rsum[1];
+            m_[0] = mnew[0]; m_[1] = mnew[1];
+            __syncwarp();
 
-        for (int dc = 0; dc < D; dc += 16) {
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> pvacc;
-            wmma::fill_fragment(pvacc, 0.0f);
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> pf;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> vf;
-            wmma::load_matrix_sync(pf, Psh[w], BN);
-            wmma::load_matrix_sync(vf, Vsh + dc, HD);
-            wmma::mma_sync(pvacc, pf, vf, pvacc);
-            wmma::store_matrix_sync(PVc[w], pvacc, 16, wmma::mem_row_major);
-            __syncwarp();
-            for (int idx = lane; idx < 16 * 16; idx += WARP) {
-                int i = idx / 16, jj = idx % 16;
-                Osh[(w * 16 + i) * HD + dc + jj] += PVc[w][idx];
+            wmma::load_matrix_sync(pf, Psh[w], 16);
+            for (int od = 0; od < OD; ++od) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> vf;
+                wmma::load_matrix_sync(vf, Vsh + kn * 16 * HD + od * 16, HD);
+                wmma::mma_sync(oacc[od], pf, vf, oacc[od]);
             }
             __syncwarp();
         }
-        __syncthreads();
+        __syncthreads();   // Ksh/Vsh reused by next chunk
     }
 
-    if (lane < 16) {
-        int i = w * 16 + lane, qpos = q0 + i;
-        if (qpos < Sq) {
-            float inv = (Lsh[i] > 0.0f) ? (1.0f / Lsh[i]) : 0.0f;
-            for (int d = 0; d < D; ++d)
+    float inv[2];
+    inv[0] = (l_[0] > 0.0f) ? 1.0f / l_[0] : 0.0f;
+    inv[1] = (l_[1] > 0.0f) ? 1.0f / l_[1] : 0.0f;
+    for (int od = 0; od < OD; ++od) {
+        for (int i = 0; i < 8; ++i)
+            oacc[od].x[i] *= inv[(i & 2) ? 1 : 0];
+        wmma::store_matrix_sync(Osh[w], oacc[od], 16, wmma::mem_row_major);
+        __syncwarp();
+        for (int idx = lane; idx < 16 * 16; idx += WARP) {
+            int row = idx / 16, c = idx % 16, qpos = wrow0 + row, d = od * 16 + c;
+            if (qpos < Sq)
                 out[((((int64_t)bi * Hq + qh) * Sq) + qpos) * D + d] =
-                    __float2bfloat16(Osh[i * HD + d] * inv);
+                    __float2bfloat16(Osh[w][row * 16 + c]);
         }
+        __syncwarp();
     }
 }
 
@@ -403,16 +438,16 @@ void tc_flash_attn_launch(
 {
     if (B == 0 || Sq == 0) return;
     if (Sq > 1 && !force_decode_kernel) {
-        dim3 grid((Sq + P_QROWS - 1) / P_QROWS, Hq, B);
-        tc_flash_attn_prefill_kernel<<<grid, P_NWARPS * WARP, 0, stream>>>(
+        dim3 grid((Sq + PM - 1) / PM, Hq, B);
+        tc_flash_attn_prefill_kernel<<<grid, PM_WARPS * WARP, 0, stream>>>(
             q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
             ms_b, ms_h, ms_q, ms_k);
         return;
     }
     const int group = Hq / Hkv;
     const int R = group * Sq;
-    dim3 grid((R + BM - 1) / BM, Hkv, B);
-    tc_flash_attn_kernel<<<grid, NWARPS * WARP, 0, stream>>>(
+    dim3 grid((R + 15) / 16, Hkv, B);
+    tc_flash_attn_decode_kernel<<<grid, WARP, 0, stream>>>(
         q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
         ms_b, ms_h, ms_q, ms_k);
 }
