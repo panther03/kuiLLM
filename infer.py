@@ -1,424 +1,242 @@
+"""Compiled Qwen2.5-0.5B inference with verified Kuiper GPU kernels.
+
+This is ``etc/infer_golden_compiled.py`` (a hand-written lean Qwen2 forward run
+under ``torch.compile(mode="reduce-overhead")``) with the Kuiper Inductor backend
+hooked in by default: an Inductor post-grad pass rewrites the supported ATen ops
+(the GEMM family + sdpa) to verified ``kuiperjit::*`` kernels. ``--no-kuiper``
+installs no pass and is therefore functionally identical to
+``infer_golden_compiled.py`` (stock Inductor / Triton / cuBLAS / cuDNN).
+
+Flags of note:
+  * ``--no-kuiper``     run stock torch.compile (the golden compiled baseline).
+  * ``--verify``        run each Kuiper op alongside stock PyTorch and report the
+                        relative-Frobenius divergence (forces an eager, non-CUDA-
+                        graph compile so the host-side compare can sync).
+  * ``--batch-compile`` extract every matched kernel during warm-up and build
+                        them in one combined compilation.
+  * ``--batch N``       inference batch size.
+  * ``--nsys``          bracket only the measured decode in the CUDA profiler API
+                        (for ``nsys --capture-range=cudaProfilerApi``).
+  * ``--dump-kernels``  trace every op the compiled graph runs and (re)write
+                        ``KERNELS.md``.
+"""
+
 import argparse
+import contextlib
 import os
 import sys
 import time
-from pathlib import Path
-from typing import List, Sequence
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch.nn.functional as F
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "etc"))
+import infer_golden as ig
+from infer_golden import DEVICE, DTYPE
+from infer_golden_compiled import block, _force_cudnn_sdpa
 
 import kuipy
-from kuipy.config import ENABLE_PRINT_PROFILING
-
-MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-DEFAULT_BATCH = 64
-
-print(f"Loading {MODEL_ID} in bf16 on {DEVICE}...")
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-# Batched generation requires left padding so all sequences end at the same
-# position and decode reads from each row's last index uniformly.
-tokenizer.padding_side = "left"
-if tokenizer.pad_token_id is None:
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    tokenizer.pad_token    = tokenizer.eos_token
-
-use_flash_attn = os.getenv("USE_FLASH_ATTN", "0") == "1"
-
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.bfloat16,
-    device_map=DEVICE,
-    attn_implementation="flash_attention_2" if use_flash_attn else "sdpa",
-)
-model.eval()
-_EAGER_FORWARD = model.forward
-_EAGER_CACHE_IMPLEMENTATION = model.generation_config.cache_implementation
-_COMPILED_FORWARD = None
-
-print(f"Model loaded. Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
-if DEVICE == "cuda":
-    print(f"Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB allocated\n")
-
-def _pad_batch_to_multiple(prompts: Sequence[str], multiple: int) -> List[str]:
-    """Pad the prompt list with a dummy prompt so len(prompts) is a multiple
-    of `multiple`. The padding rows are discarded after generation.
-    """
-    if multiple <= 1:
-        return list(prompts)
-    n   = len(prompts)
-    pad = (-n) % multiple
-    if pad == 0:
-        return list(prompts)
-    return list(prompts) + ["."] * pad
+from kuipy import verify as V
+from kuipy.inductor import tracing
 
 
-def _set_graph_mode(enabled: bool) -> None:
-    global _COMPILED_FORWARD
-    if enabled:
-        model.generation_config.cache_implementation = "static"
-        if _COMPILED_FORWARD is None:
-            _COMPILED_FORWARD = kuipy.compile_graph(_EAGER_FORWARD, fullgraph=True)
-        model.forward = _COMPILED_FORWARD
-    else:
-        model.generation_config.cache_implementation = _EAGER_CACHE_IMPLEMENTATION
-        model.forward = _EAGER_FORWARD
+@torch.inference_mode()
+def generate(m, ids, n, warmup=3, temperature=0.0, profile=False,
+             batch_compile=False, verify=False):
+    """Compiled decode mirroring ``infer_golden_compiled.generate_compiled``.
 
+    When the Kuiper backend is enabled (``kuipy.enable()`` called by the caller)
+    the compiled graph's supported ops run on Kuiper kernels. ``verify`` forces a
+    plain (non-CUDA-graph) compile so the per-op host-side compare can sync."""
+    b, plen = ids.shape
+    total = plen + n + 8
+    kc = [torch.zeros(b, m.NKV, total, m.D, device=DEVICE, dtype=DTYPE) for _ in range(m.NL)]
+    vc = [torch.zeros(b, m.NKV, total, m.D, device=DEVICE, dtype=DTYPE) for _ in range(m.NL)]
+    for t in kc + vc:
+        torch._dynamo.mark_static_address(t)
+    cos_t, sin_t = m._rope_tables(total)
+    kp = torch.arange(total, device=DEVICE)
+    neg = torch.finfo(DTYPE).min
+    mask_rows = torch.where(
+        kp[None, :] <= kp[:, None],
+        torch.zeros((), dtype=DTYPE, device=DEVICE),
+        torch.full((), neg, dtype=DTYPE, device=DEVICE),
+    )
 
-@torch.no_grad()
-def generate_batch(
-    prompts: Sequence[str],
-    max_new_tokens: int = 64,
-    temperature: float = 0.7,
-    pad_to_multiple: int = DEFAULT_BATCH,
-    use_kuiper: bool = True,
-    timing: bool = False,
-    verify: bool = False,
-    verify_tol: float = 2e-2,
-    capture_build: bool = False,
-    graph_mode: bool = True,
-) -> List[str]:
-    """Generate responses for many prompts in one batched forward pass.
+    def prefill():
+        h = F.embedding(ids, m.embed)
+        cos = cos_t[:plen].view(1, 1, plen, m.D)
+        sin = sin_t[:plen].view(1, 1, plen, m.D)
+        for li in range(m.NL):
+            h = block(m, h, cos, sin, kc[li], vc[li], m.layers[li], None, True, None)
+        h = F.rms_norm(h, (m.HID,), m.final_norm, m.EPS)
+        return F.linear(h[:, -1:], m.lm_head).argmax(-1)
 
-    The batch is padded up to a multiple of ``pad_to_multiple``. (default 64)
+    prefill()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    first = prefill()
+    torch.cuda.synchronize()
+    prefill_s = time.perf_counter() - t0
 
-    When ``use_kuiper`` is true (default), the forward pass runs under a
-    ``kuiper_ext.KuiperMode`` context, which re-routes eligible aten matmul
-    calls (mm / addmm / bmm) to the verified Kuiper CUDA kernels. Tensors
-    remain on the regular CUDA device — only the kernel implementation
-    changes.
+    tok_in = first.clone()
+    pos = torch.tensor([plen], device=DEVICE)
+    step = torch.zeros(1, dtype=torch.long, device=DEVICE)
+    out_buf = torch.zeros(b, n, dtype=torch.long, device=DEVICE)
+    for t in (tok_in, pos, step, out_buf):
+        torch._dynamo.mark_static_address(t)
 
-    When ``graph_mode`` is true (default), Qwen uses a static KV cache and its
-    forward method is captured by the Kuiper torch.compile backend. The backend
-    applies Kuiper-supported fusions without invoking Inductor or Triton.
+    greedy = not (temperature and temperature > 0.0)
 
-    When ``verify`` is true, every op Kuiper handles is also run through stock
-    PyTorch and the two results are compared (relative Frobenius norm); a
-    pass/fail summary is printed afterwards.
-
-    When ``timing`` is true, the forward pass is wrapped in a torch
-    profiler so we can report total time spent inside CUDA kernels as
-    well as wall-clock time. Adds a small amount of overhead.
-    """
-    real_n = len(prompts)
-    if real_n == 0:
-        return []
-
-    _set_graph_mode(graph_mode)
-    padded_prompts = _pad_batch_to_multiple(prompts, pad_to_multiple)
-    texts = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": p}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for p in padded_prompts
-    ]
-
-    inputs = tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,           # left-pad to the longest row
-    ).to(DEVICE)
-
-    if verify and not (kuipy.is_available() and DEVICE == "cuda"):
-        print("[verify] Kuiper JIT unavailable on this device — nothing to verify.",
-              file=sys.stderr)
-        verify = False
-
-    if kuipy.is_available() and ((use_kuiper and DEVICE == "cuda") or (ENABLE_PRINT_PROFILING)):
-        kernel_ctx = kuipy.KuiperMode(
-            verify=verify,
-            verify_tol=verify_tol,
-            use_kuiper=use_kuiper and DEVICE == "cuda",
-            trace=timing,
-        )
-        if ENABLE_PRINT_PROFILING:
-            kernel_tag = "kuiper" if use_kuiper and DEVICE == "cuda" else "torch"
+    def decode_step():
+        cos = cos_t.index_select(0, pos).view(1, 1, 1, m.D)
+        sin = sin_t.index_select(0, pos).view(1, 1, 1, m.D)
+        mask = mask_rows.index_select(0, pos).view(1, 1, 1, total)
+        h = F.embedding(tok_in, m.embed)
+        for li in range(m.NL):
+            h = block(m, h, cos, sin, kc[li], vc[li], m.layers[li], mask, False, pos)
+        h = F.rms_norm(h, (m.HID,), m.final_norm, m.EPS)
+        logits = F.linear(h, m.lm_head)
+        if greedy:
+            nxt = logits.argmax(-1)
         else:
-            kernel_tag = "kuiper+verify" if verify else "kuiper"
+            probs = F.softmax(logits[:, -1] / temperature, dim=-1)
+            nxt = torch.multinomial(probs, 1)
+        out_buf.index_copy_(1, step, nxt)
+        tok_in.copy_(nxt)
+        pos.add_(1)
+        step.add_(1)
+
+    # Verify needs an eager (non-cudagraph) pass so the host-side norm compare can
+    # sync; otherwise use reduce-overhead (Inductor + CUDA-graph trees).
+    if verify:
+        compiled = torch.compile(decode_step, fullgraph=True)
     else:
-        from contextlib import nullcontext
-        kernel_ctx = nullcontext()
-        kernel_tag = "torch"
-    kernel_tag += "-graph" if graph_mode else "-eager"
+        compiled = torch.compile(decode_step, mode="reduce-overhead", fullgraph=True)
+
+    cap = kuipy.batch_capture() if batch_compile else contextlib.nullcontext()
+    with cap:
+        for _ in range(warmup):
+            torch.compiler.cudagraph_mark_step_begin()
+            compiled()
+    torch.cuda.synchronize()
+
+    pos.fill_(plen)
+    step.zero_()
+    tok_in.copy_(first)
 
     if verify:
-        kuipy.reset_verify()
-
-    if timing and DEVICE == "cuda":
-        from torch.profiler import profile, ProfilerActivity
-        prof_ctx = profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=False,
-        )
-    else:
-        from contextlib import nullcontext
-        prof_ctx = nullcontext()
-
-    if DEVICE == "cuda":
-        torch.cuda.synchronize()
-
-    if capture_build and kuipy.is_available() and use_kuiper and DEVICE == "cuda":
-        # Warm-up pass: extract every eligible kernel this generation touches
-        # (running the pass on stock PyTorch), then compile them all into one
-        # extension so torch/extension.h is parsed once for the whole batch (see
-        # kuipy.batch_capture). This happens before timing; the compiled kernels
-        # then serve the measured pass below.
-        tcap = time.perf_counter()
-        with kuipy.KuiperMode(), kuipy.batch_capture():
-            model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=temperature > 0,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-        if DEVICE == "cuda":
-            torch.cuda.synchronize()
-        print(f"[batch-compile] captured + built all kernels in "
-              f"{time.perf_counter() - tcap:.1f}s")
+        V.set_enabled(True, V.tol)
 
     t0 = time.perf_counter()
-    with prof_ctx as prof, kernel_ctx:
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=temperature > 0,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-    if DEVICE == "cuda":
-        torch.cuda.synchronize()
-    elapsed = time.perf_counter() - t0
-
-    # Slice off the prompt portion (same length for every row because of
-    # left-padding) and decode each row.
-    prompt_len = inputs["input_ids"].shape[-1]
-    new_tokens = outputs[:, prompt_len:]
-    decoded = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
-
-    # Drop the synthetic padding rows.
-    decoded = decoded[:real_n]
-
-    new_token_count = new_tokens.shape[-1] * len(padded_prompts)
-    real_token_count = new_tokens.shape[-1] * real_n
-    print(
-        f"[batched generate / {kernel_tag}] {real_n} prompts (padded to {len(padded_prompts)}), "
-        f"{new_tokens.shape[-1]} new tokens each → "
-        f"{elapsed:.2f}s ({real_token_count/elapsed:.1f} real tok/s, "
-        f"{new_token_count/elapsed:.1f} kernel tok/s)"
-    )
-
-    if timing and DEVICE == "cuda" and prof is not None:
-        _report_timing(prof, elapsed)
+    with ig.profile_region(profile, "decode"):
+        for _ in range(n - 1):
+            torch.compiler.cudagraph_mark_step_begin()
+            compiled()
+    torch.cuda.synchronize()
+    decode_s = time.perf_counter() - t0
 
     if verify:
-        kuipy.print_verify_report(tol=verify_tol)
+        V.set_enabled(False)
 
-    return decoded
-
-
-def _report_timing(prof, wall_s: float) -> None:
-    """Print a wall-clock vs. CUDA-kernel timing summary from a profiler run.
-
-    The profiler reports two kinds of rows in `key_averages()`:
-    rows with ``device_type == DeviceType.CPU`` are host-side op records
-    (e.g. ``aten::mm``) and rows with ``device_type == DeviceType.CUDA``
-    are the actual GPU kernel runs. We sum device time only over the CUDA
-    rows so we don't double-count a kernel against its launching op.
-    """
-    from torch.autograd import DeviceType
-
-    cuda_kernel_us = 0
-    cuda_memcpy_us = 0
-    cpu_op_us = 0
-
-    events = prof.key_averages()
-    for ev in events:
-        # `self_device_time_total` was renamed from `self_cuda_time_total` in
-        # newer torch versions; tolerate both.
-        dev_us = getattr(ev, "self_device_time_total", None)
-        if dev_us is None:
-            dev_us = getattr(ev, "self_cuda_time_total", 0)
-
-        if ev.device_type == DeviceType.CUDA:
-            name = (ev.key or "").lower()
-            if "memcpy" in name or "memset" in name:
-                cuda_memcpy_us += dev_us
-            else:
-                cuda_kernel_us += dev_us
-        else:  # CPU-side op record
-            cpu_op_us += ev.self_cpu_time_total
-
-    wall_us = wall_s * 1e6
-
-    def _fmt(us):
-        return f"{us/1e3:8.1f} ms" if us < 1e6 else f"{us/1e6:8.3f} s "
-
-    print("[timing]")
-    print(f"  wall clock           : {_fmt(wall_us)}")
-    print(f"  CUDA kernel time     : {_fmt(cuda_kernel_us)}  "
-          f"({100*cuda_kernel_us/max(wall_us,1):5.1f}% of wall)")
-    print(f"  CUDA memcpy/memset   : {_fmt(cuda_memcpy_us)}  "
-          f"({100*cuda_memcpy_us/max(wall_us,1):5.1f}% of wall)")
-    print(f"  CPU op time (sum)    : {_fmt(cpu_op_us)}     (incl. kernel launch overhead)")
-
-    # Top-5 hottest CUDA kernels for a quick sense of where time goes.
-    cuda_events = [ev for ev in events if ev.device_type == DeviceType.CUDA]
-    hottest = sorted(
-        cuda_events,
-        key=lambda e: getattr(e, "self_device_time_total",
-                              getattr(e, "self_cuda_time_total", 0)),
-        reverse=True,
-    )[:5]
-    if hottest:
-        print("  top kernels by CUDA time:")
-        for ev in hottest:
-            t = getattr(ev, "self_device_time_total",
-                        getattr(ev, "self_cuda_time_total", 0))
-            name = ev.key
-            if len(name) > 80:
-                name = name[:77] + "..."
-            print(f"    {_fmt(t)}  {name}")
+    out_ids = torch.cat([ids, first, out_buf[:, :n - 1]], dim=1)
+    return out_ids, prefill_s, decode_s
 
 
-def generate(prompt: str, max_new_tokens: int = 256, temperature: float = 0.7,
-             use_kuiper: bool = True, timing: bool = False,
-             verify: bool = False, verify_tol: float = 2e-2,
-             graph_mode: bool = True) -> str:
-    """Single-prompt convenience wrapper."""
-    return generate_batch([prompt], max_new_tokens=max_new_tokens,
-                          temperature=temperature, pad_to_multiple=1,
-                          use_kuiper=use_kuiper, timing=timing,
-                          verify=verify, verify_tol=verify_tol,
-                          graph_mode=graph_mode)[0]
+def _load_prompts(args):
+    if args.prompts:
+        with open(args.prompts) as f:
+            prompts = [ln.strip() for ln in f if ln.strip()]
+        if not prompts:
+            raise SystemExit(f"no prompts found in {args.prompts}")
+        return prompts
+    return [args.prompt]
 
 
-def _read_prompts(path: Path) -> List[str]:
-    """Read one prompt per non-empty line. Lines starting with '#' are skipped."""
-    out: List[str] = []
-    for line in path.read_text().splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            out.append(s)
-    return out
-
-
-# A small built-in pool of diverse prompts so a default `python infer.py`
-# fills a batch of 64 even with no input file.
-_DEFAULT_PROMPT_POOL = [
-    "Explain what a transformer neural network is in two sentences.",
-    "What is the difference between supervised and unsupervised learning?",
-    "Write a one-line haiku about GPUs.",
-    "Translate 'good morning' into French and Japanese.",
-    "Summarize the plot of Hamlet in three sentences.",
-    "What does the Python `yield` keyword do?",
-    "Name three planets in our solar system.",
-    "What is the capital of Iceland?",
-    "Give one tip for writing readable code.",
-    "Why is the sky blue? (one sentence)",
-    "What is overfitting in machine learning?",
-    "Convert 100 degrees Fahrenheit to Celsius.",
-    "What does 'CUDA' stand for?",
-    "Write a SQL query selecting all rows from a table called 'users'.",
-    "Name two famous works by Shakespeare.",
-    "What is the speed of light in km/s (approximate)?",
-]
-
-
-def _fill_pool(n: int) -> List[str]:
-    pool = _DEFAULT_PROMPT_POOL
-    out  = [pool[i % len(pool)] for i in range(n)]
-    return out
-
-
-def _main() -> int:
-    ap = argparse.ArgumentParser(description="Batched Qwen2.5 inference")
-    ap.add_argument("prompt", nargs="?", default=None,
-                    help="Single prompt to run (single-prompt mode). Mutually exclusive with --prompts.")
-    ap.add_argument("--prompts", type=Path, default=None,
-                    help="File with one prompt per line.")
-    ap.add_argument("--batch", type=int, default=DEFAULT_BATCH,
-                    help=f"Batch size to pad up to (default {DEFAULT_BATCH})")
-    ap.add_argument("--max-new-tokens", type=int, default=64)
-    ap.add_argument("--temperature", type=float, default=0.7)
-    ap.add_argument("--print", dest="show", action="store_true",
-                    help="Print every batched response (default: only show the first few).")
-    ap.add_argument("--no-kuiper", dest="use_kuiper", action="store_false",
-                    help="Disable Kuiper kernels and run with stock PyTorch (for A/B comparison).")
-    ap.set_defaults(use_kuiper=True)
-    ap.add_argument("--timing", action="store_true",
-                    help="Print wall-clock and CUDA-kernel timing breakdown "
-                         "(uses torch.profiler; small overhead).")
+def main():
+    ap = argparse.ArgumentParser(
+        description="Compiled Qwen2.5 inference with verified Kuiper kernels.")
+    ap.add_argument("prompt", nargs="?", default=ig.DEFAULT_PROMPT)
+    ap.add_argument("--prompts", help="file with one prompt per line (overrides positional)")
+    ap.add_argument("--max-new-tokens", type=int, default=ig.DEFAULT_MAX_NEW_TOKENS)
+    ap.add_argument("--batch", type=int, default=ig.DEFAULT_BATCH)
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="0 = greedy (matches the golden baseline).")
+    ap.add_argument("--warmup", type=int, default=5)
+    ap.add_argument("--no-kuiper", action="store_true",
+                    help="run stock torch.compile (identical to infer_golden_compiled.py).")
     ap.add_argument("--verify", action="store_true",
-                    help="Run every Kuiper-dispatched op through stock PyTorch too "
-                         "and report numerical divergences (forces Kuiper on).")
-    ap.add_argument("--verify-tol", type=float, default=2e-2,
-                    help="Relative-norm tolerance for --verify (default 0.02).")
+                    help="check every Kuiper op against stock PyTorch (forces non-cudagraph compile).")
+    ap.add_argument("--verify-tol", type=float, default=2e-2)
     ap.add_argument("--batch-compile", action="store_true",
-                    help="Run a warm-up pass that extracts every eligible Kuiper "
-                         "kernel and compiles them all into a single extension "
-                         "(one torch/extension.h parse for the whole run), then "
-                         "run the real generation on the compiled kernels.")
-    ap.add_argument("--eager", dest="graph_mode", action="store_false",
-                    help="Disable torch.compile graph execution.")
-    ap.set_defaults(graph_mode=True)
+                    help="build every matched kernel in one combined compilation.")
+    ap.add_argument("--nsys", action="store_true",
+                    help="bracket only the measured decode in the CUDA profiler API.")
+    ap.add_argument("--dump-kernels", nargs="?", const="KERNELS.md", default=None,
+                    help="trace ops the compiled graph runs and write a KERNELS.md table.")
     args = ap.parse_args()
 
-    if args.prompt and args.prompts:
-        ap.error("pass either a positional prompt or --prompts FILE, not both")
+    use_kuiper = not args.no_kuiper
 
-    if args.verify and not args.use_kuiper:
-        ap.error("--verify requires Kuiper kernels; do not combine it with --no-kuiper")
+    ig._tune_backend()
+    _force_cudnn_sdpa()
 
-    if args.batch_compile and not args.use_kuiper:
-        ap.error("--batch-compile requires Kuiper kernels; do not combine it with --no-kuiper")
+    if args.verify and not use_kuiper:
+        raise SystemExit("--verify requires the Kuiper backend (drop --no-kuiper).")
 
-    if args.prompts is not None:
-        prompts = _read_prompts(args.prompts)
-        if not prompts:
-            print(f"[infer] no prompts found in {args.prompts}", file=sys.stderr)
-            return 1
-    elif args.prompt is not None:
-        # Single-prompt mode: replicate the user's prompt to fill the batch and expose more parallelism to GPU kernels
-        prompts = [args.prompt]
-    else:
-        prompts = _fill_pool(args.batch)
-        print(f"[infer] no prompts given — using {len(prompts)} demo prompts.\n")
+    if args.dump_kernels is not None:
+        tracing.set_enabled(True)
+    if use_kuiper:
+        kuipy.enable()
+        if args.verify:
+            V.set_enabled(False, args.verify_tol)  # tol now; flipped on for decode
+            V.reset()
 
-    pad_to = args.batch if len(prompts) == 1 else args.batch
+    tok, model = ig.load()
 
-    responses = generate_batch(
-        prompts,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        pad_to_multiple=pad_to,
-        use_kuiper=args.use_kuiper,
-        timing=args.timing,
-        verify=args.verify,
-        verify_tol=args.verify_tol,
-        capture_build=args.batch_compile,
-        graph_mode=args.graph_mode,
-    )
+    prompts = _load_prompts(args)
+    texts = [tok.apply_chat_template(
+        [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
+        for p in prompts]
+    tok.padding_side = "left"
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+    enc = tok(texts, return_tensors="pt", padding=True).to(DEVICE)
+    ids = enc["input_ids"]
+    if ids.shape[0] == 1 and args.batch > 1:
+        ids = ids.repeat(args.batch, 1)
+    batch, prompt_tokens = ids.shape
 
-    show_n = len(responses) if args.show else min(3, len(responses))
-    for i in range(show_n):
-        print("\n" + "─" * 70)
-        print(f"Prompt {i}:  {prompts[i]}")
-        print(f"Response:  {responses[i].strip()}")
-    if show_n < len(responses):
-        print(f"\n… ({len(responses) - show_n} more, pass --print to see all)")
+    label = "Kuiper" if use_kuiper else "stock torch.compile"
+    print(f"Compiling decode step ({label}, reduce-overhead)...")
+    out, prefill_s, decode_s = generate(
+        model, ids, args.max_new_tokens, warmup=args.warmup,
+        temperature=args.temperature, profile=args.nsys,
+        batch_compile=args.batch_compile, verify=args.verify)
+    gen_tokens = out.shape[-1] - prompt_tokens
+    decode_tokens = max(gen_tokens - 1, 1)
 
-    if kuipy.is_available() and ENABLE_PRINT_PROFILING:
-        with open("kernel_call.log", "w") as f:
-            kuipy.print_profile_data(f)
+    response = tok.decode(out[0, prompt_tokens:], skip_special_tokens=True)
+    print("\n" + "─" * 70)
+    print(f"Prompt:   {prompts[0]}")
+    print(f"Response: {response.strip()}")
+    print("─" * 70)
+    print(f"dtype: bf16   batch: {batch}   kuiper: {use_kuiper}")
+    print(f"Prompt tokens/seq:    {prompt_tokens}")
+    print(f"Generated tokens/seq: {gen_tokens}")
+    print(f"Prompt   tps: {batch * prompt_tokens / prefill_s:8.1f} tok/s "
+          f"(prefill {prefill_s * 1e3:.1f} ms)")
+    print(f"Generate tps: {batch * decode_tokens / decode_s:8.1f} tok/s "
+          f"(decode {decode_s * 1e3:.1f} ms, "
+          f"{decode_tokens / decode_s:.1f} tok/s/seq)")
 
-    return 0
+    if args.verify:
+        V.print_report(report_tol=args.verify_tol)
+
+    if args.dump_kernels is not None:
+        total, claimed = tracing.dump_markdown(args.dump_kernels)
+        print(f"[trace] wrote {args.dump_kernels}: {total} ops, {claimed} on Kuiper kernels")
 
 
 if __name__ == "__main__":
-    raise SystemExit(_main())
+    main()

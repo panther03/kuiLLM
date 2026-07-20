@@ -1,4 +1,4 @@
-.PHONY: infer infer-kuiper infer-kuiper-batched infer-eager infer-no-kuiper profile-kuiper-calls profile-no-kuiper-calls profile-kuiper-nsys profile-no-kuiper-nsys golden profile-golden profile-golden-triton profile-golden-no-triton test verify-kuiops install-kuiper
+.PHONY: infer infer-kuiper infer-batched infer-no-kuiper verify dump-kernels profile-kuiper-nsys profile-no-kuiper-nsys golden golden-compiled profile-golden profile-golden-triton profile-golden-no-triton test verify-kuiops install-kuiper
 
 # Default install location (cwd/inst), matching install_kuiper.sh.
 KUIPER_INST ?= $(CURDIR)/inst
@@ -6,37 +6,44 @@ KUIPER_INST ?= $(CURDIR)/inst
 NSYS := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node
 NSYS_RANGE := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop
 
+# Compiled Qwen2.5 with Kuiper kernels hooked into torch.compile (default).
 infer-kuiper:
 	python3 infer.py
 
-infer-kuiper-batched:
+# Build every matched kernel in one combined compilation (batch compile).
+infer-batched:
 	python3 infer.py --batch-compile
 
-infer: infer-kuiper-batched
+infer: infer-batched
 
-infer-eager:
-	python3 infer.py --eager
-
+# Stock torch.compile baseline (identical to etc/infer_golden_compiled.py).
 infer-no-kuiper:
 	python3 infer.py --no-kuiper
 
-profile-kuiper-calls:
-	KUIPY_PRINT_PROFILING=1 python3 infer.py
+# Check every Kuiper op against stock PyTorch (relative-Frobenius tolerance).
+verify:
+	python3 infer.py --verify
 
-profile-no-kuiper-calls:
-	KUIPY_PRINT_PROFILING=1 python3 infer.py --no-kuiper
+# Trace the ops the compiled graph runs and (re)write KERNELS.md.
+dump-kernels:
+	python3 infer.py --dump-kernels KERNELS.md
 
+# Profile only the measured decode (nsys --capture-range=cudaProfilerApi via --nsys).
 profile-kuiper-nsys:
-	$(NSYS) -o data/kuiper.nsys-rep python3 infer.py
+	$(NSYS_RANGE) -o data/kuiper.nsys-rep python3 infer.py --nsys
 
 profile-no-kuiper-nsys:
-	$(NSYS) -o data/no-kuiper.nsys-rep python3 infer.py --no-kuiper
+	$(NSYS_RANGE) -o data/no-kuiper.nsys-rep python3 infer.py --no-kuiper --nsys
 
 # --- Steelman pure-PyTorch reference (etc/infer_golden.py) ---
 # Hand-written Qwen2 forward, single hyper-optimized path (batch 256, bf16),
 # manual fully-folded decode CUDA graph. No flags / no A-B modes.
 golden:
 	python3 etc/infer_golden.py --batch 256
+
+# torch.compile(reduce-overhead) steelman (the baseline infer.py --no-kuiper matches).
+golden-compiled:
+	python3 etc/infer_golden_compiled.py --batch 256
 
 profile-golden:
 	$(NSYS_RANGE) -o data/golden.nsys-rep python3 etc/infer_golden.py --nsys --batch 256
