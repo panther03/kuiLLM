@@ -14,27 +14,24 @@ torch::Tensor op_{{ module }}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
 {% endif %}
 {
     at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
 {% if kind == "map" %}
     auto out = kuiops::clone_in(A);
-    kuiops::sync_current_stream();
     {{sym}}(out.numel(), reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));
 {% elif kind == "map2" %}
     auto out = kuiops::clone_in(A);
-    kuiops::sync_current_stream();
     {{sym}}(out.numel(),
         reinterpret_cast<{{cpp_et}}*>(out.data_ptr()),
         reinterpret_cast<{{cpp_et}}*>(B.data_ptr()));
 {% elif kind == "map_nip" %}
     auto in = A.contiguous();
     auto out = torch::empty(in.sizes(), in.options().dtype({{out_scalar}}));
-    kuiops::sync_current_stream();
     {{sym}}(out.numel(),
         reinterpret_cast<{{cpp_et}}*>(in.data_ptr()),
         reinterpret_cast<{{cpp_ot}}*>(out.data_ptr()));
 {% elif kind == "map3" %}
     auto cc = C.contiguous(); auto aa = A.contiguous(); auto bb = B.contiguous();
     auto out = torch::empty(aa.sizes(), aa.options());
-    kuiops::sync_current_stream();
     {{sym}}(out.numel(),
         reinterpret_cast<uint8_t*>(cc.data_ptr()),
         reinterpret_cast<{{cpp_et}}*>(aa.data_ptr()),

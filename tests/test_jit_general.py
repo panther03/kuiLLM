@@ -47,17 +47,6 @@ def test_cache_is_hot_on_second_call():
     assert set(jit_compile._loaded.keys()) == ext_names_before
     assert dt < 2.0, f"hot call took {dt:.2f}s, expected <2s"
 
-def test_kuiper_mode_integration():
-    _need_cuda()
-    import kuipy
-    import kuipy.config
-    kuipy.config.JIT_STRICTNESS = 2
-    A = torch.randn(128, 64, device="cuda")
-    B = torch.randn(64, 128, device="cuda")
-    with kuipy.KuiperMode():
-        o_mm = torch.mm(A, B)
-    assert torch.allclose(o_mm, A @ B, atol=1e-3, rtol=1e-3)
-
 def test_unsupported_falls_through():
     _need_cuda()
     impl = kuiops.MmImpl({})

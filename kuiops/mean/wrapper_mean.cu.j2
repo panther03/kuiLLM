@@ -23,7 +23,8 @@ torch::Tensor op_{{ module }} (torch::Tensor Input)
     out_sizes.back() = 1;
     auto Out = torch::empty(out_sizes, In.options());
 
-    at::cuda::CUDAGuard g(Input.device()); kuiops::sync_current_stream();
+    at::cuda::CUDAGuard g(Input.device());
+    kuiops::use_current_stream();
 
     {{ sym }} (
         (size_t)m, (size_t)n,

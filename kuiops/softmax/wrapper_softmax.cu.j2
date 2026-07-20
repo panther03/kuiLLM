@@ -9,7 +9,8 @@ torch::Tensor op_{{ module }} (torch::Tensor A)
 {
     const int64_t m = A.size(0), n = A.size(1);
 
-    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+    at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
         (uint32_t)m, (uint32_t)n,

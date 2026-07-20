@@ -16,14 +16,13 @@
 torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
 
     auto out_sizes = Ac.sizes().vec();
     out_sizes[{{ dim }}] = Ac.size({{ dim }}) + Bc.size({{ dim }});
     auto Out = torch::empty(out_sizes, Ac.options());
-
-    kuiops::sync_current_stream();
 
     {{ sym }} (
         {% for k in range(r) %}(uint32_t)Ac.size({{ k }}), {% endfor %}
