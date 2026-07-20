@@ -15,15 +15,23 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 
-// Plain tensor-core matmul C = A @ B, backed by the Kuiper TensorCore2D
-// `f16_f16_128x128x32_16x16x16_4x4` instantiation (see tc2d_linear.cu). This is
-// a matmul, not a GEMM: there is no bias and no built-in transpose, so the
-// caller passes B already laid out as (K, N) -- i.e. the transposed F.linear
-// weight. fp16 in / fp16 out (bf16xbf16->bf16 is not available in Kuiper yet).
+// Mixed-precision tensor-core GEMM (see tc2d_linear.cu): fp16 in/out, fp32
+// accumulate, with a real epilogue D = alpha*(A @ B) + beta*C. Row-major, no
+// transpose, so to reproduce F.linear(x, W) the caller passes B = W^T (K, N).
+// When beta != 0 the current contents of C are read back as the additive term
+// (in-place GEMM).
 //   A : (M, K)  half  row-major
 //   B : (K, N)  half  row-major
 //   C : (M, N)  half  row-major
 // Requires M % 128 == 0, N % 128 == 0, K % 32 == 0.
+void tc2d_gemm_launch(
+    const half* A,
+    const half* B,
+    half* C,
+    int M, int N, int K,
+    float alpha, float beta);
+
+// Plain matmul C = A @ B (alpha=1, beta=0), the bias-free F.linear drop-in.
 void tc2d_matmul_launch(
     const half* A,
     const half* B,

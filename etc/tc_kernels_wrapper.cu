@@ -51,6 +51,46 @@ torch::Tensor matmul(torch::Tensor A, torch::Tensor B) {
     return C;
 }
 
+// C = alpha*(A @ B) + beta*C_in, the full tensor-core GEMM epilogue (fp32
+// accumulate, fp16 in/out). A:(M,K) B:(K,N) row-major; when beta != 0 the
+// per-element additive term is taken from `C_in` (broadcast rules are the
+// caller's responsibility -- C_in must be (M,N)).
+torch::Tensor gemm(torch::Tensor A, torch::Tensor B,
+                   c10::optional<torch::Tensor> C_in,
+                   double alpha, double beta) {
+    TORCH_CHECK(A.dtype() == torch::kFloat16 && B.dtype() == torch::kFloat16,
+                "tc2d gemm expects fp16 A/B");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A/B must be 2D");
+    TORCH_CHECK(A.size(1) == B.size(0), "A.size(1) must equal B.size(0)");
+
+    auto Ac = A.contiguous();
+    auto Bc = B.contiguous();
+    const int64_t M = Ac.size(0);
+    const int64_t K = Ac.size(1);
+    const int64_t N = Bc.size(1);
+    TORCH_CHECK(M % 128 == 0 && N % 128 == 0 && K % 32 == 0,
+                "tc2d gemm requires M%128==0, N%128==0, K%32==0");
+
+    // The kernel reads/writes C in place; seed it with C_in when beta != 0.
+    torch::Tensor C;
+    if (beta != 0.0) {
+        TORCH_CHECK(C_in.has_value() && C_in->defined(),
+                    "beta != 0 requires a C tensor");
+        TORCH_CHECK(C_in->dtype() == torch::kFloat16, "C must be fp16");
+        TORCH_CHECK(C_in->dim() == 2 && C_in->size(0) == M && C_in->size(1) == N,
+                    "C must be (M, N)");
+        C = C_in->contiguous().clone();
+    } else {
+        C = torch::empty({M, N}, Ac.options());
+    }
+
+    at::cuda::CUDAGuard g(A.device());
+    tc2d_gemm_launch(half_ptr(Ac), half_ptr(Bc), half_ptr_mut(C),
+                     (int)M, (int)N, (int)K, (float)alpha, (float)beta);
+    C10_CUDA_CHECK(cudaGetLastError());
+    return C;
+}
+
 // FlashAttention forward. q:(B,Hq,Sq,D) k/v:(B,Hkv,Sk,D); optional 4D additive
 // mask broadcast over (B,Hq,Sq,Sk). Mirrors F.scaled_dot_product_attention with
 // enable_gqa=True.
@@ -98,6 +138,10 @@ torch::Tensor sdpa(torch::Tensor q, torch::Tensor k, torch::Tensor v,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("matmul", &matmul, "fp16 Kuiper TensorCore2D matmul (CUDA)",
           py::arg("A"), py::arg("B"));
+    m.def("gemm", &gemm, "fp16 in/out, fp32-accumulate tensor-core GEMM "
+          "D = alpha*(A@B) + beta*C (CUDA)",
+          py::arg("A"), py::arg("B"), py::arg("C") = c10::nullopt,
+          py::arg("alpha") = 1.0, py::arg("beta") = 0.0);
     m.def("sdpa", &sdpa, "bf16 tensor-core flash attention (CUDA)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = c10::nullopt,
           py::arg("scale"), py::arg("causal"), py::arg("force_decode_kernel") = false);

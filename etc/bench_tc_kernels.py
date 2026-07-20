@@ -123,6 +123,32 @@ def bench_linear(mod):
     return ok
 
 
+def bench_gemm(mod):
+    # Exercises the full epilogue D = alpha*(A@B) + beta*C (beta != 0), which the
+    # bias-free matmul path above never hits. Validated against a fp32 reference.
+    print("=== gemm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference ===")
+    g = torch.Generator(device=DEV).manual_seed(2)
+    cases = [
+        ("o_proj",      BATCH, HID,  HID),
+        ("down_proj",   BATCH, INTER, HID),
+        ("square_2048", 2048,  2048, 2048),
+    ]
+    ok = True
+    for name, M, K, N in cases:
+        A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        B = torch.randn(K, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        C = torch.randn(M, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        alpha, beta = 0.75, 1.5
+        ref = alpha * (A.float() @ B.float()) + beta * C.float()
+        got = mod.gemm(A, B, C, alpha, beta)
+        err = rel_fro(got, ref)
+        flag = "ok " if err < 5e-2 else "BAD"
+        ok &= err < 5e-2
+        print(f"  [{flag}] {name:<12} M={M:>4} K={K:>5} N={N:>6} "
+              f"| alpha={alpha} beta={beta} | rel-err {err:.2e}")
+    return ok
+
+
 def ref_sdpa(q, k, v, mask, causal):
     with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
         return F.scaled_dot_product_attention(
@@ -190,6 +216,8 @@ def main():
     print(f"device: {torch.cuda.get_device_name(0)}   "
           f"dtype: matmul fp16 / sdpa bf16   batch: {BATCH}\n")
     ok = bench_linear(mod)
+    print()
+    ok &= bench_gemm(mod)
     print()
     ok &= bench_sdpa(mod, force_decode_kernel=args.force_decode_kernel)
     print("\n" + ("ALL PASSED" if ok else "SOME FAILED (rel-err >= 5e-2)"))
