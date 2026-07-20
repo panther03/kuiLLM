@@ -50,12 +50,10 @@ def _ensure_built():
 
 def _kuiops_support_files():
     """Real (non-template, non-instantiation) kuiops/*.fst{i} support
-    modules, ordered so that Kuiops.Common (depended on by Gather/Scatter)
-    is checked first, and each module's .fsti is checked before its .fst."""
+    modules, ordered with each module's .fsti before its .fst."""
     files = [p for p in C.KUIOPS_SRC.rglob("*.fst*") if p.suffix in (".fst", ".fsti")]
-    common = C.KUIOPS_SRC / "Kuiops.Common.fsti"
     def key(p):
-        return (p.resolve() != common, p.suffix == ".fst", str(p))
+        return (p.suffix == ".fst", str(p))
     return sorted(files, key=key)
 
 
