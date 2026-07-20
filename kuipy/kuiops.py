@@ -617,8 +617,6 @@ import math as _math
 # Scaled dot-product attention (efficient_attention)
 # ---------------------------------------------------------------------------
 
-# NOTE: currently disconnected. may remove and only support flashattention.
-
 class SdpaImpl(_Family):
     fst_template = "sdpa/Kuiops.Sdpa.Inst.fst.j2"
     wrapper_template = "sdpa/wrapper_sdpa.cu.j2"
@@ -631,19 +629,22 @@ class SdpaImpl(_Family):
         if len(args) < 5:
             return None
         Q, Kt, V, bias = args[0], args[1], args[2], args[3]
+        compute_log_sumexp = args[4]
         dropout_p = args[5] if len(args) > 5 else kwargs.get("dropout_p", 0.0)
         is_causal = args[6] if len(args) > 6 else kwargs.get("is_causal", False)
-        # The kernel needs a full additive bias and no masking / dropout.
-        if bias is None or dropout_p != 0.0 or is_causal:
+        # The kernel does not produce the LSE needed by the backward pass.
+        if bias is None or compute_log_sumexp or dropout_p != 0.0 or is_causal:
             return None
         if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 4
                    for t in (Q, Kt, V, bias)):
             return None
-        if not (Q.dtype == Kt.dtype == V.dtype == bias.dtype and Q.dtype in _FLOAT_DTYPES):
+        if not all(t.device == Q.device for t in (Kt, V, bias)):
             return None
         N, H, L, E = (int(x) for x in Q.shape)
         N2, H2, S, E2 = (int(x) for x in Kt.shape)
         N3, H3, S2, Ev = (int(x) for x in V.shape)
+        if min(N, H, L, S, E, Ev) <= 0:
+            return None
         if (N, H, E) != (N2, H2, E2) or (N, H, S) != (N3, H3, S2):
             return None
         if tuple(int(x) for x in bias.shape) != (N, H, L, S):
@@ -658,12 +659,13 @@ class SdpaImpl(_Family):
         scale = kwargs.get("scale", None)
         if scale is None:
             scale = 1.0 / _math.sqrt(E)
-        return (Q.dtype, float(scale), [Q, Kt, V, bias])
+        return (bias.dtype, float(scale), [Q, Kt, V, bias])
 
     def run(self, spec, args, kwargs):
-        dtype, scale, call = spec
+        out_dtype, scale, call = spec
+        dtype = torch.float32
         et = torch_dtype_to_fstar(dtype)
-        module = f"Kuiops.Sdpa.{et.title()}"
+        module = "Kuiops.Sdpa.F32"
         name = "sdpa_jit"
         fst_ctx = dict(module=module, name=name, et=et)
         wrapper_ctx = dict(
@@ -671,13 +673,15 @@ class SdpaImpl(_Family):
             name=name,
             cpp_et=torch_dtype_to_ctype(dtype),
         )
-        # PyTorch computes softmax(scale * Q@K^T + bias); the kernel computes
-        # softmax(scale * (bias' + Q@K^T)). Pre-divide the bias so they agree.
         Q, Kt, V, bias = call
-        bias = bias / scale
+        Q = Q if Q.dtype == dtype else Q.to(dtype)
+        Kt = Kt if Kt.dtype == dtype else Kt.to(dtype)
+        V = V if V.dtype == dtype else V.to(dtype)
+        bias = bias if bias.dtype == dtype else bias.to(dtype)
         out, lse = self._mod(module, fst_ctx, wrapper_ctx).run(Q, Kt, V, bias, scale)
         # aten returns (output, log_sumexp[f32], philox_seed, philox_offset).
-        lse = lse.to(torch.float32)
+        if out_dtype != dtype:
+            out = out.to(out_dtype)
         empty = torch.empty([], dtype=torch.int64)
         return (out, lse, empty, empty)
 

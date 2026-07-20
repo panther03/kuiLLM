@@ -25,8 +25,7 @@ def _build_registry(tune_params):
     _SCATTER = ScatterImpl(tune_params)
     _CAT = CatImpl(tune_params)
     _MEAN = MeanImpl(tune_params)
-    # NOTE: currently disconnected
-    # _SDPA = SdpaImpl(tune_params)
+    _SDPA = SdpaImpl(tune_params)
     return {
         aten.silu.default: _ELEM,
         aten.relu.default: _ELEM,
@@ -58,7 +57,7 @@ def _build_registry(tune_params):
         aten.scatter.src: _SCATTER,
         aten.cat.default: _CAT,
         aten.mean.dim: _MEAN,
-        #aten._scaled_dot_product_efficient_attention.default: _SDPA,
+        aten._scaled_dot_product_efficient_attention.default: _SDPA,
     }
 
 def _tune_impls(tune_params):

@@ -169,30 +169,47 @@ def test_softmax_non_last_dim_unsupported():
 # sdpa (efficient attention)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.skip(reason="SDPA currently disabled")
-def test_sdpa(dtype):
+@pytest.mark.parametrize("dtypes", [
+    (torch.float32, torch.float32, torch.float32, torch.float32),
+    (torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.bfloat16),
+    (torch.bfloat16, torch.float64, torch.float16, torch.bfloat16),
+    (torch.int32, torch.uint8, torch.bool, torch.float64),
+    (torch.float32, torch.float32, torch.float32, torch.int32),
+    (torch.bool, torch.bool, torch.bool, torch.bool),
+])
+def test_sdpa(dtypes):
     _need_cuda()
     impl = kuiops.SdpaImpl({})
     torch.manual_seed(0)
+    q_dtype, k_dtype, v_dtype, bias_dtype = dtypes
     N, H, L, S, E, Ev = 2, 3, 8, 10, 16, 12
-    Q = torch.randn(N, H, L, E, device="cuda", dtype=dtype)
-    K = torch.randn(N, H, S, E, device="cuda", dtype=dtype)
-    V = torch.randn(N, H, S, Ev, device="cuda", dtype=dtype)
-    bias = torch.randn(N, H, L, S, device="cuda", dtype=dtype)
+    def rand(shape, dtype):
+        if dtype.is_floating_point:
+            return torch.randn(*shape, device="cuda", dtype=dtype)
+        return torch.randint(0, 2, shape, device="cuda").to(dtype)
+
+    Q = rand((N, H, L, E), q_dtype)
+    K = rand((N, H, S, E), k_dtype)
+    V = rand((N, H, S, Ev), v_dtype)
+    bias = rand((N, H, L, S), bias_dtype)
+    original_bias = bias.clone()
     scale = 0.3
     func = aten._scaled_dot_product_efficient_attention.default
-    args = (Q, K, V, bias, True)
+    args = (Q, K, V, bias, False)
     out, lse, seed, off = _run(impl, func, args, {"scale": scale})
-    ref = F.scaled_dot_product_attention(Q, K, V, attn_mask=bias, scale=scale)
+    ref = F.scaled_dot_product_attention(
+        Q.float(), K.float(), V.float(), attn_mask=bias.float(), scale=scale
+    ).to(bias_dtype)
     assert out.shape == (N, H, L, Ev)
-    assert lse.shape == (N, H, L) and lse.dtype == torch.float32
-    _assert_close(out, ref, dtype)
-    scores = (Q.float() @ K.float().transpose(-1, -2)) * scale + bias.float()
-    lse_ref = torch.logsumexp(scores, dim=-1)
-    _assert_close(lse, lse_ref, dtype)
+    assert out.dtype == bias_dtype
+    assert lse.shape == (N, H, 0) and lse.dtype == torch.float32
+    assert seed.shape == off.shape == () and seed.device.type == off.device.type == "cpu"
+    assert torch.equal(bias, original_bias)
+    if bias_dtype.is_floating_point:
+        _assert_close(out, ref, bias_dtype)
+    else:
+        assert torch.equal(out, ref)
 
-@pytest.mark.skip(reason="SDPA currently disabled")
 def test_sdpa_causal_unsupported():
     _need_cuda()
     impl = kuiops.SdpaImpl({})
@@ -202,11 +219,12 @@ def test_sdpa_causal_unsupported():
     V = torch.randn(N, H, S, Ev, device="cuda")
     bias = torch.randn(N, H, L, S, device="cuda")
     func = aten._scaled_dot_product_efficient_attention.default
-    # is_causal and dropout are unsupported.
+    # LSE computation, is_causal, and dropout are unsupported.
+    assert impl.supported(func, (Q, K, V, bias, True), {}) is None
     assert impl.supported(func, (Q, K, V, bias, True, 0.0, True), {}) is None
-    assert impl.supported(func, (Q, K, V, bias, True, 0.1, False), {}) is None
+    assert impl.supported(func, (Q, K, V, bias, False, 0.1, False), {}) is None
     # A missing (None) bias is unsupported.
-    assert impl.supported(func, (Q, K, V, None, True), {}) is None
+    assert impl.supported(func, (Q, K, V, None, False), {}) is None
 
 
 # ---------------------------------------------------------------------------

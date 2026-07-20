@@ -5,6 +5,66 @@ module {{ module }}
 // Generated from kuiops/sdpa/Kuiops.Sdpa.Inst.fst.j2
 
 open Kuiper
+open Kuiper.Shape
+open Kuiper.Tensor.Layout { tlayout, ctlayout }
+open Kuiper.Tensor.Layout.Alg
+open Kuiper.Tensor.Layout.Bijection
 open Kuiper.Kernel.SDPA.Naive
+open Kuiops.Sdpa
 
-let {{ name }} = sdpa_naive #{{ et }}
+inline_for_extraction noextract
+let sdpa_rm
+  (n h : szp)
+  (l s : szp)
+  (e ev : szp) =
+  [@@inline_let] let cQ = c_l4_batched_row_major _ h l e in
+  [@@inline_let] let cBias = c_l4_batched_row_major _ h l s in
+  [@@inline_let] let cOut = c_l4_batched_row_major _ h l ev in
+  [@@inline_let] let cQf =
+    fold4 n h l e (l4_batched_row_major n h l e) #cQ in
+  [@@inline_let] let cKTf : ctlayout (
+      tlayout_fold_outer (
+        tlayout_bij (transpose4_2 n h s e)
+          (l4_batched_row_major n h s e))) = {
+    ulen_fits = ();
+    all_fit = ();
+    cimap = (fun (
+      idx : conc ((n * h) @| e @| s @| INil)) ->
+      match idx with
+      | (ih, (i3, (i2, ()))) ->
+        fold_transpose4_rm_cimap n h s e ih i3 i2);
+  } in
+  [@@inline_let] let cBiasF =
+    fold4 n h l s (l4_batched_row_major n h l s) #cBias in
+  [@@inline_let] let cBiasFF =
+    fold3 (n *^ h) l s
+      (tlayout_fold_outer (l4_batched_row_major n h l s)) #cBiasF in
+  [@@inline_let] let cVf : ctlayout (
+      tlayout_fold_outer (
+        l4_batched_row_major n h s ev)) = {
+    ulen_fits = ();
+    all_fit = ();
+    cimap = (fun (
+      idx : conc ((n * h) @| s @| ev @| INil)) ->
+      match idx with
+      | (ih, (i2, (i3, ()))) ->
+        fold4_rm_cimap n h s ev ih i2 i3);
+  } in
+  [@@inline_let] let cOutF =
+    fold4 n h l ev (l4_batched_row_major n h l ev) #cOut in
+  sdpa_naive #{{ et }}
+  #Kuiper.Float32.is_floating
+  #Kuiper.Float32.is_real_like
+  #Kuiper.Float32.is_floating_real_like
+  n h l s e ev
+  #(l4_batched_row_major n h l e)
+  #(l4_batched_row_major n h s e)
+  #(l4_batched_row_major n h s ev)
+  #(l4_batched_row_major n h l s)
+  #(c_l4_batched_row_major _ h l e)
+  #(c_l4_batched_row_major _ h s e)
+  #(c_l4_batched_row_major _ h s ev)
+  #(c_l4_batched_row_major _ h l s)
+  #cQf #cKTf #cBiasF #cBiasFF #cVf #cOutF
+
+let {{ name }} = sdpa_rm
