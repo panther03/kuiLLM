@@ -8,15 +8,6 @@
 
 namespace kuiops {
 
-inline void sync_current_stream() {
-    auto stream = c10::cuda::getCurrentCUDAStream();
-    cudaStreamCaptureStatus cap;
-    AT_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &cap));
-    TORCH_CHECK(cap == cudaStreamCaptureStatusNone,
-                "Kuiper JIT kernels are not safe for CUDA graph capture.");
-    AT_CUDA_CHECK(cudaStreamSynchronize(stream.stream()));
-}
-
 inline torch::Tensor clone_in(const torch::Tensor& X) { return X.contiguous().clone(); }
 
 // from_blob deleter for buffers a kernel allocated with cudaMalloc.
@@ -26,8 +17,8 @@ inline void cuda_free(void *p) { cudaFree(p); }
 // uint32_t). Copies the low 4 bytes of each little-endian int64 word: gather /
 // scatter indices are non-negative and bounded by a dimension size, so they
 // always fit in 32 bits. This is pure data movement -- no aten compute / cast
-// op. Issued async on the current stream; callers must `sync_current_stream()`
-// (or otherwise stream-order) before the consuming kernel runs.
+// op. Issued async on the current stream, so it is stream-ordered ahead of the
+// consuming kernel (which also runs on the current stream).
 inline torch::Tensor index_to_u32(const torch::Tensor& Idx) {
     auto I = Idx.contiguous();
     auto U = torch::empty(I.sizes(), I.options().dtype(torch::kInt32));

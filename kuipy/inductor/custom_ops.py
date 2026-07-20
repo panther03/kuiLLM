@@ -3,8 +3,9 @@
 Each supported ATen op (currently the GEMM family ``mm`` / ``addmm`` / ``bmm``
 and efficient ``sdpa``) has a ``kuiperjit::*`` custom op that runs the verified
 Kuiper kernel via the corresponding ``kuipy.kuiops`` Impl. Inductor treats these
-as opaque externs: it schedules them, plans their outputs, and (once the
-wrappers are CUDA-graph-safe) captures them into ``reduce-overhead`` graphs.
+as opaque externs: it schedules them, plans their outputs, and captures them into
+``reduce-overhead`` CUDA graphs (the kernels launch on the current stream, so they
+are capture-safe).
 
 The ``claim`` helper decides, for a post-grad FX node, whether a Kuiper kernel
 can serve it — shared by the replacement pass (``passes.py``) and the tracer
