@@ -6,7 +6,17 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 
+// Defined in kuiper.h (emitted by the kernel .cu translation unit). Selects the
+// stream Kuiper kernels launch on; the wrappers point it at Torch's current
+// stream so launches are ordered on / captured by the caller's stream.
+cudaStream_t& kpr_stream();
+
 namespace kuiops {
+
+// Route subsequent Kuiper kernel launches onto Torch's current CUDA stream.
+// Must be called in each wrapper before invoking the kernel entry so the launch
+// is ordered correctly and recorded into reduce-overhead CUDA graphs.
+inline void use_current_stream() { kpr_stream() = c10::cuda::getCurrentCUDAStream().stream(); }
 
 inline torch::Tensor clone_in(const torch::Tensor& X) { return X.contiguous().clone(); }
 

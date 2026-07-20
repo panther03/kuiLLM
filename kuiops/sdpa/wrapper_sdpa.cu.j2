@@ -19,6 +19,7 @@ std::tuple<torch::Tensor, torch::Tensor> op_{{ module }}
     auto lse = torch::empty({n, h, 0}, Q.options());
 
     at::cuda::CUDAGuard g(Q.device());
+    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
         (uint32_t)n, (uint32_t)h, (uint32_t)l, (uint32_t)s, (uint32_t)e, (uint32_t)ev,

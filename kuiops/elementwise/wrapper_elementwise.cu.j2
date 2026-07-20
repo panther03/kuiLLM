@@ -14,6 +14,7 @@ torch::Tensor op_{{ module }}(torch::Tensor C, torch::Tensor A, torch::Tensor B)
 {% endif %}
 {
     at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
 {% if kind == "map" %}
     auto out = kuiops::clone_in(A);
     {{sym}}(out.numel(), reinterpret_cast<{{cpp_et}}*>(out.data_ptr()));

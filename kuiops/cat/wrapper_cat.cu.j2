@@ -16,6 +16,7 @@
 torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
 
