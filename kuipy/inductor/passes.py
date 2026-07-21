@@ -43,15 +43,24 @@ def _replace(graph, node, new_target, new_args):
 
 
 class KuiperPostGradPass(CustomGraphPass):
+    """Post-grad pass. With ``replace=True`` (default) it swaps supported ops for
+    Kuiper kernels and applies fusion rules. With ``replace=False`` it only walks
+    the graph to feed the tracer (marking which ops a Kuiper kernel *could* serve)
+    and leaves it untouched — used to build KERNELS.md under ``--no-kuiper``."""
+
+    def __init__(self, replace=True):
+        self.replace = replace
+
     def __call__(self, graph):
         changed = False
-        for rule in _fusion_rules:
-            changed = bool(rule(graph)) or changed
+        if self.replace:
+            for rule in _fusion_rules:
+                changed = bool(rule(graph)) or changed
 
         for node in list(graph.nodes):
             claimed = custom_ops.claim(node)
             tracing.record_node(node, claimed is not None)
-            if claimed is None:
+            if not self.replace or claimed is None:
                 continue
             new_target, new_args = claimed
             _replace(graph, node, new_target, new_args)
@@ -62,4 +71,4 @@ class KuiperPostGradPass(CustomGraphPass):
 
     def uuid(self):
         files = (custom_ops.__file__, tracing.__file__, __file__)
-        return get_hash_for_files(files)
+        return get_hash_for_files(files) + (b":trace" if not self.replace else b"")

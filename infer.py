@@ -191,6 +191,10 @@ def main():
         if args.verify:
             V.set_enabled(False, args.verify_tol)  # tol now; flipped on for decode
             V.reset()
+    elif args.dump_kernels is not None:
+        # Trace the stock graph without replacing any ops.
+        from kuipy import inductor
+        inductor.enable_tracing()
 
     tok, model = ig.load()
 

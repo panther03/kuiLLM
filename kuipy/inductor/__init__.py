@@ -26,12 +26,21 @@ def mode():
     return os.environ.get(_MODE_ENV, "all_kuiper").lower()
 
 
-def enable():
+def enable(replace=True):
+    """Install the post-grad pass. ``replace=True`` rewrites supported ops to
+    Kuiper kernels; ``replace=False`` installs a trace-only pass that leaves the
+    graph untouched (so ``--no-kuiper`` output is unchanged) but still feeds the
+    tracer for ``--dump-kernels``."""
     global _pass
-    if _pass is None:
-        _pass = passes.KuiperPostGradPass()
+    if _pass is None or _pass.replace != replace:
+        _pass = passes.KuiperPostGradPass(replace=replace)
     torch._inductor.config.post_grad_custom_post_pass = _pass
     return _pass
+
+
+def enable_tracing():
+    """Install a trace-only pass (no op replacement) to populate KERNELS.md."""
+    return enable(replace=False)
 
 
 def disable():
