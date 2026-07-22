@@ -27,6 +27,8 @@ open Kuiper.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Floating
 open Kuiper.Shape
+open Kuiper.Bijection
+open Kuiper.Tensor.Layout.Bijection
 open Pulse.Lib.Trade
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.ForEvery
@@ -412,5 +414,165 @@ fn sdpa_flash_pv_mm
   with vp. assert pf |-> vp; drop_ (pf |-> vp);
   with vv. assert vf |-> vv; drop_ (vf |-> vv);
   with va. assert pvacc |-> va; drop_ (pvacc |-> va);
+  ()
+}
+
+(* ────────────────────────────────────────────────────────────────────────
+   sdpa_flash_kv_load  --  global -> shared caching of the K/V key tile
+   (etc/tc_flash_attn_fa1.cu, lines 130-135).
+
+   The CUDA loop [for idx = lane; idx < BN*D; idx += WARP] partitions the
+   [bn * d] logical cells of the shared key tile across the [warp_size] lanes
+   by flattened row-major residue: lane owns exactly the cells [idx] with
+   [idx % warp_size == lane].  Over the [bn x d] tile that owned set is skewed
+   (it is not a rectangular sub-tile whenever [gcd(warp_size, d) < d]), so we
+   first *reshape* the tile -- a pure ghost view of the same storage -- into a
+   [R x warp_size] matrix ([R = bn*d/warp_size]).  Under that view "residue
+   == lane" becomes "column [lane]", a clean [array2_stride_subtile], which is
+   the per-lane ownership this function consumes.
+
+   The reshape is [tensor_apply_bij] instantiated with the standard flatten /
+   unflatten index bijection, reusing Kuiper's proven [flatten]/[unflatten];
+   no data moves.  There is NO functional spec, only memory safety: the global
+   row index is clamped into [0, sk) so every read is unconditionally in
+   bounds, exactly like the mask read in [sdpa_flash_softmax_upd]. *)
+
+(* Refinement coercions across a proven-equal size (pure identity on values). *)
+inline_for_extraction noextract
+let szc (#m #n : nat) (#_ : squash (m == n)) (x : natlt m) : natlt n = x
+
+inline_for_extraction noextract
+let szc_sz (#m #n : nat) (#_ : squash (m == n)) (x : szlt m) : szlt n = x
+
+(* [a < n*d] and [d>0] imply [a/d < n]. *)
+let div_lt_lem (a n d : nat)
+  : Lemma (requires d > 0 /\ a < n * d) (ensures a / d < n)
+= if a / d >= n then begin
+    FStar.Math.Lemmas.lemma_mult_le_right d n (a / d);
+    FStar.Math.Lemmas.multiply_fractions a d
+  end
+
+(* The [bn*d]  <->  [R x warp_size] index bijection (both flatten to the same
+   flat range of size [bn*d == R*warp_size]). *)
+inline_for_extraction noextract
+let kv_bij (bn d r : szp)
+  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  : (abs (bn @| d @| INil) =~ abs (r @| warp_size @| INil))
+= mk_bijection
+    (fun (i : abs (bn @| d @| INil)) ->
+       unflatten (r @| warp_size @| INil) (szc (flatten (bn @| d @| INil) i)))
+    (fun (i : abs (r @| warp_size @| INil)) ->
+       unflatten (bn @| d @| INil) (szc (flatten (r @| warp_size @| INil) i)))
+    (fun _ -> ())
+    (fun _ -> ())
+
+(* Concrete inverse of [kv_bij] (for the [ctlayout] of the reshaped view),
+   written as direct [sz] arithmetic (unflatten of a row-major [bn x d]):
+   flat index [p = a*warp_size + c] maps to [(p/d, p%d)]. *)
+inline_for_extraction noextract
+let kv_fconc (bn d r : szp)
+  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
+  (x : conc (r @| warp_size @| INil))
+  : conc (bn @| d @| INil)
+= let (a, (c, _)) = x in
+  FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v a) (SZ.v r - 1);
+  let p : szlt (bn *^ d) = a *^ warp_size +^ c in
+  div_lt_lem (SZ.v p) (SZ.v bn) (SZ.v d);
+  ((p /^ d, (p %^ d, ())))
+
+inline_for_extraction noextract
+let kv_fconc_correct (bn d r : szp)
+  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
+  (x : conc (r @| warp_size @| INil))
+  : squash (up (kv_fconc bn d r pf fits x) == (kv_bij bn d r pf).gg (up x))
+= ()
+
+inline_for_extraction noextract
+instance kv_ctl (bn d r : szp)
+  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
+  : ctlayout (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
+= ctlayout_bij (kv_bij bn d r pf) (kv_fconc bn d r pf fits) (kv_fconc_correct bn d r pf fits)
+    (l2_row_major bn d)
+
+(* The [R x warp_size] reshaped view: same storage as [sh], different layout. *)
+inline_for_extraction noextract
+let kv_view (#et : Type0) (bn d r : szp)
+  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (sh : array2 et (l2_row_major bn d))
+  : array2 et (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
+= from_array (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d)) (core sh)
+
+(* Lane [lane]'s owned column of the reshaped view: a [R x 1] stride sub-tile. *)
+inline_for_extraction noextract
+let kv_col (#et : Type0) (bn d r : szp)
+  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (sh : array2 et (l2_row_major bn d))
+  (lane : szlt warp_size)
+  : array2 et (stride_subtile_layout
+                 (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
+                 1 (SZ.v warp_size) 0 (SZ.v lane))
+= array2_stride_subtile (kv_view bn d r pf sh) 1 (SZ.v warp_size) 0 (SZ.v lane)
+
+fn sdpa_flash_kv_load
+  (#et : Type0)
+  (bn d r sk : szp)
+  (lane : szlt warp_size)
+  (k0base : sz)
+  (#_ : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (#_ : squash (SZ.fits (SZ.v bn * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v k0base + SZ.v bn)))
+  (#lK #lV : layout2 (SZ.v sk) (SZ.v d))
+  {| ctlayout lK, ctlayout lV |}
+  (gK : array2 et lK { Kuiper.Tensor.is_global gK })
+  (gV : array2 et lV { Kuiper.Tensor.is_global gV })
+  (shK shV : array2 et (l2_row_major bn d))
+  (#fK #fV : perm)
+  (#eK #eV : chest2 et (SZ.v sk) (SZ.v d))
+  (#eKc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
+  (#eVc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
+  requires
+    (gK |-> Frac fK eK) **
+    (gV |-> Frac fV eV) **
+    (kv_col bn d r () shK lane |-> Frac 1.0R eKc0) **
+    (kv_col bn d r () shV lane |-> Frac 1.0R eVc0)
+  ensures
+    (gK |-> Frac fK eK) **
+    (gV |-> Frac fV eV) **
+    (exists* eKc. kv_col bn d r () shK lane |-> Frac 1.0R eKc) **
+    (exists* eVc. kv_col bn d r () shV lane |-> Frac 1.0R eVc)
+{
+  let cstrK = c_stride_subtile_layout
+    (tlayout_bij (kv_bij bn d r ()) (l2_row_major bn d)) #(kv_ctl bn d r () ())
+    1 (SZ.v warp_size) 0 (SZ.v lane);
+
+  let mut a : sz = 0sz;
+  while (!a <^ r)
+    invariant
+      live a **
+      (gK |-> Frac fK eK) **
+      (gV |-> Frac fV eV) **
+      (exists* eKc. kv_col bn d r () shK lane |-> Frac 1.0R eKc) **
+      (exists* eVc. kv_col bn d r () shV lane |-> Frac 1.0R eVc) **
+      pure (SZ.v !a <= SZ.v r)
+    decreases (r - !a)
+  {
+    let va0 = !a;
+    let va : szlt r = va0;
+    FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v va) (SZ.v r - 1);
+    let p : szlt (bn *^ d) = warp_size *^ va +^ lane;
+    div_lt_lem (SZ.v p) (SZ.v bn) (SZ.v d);
+    let j  : szlt bn = p /^ d;
+    let dd : szlt d  = p %^ d;
+    let kr : szlt sk = clamp_lt sk (k0base +^ j);
+
+    let vk = tensor_read gK (cidx2 kr dd);
+    tensor_write #_ #_ #_ #_ #cstrK (kv_col bn d r () shK lane) (cidx2 va 0sz) vk;
+    let vv = tensor_read gV (cidx2 kr dd);
+    tensor_write #_ #_ #_ #_ #cstrK (kv_col bn d r () shV lane) (cidx2 va 0sz) vv;
+    a := !a +^ 1sz;
+  };
   ()
 }
