@@ -50,6 +50,11 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
 {
     half *sA = (half *) KPR_SHMEM_AT(0U);
     half *sB = (half *) KPR_SHMEM_AT(8192U);
+    // Dedicated fp32 epilogue scratch: a separately-allocated, float-typed shared
+    // buffer (not an aliasing reinterpret of sA) so it is expressible in Kuiper,
+    // where each shared buffer is typed and allocated at launch. Holds one 16x16
+    // accumulator fragment per warp: 8 warps * 256 floats = 2048 floats = 8 KiB.
+    float *sAcc = (float *) KPR_SHMEM_AT(16384U);
     uint32_t num_k_tiles = shared / BK;
     uint32_t num_n_tiles = cols / BN;
     uint32_t mrow = blockIdx.x / num_n_tiles;
@@ -119,32 +124,34 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
     }
 
     // GEMM epilogue (bolt-on): D = alpha*acc + beta*C, evaluated in acc_t and
-    // converted to fp16. The fp32 accumulator is spilled to a shared scratch tile
-    // via store_matrix_sync (a *defined* row-major layout), then each lane reads
-    // its 8 values back, applies alpha/beta, and writes them to global as one
-    // 128-bit vector. This avoids assuming the fp32 and fp16 accumulator fragments
-    // share an (unspecified) element layout, so it is portable across archs, while
-    // the vectorized store keeps it as coalesced as store_matrix_sync. The K-loop
-    // is done, so we reuse sA (8 KiB = 2048 floats = 256 floats/warp) as scratch.
-    __syncthreads();
-    float *accS = (float *) sA;
+    // converted to fp16. Each acc_t (fp32) fragment is spilled to the dedicated
+    // fp32 scratch sAcc via store_matrix_sync -- a *defined* row-major layout -- so
+    // we never assume the fp32 and fp16 accumulator fragments share an (unspecified)
+    // element layout. Each lane then reads back 8 contiguous columns of one row,
+    // applies alpha/beta, and writes them to global as a single 128-bit vector.
+    //
+    // Synchronization uses __syncthreads only: __syncwarp is not modelled by Kuiper,
+    // and the block barrier is free here -- the epilogue runs once, after the K-loop,
+    // and is bound by the global output stores, so the barriers hide behind them.
+    // sAcc is a dedicated buffer the K-loop never touches, so no leading barrier is
+    // needed before the first store (the K-loop only reads/writes sA and sB).
     uint32_t lane = threadIdx.x % 32U;
     uint32_t lrow = lane / 2U;            // this lane owns row lrow, cols c0..c0+7
     uint32_t c0 = (lane % 2U) * 8U;
     for (uint32_t mi = 0U; mi < MW; mi++) {
         for (uint32_t nj = 0U; nj < NW; nj++) {
             auto & acc_frag = accFrags[mi * NW + nj];
-            // store_matrix_sync waits for all lanes at entry, so the previous
-            // iteration's reads of accS are already retired (no pre-store barrier
-            // needed); the post-store __syncwarp makes the cross-lane writes
-            // visible before we read them back with a different lane->element map.
-            wmma::store_matrix_sync(accS + warp * 256U, acc_frag, 16U,
+            // store_matrix_sync reconverges the warp at entry, so the previous
+            // iteration's reads of sAcc have retired before it is overwritten (no
+            // pre-store barrier needed); the __syncthreads makes the collective
+            // store visible before the differently-partitioned read-back below.
+            wmma::store_matrix_sync(sAcc + warp * 256U, acc_frag, 16U,
                                     wmma::mem_row_major);
-            __syncwarp();
+            __syncthreads();
             uint32_t row = mrow * BM + warp_row * (MW * 16U) + mi * 16U + lrow;
             uint32_t col = mcol * BN + warp_col * (NW * 16U) + nj * 16U + c0;
             half *g = gC + row * cols + col;
-            float *s = accS + warp * 256U + lrow * 16U + c0;
+            float *s = sAcc + warp * 256U + lrow * 16U + c0;
             __align__(16) half out[8U];
             if (beta != 0.0f) {
                 __align__(16) half cin[8U];
@@ -175,12 +182,12 @@ Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(uint32_t rows,
     KPR_GUARD(cols % 128U == 0U);
     uint32_t nblk = rows / 128U * (cols / 128U);
     KPR_ASSERT(nblk <= 2097152U);
-    KPR_SHMEM_FITS(16384U);
+    KPR_SHMEM_FITS(24576U);
     MUST(cudaFuncSetAttribute
          (__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0,
-          cudaFuncAttributeMaxDynamicSharedMemorySize, 16384U));
+          cudaFuncAttributeMaxDynamicSharedMemorySize, 24576U));
     KPR_KCALL(__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0, nblk, THREADS,
-              16384U, shared, cols, gA, gB, gC, alpha, beta);
+              24576U, shared, cols, gA, gB, gC, alpha, beta);
     MUST(cudaDeviceSynchronize());
 }
 

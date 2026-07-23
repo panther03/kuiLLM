@@ -21,11 +21,10 @@
 torch::Tensor op_{{ module }} (torch::Tensor Self, torch::Tensor Index, torch::Tensor Src)
 {
     at::cuda::CUDAGuard g(Self.device());
+    kuiops::use_current_stream();
     auto Out = kuiops::clone_in(Self);
     auto Idx = kuiops::index_to_u32(Index);
     auto S   = Src.contiguous();
-
-    kuiops::sync_current_stream();
 
     {{ sym }} (
         {% for k in range(r) %}(uint32_t)Self.size({{ k }}), {% endfor %}

@@ -17,11 +17,10 @@
 torch::Tensor op_{{ module }} (torch::Tensor Input, torch::Tensor Index)
 {
     at::cuda::CUDAGuard g(Input.device());
+    kuiops::use_current_stream();
     auto Inp = Input.contiguous();
     auto Idx = kuiops::index_to_u32(Index);
     auto Out = torch::empty(Index.sizes(), Inp.options());
-
-    kuiops::sync_current_stream();
 
     {{ sym }} (
         {% for k in range(r) %}(uint32_t)Inp.size({{ k }}), {% endfor %}

@@ -13,7 +13,8 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
     auto Bc = B.contiguous();
     auto Cout = C.clone();
 
-    at::cuda::CUDAGuard g(A.device()); kuiops::sync_current_stream();
+    at::cuda::CUDAGuard g(A.device());
+    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
         (uint32_t)M, (uint32_t)K, (uint32_t)N,
