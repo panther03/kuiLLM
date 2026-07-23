@@ -38,6 +38,7 @@ open Kuiper.EMatrix
 module SZ = Kuiper.SizeT
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
+module FC = Kuiper.Float.Casts
 
 (* ── array1-over-tensor cell / ref shims ─────────────────────────────────────
    Ported verbatim from [Kuiper.Kernel.FlashAttention] so we do not have to
@@ -238,25 +239,29 @@ let sel_prob (#et : Type0) {| floating et |} (sv mnew : et) : et =
    across the key loop); only [kj] varies. *)
 inline_for_extraction noextract
 fn sdpa_flash_softmax_upd
-  (#et : Type0) {| scalar et, floating et |}
+  (#et_acc #et_ab : Type0)
+  {| scalar et_acc, floating et_acc, real_like et_acc |}
+  {| scalar et_ab, real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}   (* mask read  (line 163): bf16 -> f32 *)
+  {| FC.float_cast et_acc et_ab |}   (* prob write (line 181): f32  -> bf16 *)
   (bn : szp)
   (b hq sq sk : szp)
   (#lshS #lshP : layout1 bn)
   (#lmask : layout4 b hq sq sk)
   {| ctlayout lshS, ctlayout lshP, ctlayout lmask |}
-  (shS : array1 et lshS)
-  (shP : array1 et lshP)
-  (gmask : array4 et lmask)
-  (shm shl shcw : ref et)
+  (shS : array1 et_acc lshS)
+  (shP : array1 et_ab lshP)
+  (gmask : array4 et_ab lmask)
+  (shm shl shcw : ref et_acc)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz { SZ.fits (SZ.v k0 + SZ.v bn) })
   (cbound : sz)
   (row_active : bool)
   (causal : bool)
-  (scale : et)
-  (#emask : chest (b @| hq @| sq @| sk @| INil) et)
+  (scale : et_acc)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (#fmask : perm)
-  (#vm #vl #vcw : erased et)
+  (#vm #vl #vcw : erased et_acc)
   requires
     shm |-> vm ** shl |-> vl ** shcw |-> vcw
   preserves
@@ -265,7 +270,7 @@ fn sdpa_flash_softmax_upd
     live shm ** live shl ** live shcw
 {
   // Score loop: scale + mask, masking-out invalid keys to the -inf sentinel.
-  let mut rowmax : et = neg infinity;
+  let mut rowmax : et_acc = neg infinity;
   let mut j : szle bn = 0sz;
   while (!j <^ bn)
     invariant
@@ -283,11 +288,11 @@ fn sdpa_flash_softmax_upd
     // value is discarded whenever the key is invalid.
     let kjb : szlt sk = clamp_lt sk kj;
     let mv = tensor_read gmask (cidx4 bi qh qpos kjb);
-    let s : et =
+    let s : et_acc =
       if (row_active && (not (causal && (kj >^ cbound))) && (kj <^ sk)) {
-        (sc `mul` scale) `add` mv
+        (sc `mul` scale) `add` (FC.fcast mv)
       } else {
-        neg #et infinity
+        neg #et_acc infinity
       };
     shS.(cidx1 jj) <- s;
     rowmax := fmax !rowmax s;
@@ -303,10 +308,10 @@ fn sdpa_flash_softmax_upd
   // this guard cannot drive concrete control flow.  Needs an extractable
   // [isfinite] on the [floating] typeclass; omitted for now (does not affect
   // memory safety, and there is no functional spec here).
-  let corr : et = corr0;
+  let corr : et_acc = corr0;
 
   // Probability loop: select-to-zero probabilities + row sum.
-  let mut rowsum : et = zero;
+  let mut rowsum : et_acc = zero;
   j := 0sz;
   while (!j <^ bn)
     invariant
@@ -317,8 +322,8 @@ fn sdpa_flash_softmax_upd
     let vj = !j;
     let jj : szlt bn = vj;
     let sv = tensor_read shS (cidx1 jj);
-    let p : et = sel_prob sv mnew;
-    shP.(cidx1 jj) <- p;
+    let p : et_acc = sel_prob sv mnew;
+    shP.(cidx1 jj) <- FC.fcast p;
     rowsum := !rowsum `add` p;
     j := !j +^ 1sz;
   };
