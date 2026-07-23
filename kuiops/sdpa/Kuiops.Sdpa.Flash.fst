@@ -593,3 +593,80 @@ fn sdpa_flash_scale
   };
   ()
 }
+
+(* ────────────────────────────────────────────────────────────────────────
+   Warp-barrier ownership helpers.
+
+   The five leaf functions are per-lane, and each [__syncwarp()] between them is
+   the only place inter-lane ownership may move (a single lane cannot collect
+   another lane's fraction on its own).  These ghosts implement, at the warp
+   level (over [forall+ (i:natlt warp_size)]), the representation changes the
+   adjacent stages disagree on.  They are the transforms fed to the (unsound-by-
+   construction) [warp_barrier_wait]; every one is uniform in the lane index, so
+   none exploits the tid-dependence the barrier would otherwise permit. *)
+
+(* Collect the [warp_size] exclusive [(warp_row_span, 16)] stride sub-tiles that
+   [kv_load] / [scale] / [pv_mm] own (lane [i] owns residue [(i/16, i%16)]) into
+   the whole tile.  This is the [array2_stride_untile'] of the FA [rows_gather],
+   with the lane index factored [warp_size = warp_row_span * 16]. *)
+ghost
+fn warp_gather_stride
+  (#et:Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l)
+  (#_ : squash (warp_row_span /? rows))
+  (#_ : squash (16 /? cols))
+  requires
+    pure (SZ.fits (tlayout_ulen l)) **
+    (forall+ (i:natlt BW.warp_size).
+       exists* (r:chest2 et (rows / warp_row_span) (cols / 16)).
+         array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ensures
+    exists* (e:chest2 et rows cols). a |-> Frac 1.0R e
+{
+  let rf = forevery_exists
+    (fun (i:natlt BW.warp_size) (r:chest2 et (rows / warp_row_span) (cols / 16)) ->
+       array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r);
+  forevery_ext #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) ->
+       array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R (rf i))
+    (fun (i:natlt BW.warp_size) ->
+       array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16)
+         |-> Frac 1.0R (rf ((i / 16) * 16 + (i % 16))));
+  forevery_factor' BW.warp_size warp_row_span 16
+    (fun (tr:natlt warp_row_span) (tc:natlt 16) ->
+       array2_stride_subtile a warp_row_span 16 tr tc |-> Frac 1.0R (rf (tr * 16 + tc)));
+  array2_stride_untile' a warp_row_span 16
+    (fun (tr:natlt warp_row_span) (tc:natlt 16) -> rf (tr * 16 + tc));
+}
+
+(* Split the whole tile back into the [warp_size] exclusive [(warp_row_span, 16)]
+   stride sub-tiles.  Inverse of [warp_gather_stride]; the [array2_stride_tile]
+   of the FA [rows_split]. *)
+ghost
+fn warp_split_stride
+  (#et:Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l)
+  (#_ : squash (warp_row_span /? rows))
+  (#_ : squash (16 /? cols))
+  requires
+    exists* (e:chest2 et rows cols). a |-> Frac 1.0R e
+  ensures
+    forall+ (i:natlt BW.warp_size).
+      exists* (r:chest2 et (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r
+{
+  with e. assert (a |-> Frac 1.0R e);
+  array2_stride_tile a warp_row_span 16;
+  forevery_unfactor' BW.warp_size warp_row_span 16
+    (fun (tr:natlt warp_row_span) (tc:natlt 16) ->
+       array2_stride_subtile a warp_row_span 16 tr tc
+         |-> Frac 1.0R (ematrix_stride_subtile e warp_row_span 16 tr tc));
+  forevery_map #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) ->
+       array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16)
+         |-> Frac 1.0R (ematrix_stride_subtile e warp_row_span 16 (i / 16) (i % 16)))
+    (fun (i:natlt BW.warp_size) ->
+       exists* (r:chest2 et (rows / warp_row_span) (cols / 16)).
+         array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+    fn i { () };
+}
