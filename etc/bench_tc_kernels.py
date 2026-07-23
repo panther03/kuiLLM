@@ -35,7 +35,7 @@ DT = torch.bfloat16
 LINEAR_DT = torch.float16  # Kuiper TensorCore2D matmul is fp16 (no bf16xbf16->bf16 yet)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-# Kuiper headers: prefer the project's installed copy (make install-kuiper),
+# Kuiper headers: prefer the project's installed copy (make install-kuiper-*),
 # fall back to the Kuiper source tree ($KUIPER_HOME/include).
 _INST_INC = os.path.join(ROOT, "inst", "include", "kuiper")
 _KH = os.environ.get("KUIPER_HOME", os.path.expanduser("~/work/kuiper"))

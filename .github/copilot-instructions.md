@@ -3,8 +3,9 @@
 This repo runs an LLM inference pipeline (Qwen2.5-0.5B) in PyTorch where eligible
 `aten` operators are JIT-replaced by **verified Kuiper GPU kernels**. Kuiper is an
 F*/Pulse extension that writes separation-logic-verified GPU code and extracts it
-to CUDA. The polymorphic kernels live in a separate repo (`$KUIPER_HOME`,
-`~/work/kuiper`); this repo instantiates, extracts, compiles, and dispatches them.
+to CUDA. The polymorphic kernels come from Kuiper binary packages or a separate
+source repo (`$KUIPER_HOME`, usually `~/work/kuiper`); this repo instantiates,
+extracts, compiles, and dispatches them.
 
 ## Build / run / test
 
@@ -12,9 +13,11 @@ Always use the project virtualenv interpreter — there is no system install:
 `./.venv/bin/python` (Makefile targets just call `python3`,
 so run them with the venv active or use the venv python directly).
 
-- `make install-kuiper` — copy the built F* toolchain + Kuiper sources from
-  `$KUIPER_HOME` into `./inst`. **Run this before anything else** (and after any
-  change in the Kuiper repo). Requires `KUIPER_HOME` set (defaults to `~/work/kuiper`).
+- **Run one Kuiper install target before anything else**:
+  `make install-kuiper-release` installs the latest stable binary package,
+  while `make install-kuiper-nightly` installs the latest nightly. Neither
+  requires a Kuiper source checkout. Use `make install-kuiper-src` after changes
+  to the Kuiper source repo; it builds and copies `$KUIPER_HOME` into `./inst`.
 - `make infer` / `make infer-no-kuiper` — run `infer.py` with / without Kuiper.
 - `python infer.py "prompt" --max-new-tokens 8 --temperature 0` — single prompt.
   Other flags: `--prompts FILE`, `--batch N`, `--no-kuiper`, `--timing`,
