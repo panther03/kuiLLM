@@ -421,107 +421,31 @@ fn sdpa_flash_pv_mm
    sdpa_flash_kv_load  --  global -> shared caching of the K/V key tile
    (etc/tc_flash_attn_fa1.cu, lines 130-135).
 
-   The CUDA loop [for idx = lane; idx < BN*D; idx += WARP] partitions the
-   [bn * d] logical cells of the shared key tile across the [warp_size] lanes
-   by flattened row-major residue: lane owns exactly the cells [idx] with
-   [idx % warp_size == lane].  Over the [bn x d] tile that owned set is skewed
-   (it is not a rectangular sub-tile whenever [gcd(warp_size, d) < d]), so we
-   first *reshape* the tile -- a pure ghost view of the same storage -- into a
-   [R x warp_size] matrix ([R = bn*d/warp_size]).  Under that view "residue
-   == lane" becomes "column [lane]", a clean [array2_stride_subtile], which is
-   the per-lane ownership this function consumes.
+   A single warp caches the [bn x d] key tile from global to shared.  The tile
+   is partitioned across the [warp_size] lanes by the strided [(warp_row_span,
+   16)] sub-tile scheme shared with [sdpa_flash_pv_mm] / [sdpa_flash_scale]:
+   lane [(tr, tc) = (lane/16, lane%16)] owns the sub-tile of shape
+   [(bn/warp_row_span) x (d/16)].  Its cell [(a, b)] is tile row
+   [a*warp_row_span + tr] and column [b*16 + tc]; the global key row is
+   [k0base + tile-row], clamped into [0, sk) so every read is unconditionally
+   in bounds (exactly like the mask read in [sdpa_flash_softmax_upd]).  There
+   is NO functional spec, only memory safety. *)
 
-   The reshape is [tensor_apply_bij] instantiated with the standard flatten /
-   unflatten index bijection, reusing Kuiper's proven [flatten]/[unflatten];
-   no data moves.  There is NO functional spec, only memory safety: the global
-   row index is clamped into [0, sk) so every read is unconditionally in
-   bounds, exactly like the mask read in [sdpa_flash_softmax_upd]. *)
-
-(* Refinement coercions across a proven-equal size (pure identity on values). *)
-inline_for_extraction noextract
-let szc (#m #n : nat) (#_ : squash (m == n)) (x : natlt m) : natlt n = x
-
-inline_for_extraction noextract
-let szc_sz (#m #n : nat) (#_ : squash (m == n)) (x : szlt m) : szlt n = x
-
-(* [a < n*d] and [d>0] imply [a/d < n]. *)
-let div_lt_lem (a n d : nat)
-  : Lemma (requires d > 0 /\ a < n * d) (ensures a / d < n)
-= if a / d >= n then begin
-    FStar.Math.Lemmas.lemma_mult_le_right d n (a / d);
-    FStar.Math.Lemmas.multiply_fractions a d
-  end
-
-(* The [bn*d]  <->  [R x warp_size] index bijection (both flatten to the same
-   flat range of size [bn*d == R*warp_size]). *)
-inline_for_extraction noextract
-let kv_bij (bn d r : szp)
-  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  : (abs (bn @| d @| INil) =~ abs (r @| warp_size @| INil))
-= mk_bijection
-    (fun (i : abs (bn @| d @| INil)) ->
-       unflatten (r @| warp_size @| INil) (szc (flatten (bn @| d @| INil) i)))
-    (fun (i : abs (r @| warp_size @| INil)) ->
-       unflatten (bn @| d @| INil) (szc (flatten (r @| warp_size @| INil) i)))
-    (fun _ -> ())
-    (fun _ -> ())
-
-(* Concrete inverse of [kv_bij] (for the [ctlayout] of the reshaped view),
-   written as direct [sz] arithmetic (unflatten of a row-major [bn x d]):
-   flat index [p = a*warp_size + c] maps to [(p/d, p%d)]. *)
-inline_for_extraction noextract
-let kv_fconc (bn d r : szp)
-  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
-  (x : conc (r @| warp_size @| INil))
-  : conc (bn @| d @| INil)
-= let (a, (c, _)) = x in
-  FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v a) (SZ.v r - 1);
-  let p : szlt (bn *^ d) = a *^ warp_size +^ c in
-  div_lt_lem (SZ.v p) (SZ.v bn) (SZ.v d);
-  ((p /^ d, (p %^ d, ())))
-
-inline_for_extraction noextract
-let kv_fconc_correct (bn d r : szp)
-  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
-  (x : conc (r @| warp_size @| INil))
-  : squash (up (kv_fconc bn d r pf fits x) == (kv_bij bn d r pf).gg (up x))
-= ()
-
-inline_for_extraction noextract
-instance kv_ctl (bn d r : szp)
-  (pf   : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  (fits : squash (SZ.fits (SZ.v bn * SZ.v d)))
-  : ctlayout (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
-= ctlayout_bij (kv_bij bn d r pf) (kv_fconc bn d r pf fits) (kv_fconc_correct bn d r pf fits)
-    (l2_row_major bn d)
-
-(* The [R x warp_size] reshaped view: same storage as [sh], different layout. *)
-inline_for_extraction noextract
-let kv_view (#et : Type0) (bn d r : szp)
-  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  (sh : array2 et (l2_row_major bn d))
-  : array2 et (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
-= from_array (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d)) (core sh)
-
-(* Lane [lane]'s owned column of the reshaped view: a [R x 1] stride sub-tile. *)
-inline_for_extraction noextract
-let kv_col (#et : Type0) (bn d r : szp)
-  (pf : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
-  (sh : array2 et (l2_row_major bn d))
-  (lane : szlt warp_size)
-  : array2 et (stride_subtile_layout
-                 (tlayout_bij (kv_bij bn d r pf) (l2_row_major bn d))
-                 1 (SZ.v warp_size) 0 (SZ.v lane))
-= array2_stride_subtile (kv_view bn d r pf sh) 1 (SZ.v warp_size) 0 (SZ.v lane)
+(* [i < n/s], [r < s] and [s | n] imply [s*i + r < n] -- the standard bound for
+   a strided [(srows, scols)] tile cell. *)
+let tile_idx_lem (s i r n : nat)
+  : Lemma (requires s > 0 /\ (s /? n) /\ i < n / s /\ r < s) (ensures s * i + r < n)
+= let z = Kuiper.Divides.get_factor s n in
+  FStar.Math.Lemmas.cancel_mul_div z s;
+  FStar.Math.Lemmas.lemma_mult_le_left s (i + 1) z
 
 fn sdpa_flash_kv_load
   (#et : Type0)
-  (bn d r sk : szp)
+  (bn d sk : szp)
   (lane : szlt warp_size)
   (k0base : sz)
-  (#_ : squash (SZ.v bn * SZ.v d == SZ.v r * SZ.v warp_size))
+  (#_ : squash (warp_row_span /?+ SZ.v bn))
+  (#_ : squash (16 /?+ SZ.v d))
   (#_ : squash (SZ.fits (SZ.v bn * SZ.v d)))
   (#_ : squash (SZ.fits (SZ.v k0base + SZ.v bn)))
   (#lK #lV : layout2 (SZ.v sk) (SZ.v d))
@@ -531,47 +455,64 @@ fn sdpa_flash_kv_load
   (shK shV : array2 et (l2_row_major bn d))
   (#fK #fV : perm)
   (#eK #eV : chest2 et (SZ.v sk) (SZ.v d))
-  (#eKc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
-  (#eVc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
+  (#eKc0 : chest2 et (SZ.v bn / warp_row_span) (SZ.v d / 16))
+  (#eVc0 : chest2 et (SZ.v bn / warp_row_span) (SZ.v d / 16))
   requires
     (gK |-> Frac fK eK) **
     (gV |-> Frac fV eV) **
-    (kv_col bn d r () shK lane |-> Frac 1.0R eKc0) **
-    (kv_col bn d r () shV lane |-> Frac 1.0R eVc0)
+    (array2_stride_subtile shK warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eKc0) **
+    (array2_stride_subtile shV warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eVc0)
   ensures
     (gK |-> Frac fK eK) **
     (gV |-> Frac fV eV) **
-    (exists* eKc. kv_col bn d r () shK lane |-> Frac 1.0R eKc) **
-    (exists* eVc. kv_col bn d r () shV lane |-> Frac 1.0R eVc)
+    (exists* eKc. array2_stride_subtile shK warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eKc) **
+    (exists* eVc. array2_stride_subtile shV warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eVc)
 {
-  let cstrK = c_stride_subtile_layout
-    (tlayout_bij (kv_bij bn d r ()) (l2_row_major bn d)) #(kv_ctl bn d r () ())
-    1 (SZ.v warp_size) 0 (SZ.v lane);
+  let tr = lane /^ 16sz;
+  let tc = lane %^ 16sz;
+  let cstr = c_stride_subtile_layout (l2_row_major bn d) warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
+  let nrow : sz = bn /^ warp_row_span_sz;
+  let ncol : sz = d  /^ 16sz;
 
   let mut a : sz = 0sz;
-  while (!a <^ r)
+  while (!a <^ nrow)
     invariant
       live a **
       (gK |-> Frac fK eK) **
       (gV |-> Frac fV eV) **
-      (exists* eKc. kv_col bn d r () shK lane |-> Frac 1.0R eKc) **
-      (exists* eVc. kv_col bn d r () shV lane |-> Frac 1.0R eVc) **
-      pure (SZ.v !a <= SZ.v r)
-    decreases (r - !a)
+      (exists* eKc. array2_stride_subtile shK warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eKc) **
+      (exists* eVc. array2_stride_subtile shV warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eVc) **
+      pure (SZ.v !a <= SZ.v bn / warp_row_span)
+    decreases (nrow - !a)
   {
     let va0 = !a;
-    let va : szlt r = va0;
-    FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v va) (SZ.v r - 1);
-    let p : szlt (bn *^ d) = warp_size *^ va +^ lane;
-    div_lt_lem (SZ.v p) (SZ.v bn) (SZ.v d);
-    let j  : szlt bn = p /^ d;
-    let dd : szlt d  = p %^ d;
-    let kr : szlt sk = clamp_lt sk (k0base +^ j);
+    let arow : szlt (SZ.v bn / warp_row_span) = va0;
+    tile_idx_lem warp_row_span (SZ.v arow) (SZ.v tr) (SZ.v bn);
+    let trow : szlt bn = warp_row_span_sz *^ arow +^ tr;
+    let kr : szlt sk = clamp_lt sk (k0base +^ trow);
 
-    let vk = tensor_read gK (cidx2 kr dd);
-    tensor_write #_ #_ #_ #_ #cstrK (kv_col bn d r () shK lane) (cidx2 va 0sz) vk;
-    let vv = tensor_read gV (cidx2 kr dd);
-    tensor_write #_ #_ #_ #_ #cstrK (kv_col bn d r () shV lane) (cidx2 va 0sz) vv;
+    let mut b : sz = 0sz;
+    while (!b <^ ncol)
+      invariant
+        live b **
+        (gK |-> Frac fK eK) **
+        (gV |-> Frac fV eV) **
+        (exists* eKc. array2_stride_subtile shK warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eKc) **
+        (exists* eVc. array2_stride_subtile shV warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eVc) **
+        pure (SZ.v !b <= SZ.v d / 16)
+      decreases (ncol - !b)
+    {
+      let vb0 = !b;
+      let bcol : szlt (SZ.v d / 16) = vb0;
+      tile_idx_lem 16 (SZ.v bcol) (SZ.v tc) (SZ.v d);
+      let dd : szlt d = 16sz *^ bcol +^ tc;
+
+      let vk = tensor_read gK (cidx2 kr dd);
+      tensor_write #_ #_ #_ #_ #cstr (array2_stride_subtile shK warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 arow bcol) vk;
+      let vv = tensor_read gV (cidx2 kr dd);
+      tensor_write #_ #_ #_ #_ #cstr (array2_stride_subtile shV warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 arow bcol) vv;
+      b := !b +^ 1sz;
+    };
     a := !a +^ 1sz;
   };
   ()
@@ -582,59 +523,73 @@ fn sdpa_flash_kv_load
    (etc/tc_flash_attn_fa1.cu, lines 190-191).
 
    The CUDA loop [for idx = lane; idx < BM*HD; idx += WARP] does the in-place
-   row-broadcast multiply [Osh[idx] *= cw[idx / HD]] over the [bm x hd] output
-   tile.  The per-lane ownership of the [O] tile is exactly the strided one of
-   [sdpa_flash_kv_load], so we reuse the same [bm*hd <-> R x warp_size] reshape:
-   lane owns column [lane] ([kv_col]) with read+write permission.
+   row-broadcast multiply [Osh[idx] *= cw[idx / HD]] over the [16 x hd] output
+   tile.  The per-lane ownership of the [O] tile is exactly the strided
+   [(warp_row_span, 16)] subtile of [sdpa_flash_pv_mm] -- so [O] never changes
+   representation between the rescale and the [P@V] accumulation, and no barrier
+   has to move it.  Lane [(tr, tc) = (lane/16, lane%16)] owns the subtile of
+   shape [lane_row_span x (hd/16)]; its cell [(orow, ocol)] is global row
+   [orow*warp_row_span + tr], so the correction weight it multiplies by is
+   [cw[orow*warp_row_span + tr]].
 
-   The correction weights [cw] form a length-[bm] row vector; every lane reads
-   the whole vector (each cell [i = idx/hd] it touches), so it is passed with a
-   divided read-only fraction over the entire array -- no need to split it into
-   per-lane cells since it is read exclusively.  Memory safety only. *)
+   The correction weights [cw] form a length-16 row vector; every lane reads the
+   whole vector, so it is passed with a divided read-only fraction over the
+   entire array -- no need to split it into per-lane cells since it is read
+   exclusively.  Memory safety only. *)
 fn sdpa_flash_scale
   (#et : Type0) {| scalar et |}
-  (bm hd r : szp)
+  (hd : szp)
+  (#_ : squash (16 /?+ SZ.v hd))
+  (#_ : squash (SZ.fits (16 * SZ.v hd)))
   (lane : szlt warp_size)
-  (#_ : squash (SZ.v bm * SZ.v hd == SZ.v r * SZ.v warp_size))
-  (#_ : squash (SZ.fits (SZ.v bm * SZ.v hd)))
-  (#lcw : layout1 (SZ.v bm))
+  (#lcw : layout1 16)
   {| ctlayout lcw |}
-  (shO : array2 et (l2_row_major bm hd))
+  (shO : array2 et (l2_row_major 16 hd))
   (shcw : array1 et lcw)
   (#fcw : perm)
-  (#ecw : chest1 et (SZ.v bm))
-  (#eOc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
+  (#ecw : chest1 et 16)
+  (#eO0 : chest2 et lane_row_span (SZ.v hd / 16))
   requires
     (shcw |-> Frac fcw ecw) **
-    (kv_col bm hd r () shO lane |-> Frac 1.0R eOc0)
+    (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO0)
   ensures
     (shcw |-> Frac fcw ecw) **
-    (exists* eOc. kv_col bm hd r () shO lane |-> Frac 1.0R eOc)
+    (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
 {
-  let cstrO = c_stride_subtile_layout
-    (tlayout_bij (kv_bij bm hd r ()) (l2_row_major bm hd)) #(kv_ctl bm hd r () ())
-    1 (SZ.v warp_size) 0 (SZ.v lane);
+  let tr = lane /^ 16sz;
+  let cstr = c_stride_subtile_layout (l2_row_major 16 hd) warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
+  let ncol : sz = hd /^ 16sz;
 
-  let mut a : sz = 0sz;
-  while (!a <^ r)
+  let mut orow : sz = 0sz;
+  while (!orow <^ lane_row_span_sz)
     invariant
-      live a **
+      live orow **
       (shcw |-> Frac fcw ecw) **
-      (exists* eOc. kv_col bm hd r () shO lane |-> Frac 1.0R eOc) **
-      pure (SZ.v !a <= SZ.v r)
-    decreases (r - !a)
+      (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+      pure (SZ.v !orow <= lane_row_span)
+    decreases (lane_row_span_sz - !orow)
   {
-    let va0 = !a;
-    let va : szlt r = va0;
-    FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v va) (SZ.v r - 1);
-    let p : szlt (bm *^ hd) = warp_size *^ va +^ lane;
-    div_lt_lem (SZ.v p) (SZ.v bm) (SZ.v hd);
-    let i : szlt bm = p /^ hd;
+    let vorow = !orow;
+    let vor : szlt lane_row_span = vorow;
+    let irow : szlt 16 = warp_row_span_sz *^ vor +^ tr;
+    let cwv = tensor_read shcw (cidx1 irow);
 
-    let cwv = tensor_read shcw (cidx1 i);
-    let ov  = tensor_read #_ #_ #_ #_ #cstrO (kv_col bm hd r () shO lane) (cidx2 va 0sz);
-    tensor_write #_ #_ #_ #_ #cstrO (kv_col bm hd r () shO lane) (cidx2 va 0sz) (ov `mul` cwv);
-    a := !a +^ 1sz;
+    let mut ocol : sz = 0sz;
+    while (!ocol <^ ncol)
+      invariant
+        live ocol **
+        (shcw |-> Frac fcw ecw) **
+        (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+        pure (SZ.v !ocol <= SZ.v hd / 16)
+      decreases (ncol - !ocol)
+    {
+      let vocol = !ocol;
+      let oc : szlt (SZ.v hd / 16) = vocol;
+      let ov = tensor_read #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc);
+      tensor_write #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc) (ov `mul` cwv);
+      ocol := !ocol +^ 1sz;
+    };
+    orow := !orow +^ 1sz;
   };
   ()
 }
