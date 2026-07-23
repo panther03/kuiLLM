@@ -1223,3 +1223,18 @@ fn sdpa_flash_barrier3
   BW.warp_barrier_wait () (b3_pre shS shP shcw) (b3_post shS shP shcw)
     barrier3_proof #(BW.warp_size) #(SZ.v lane);
 }
+
+(* ── Barrier 4 (CUDA line 192): scale -> pv_mm ─────────────────────────────────
+   A pure ordering fence: [scale] and [pv_mm] both use [shO] as the same exclusive
+   stride sub-tile, and shP/shV/shcw keep their (framed) forms across it, so no
+   ownership moves -- [p == q == emp]. *)
+inline_for_extraction noextract
+fn sdpa_flash_barrier4
+  (lane : szlt warp_size)
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires emp
+  ensures  emp
+{
+  BW.warp_barrier_wait () warp_emp_pred warp_emp_pred warp_emp_proof
+    #(BW.warp_size) #(SZ.v lane);
+}
