@@ -32,6 +32,8 @@ open Kuiper.Tensor.Layout.Bijection
 open Pulse.Lib.Trade
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.ForEvery
+open Kuiper.Ghost.TensorTranspose
+open Kuiper.EMatrix
 
 module SZ = Kuiper.SizeT
 module BW = Kuiper.Barrier.Warp
@@ -669,4 +671,93 @@ fn warp_split_stride
        exists* (r:chest2 et (rows / warp_row_span) (cols / 16)).
          array2_stride_subtile a warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
     fn i { () };
+}
+
+(* ── barrier 1 : kv_load -> qk_mm (CUDA line 136) ─────────────────────────────
+   K and V arrive as the [warp_size] exclusive [(warp_row_span,16)] stride
+   sub-tiles [kv_load] just filled.  qk_mm reads Q@K^T, so it wants K viewed
+   COLUMN-major ([row2col shK], the same storage) and shared read-only across the
+   warp; V is not touched by qk_mm but is likewise re-shared now (it stays a
+   read-only fraction until pv_mm, so no lane needs it exclusive in between).
+   Both are matmul *inputs* whose fraction qk_mm/pv_mm accept as arbitrary, so no
+   perm token has to be matched here. *)
+unfold let b1_pre (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d))
+  (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (i : natlt BW.warp_size) : slprop
+= (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+
+unfold let b1_post (#et:Type0) (d:szp) (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (i : natlt BW.warp_size) : slprop
+= (exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+  ** (exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+
+ghost
+fn barrier1_transform
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  requires forall+ (i:natlt BW.warp_size). b1_pre d shK shV i
+  ensures  forall+ (i:natlt BW.warp_size). b1_post d shK shV i
+{
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) ->
+       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+         array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+    (fun (i:natlt BW.warp_size) ->
+       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+         array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r);
+
+  warp_gather_stride shK;
+  with eK. assert (shK |-> Frac 1.0R eK);
+  ghost_transpose1 shK;
+  tensor_share_n (row2col shK) BW.warp_size;
+  forevery_map #(natlt BW.warp_size)
+    (fun (_:natlt BW.warp_size) -> row2col shK |-> Frac (1.0R /. BW.warp_size) (mtranspose eK))
+    (fun (_:natlt BW.warp_size) ->
+       exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+    fn i { () };
+
+  warp_gather_stride shV;
+  with eV. assert (shV |-> Frac 1.0R eV);
+  tensor_share_n shV BW.warp_size;
+  forevery_map #(natlt BW.warp_size)
+    (fun (_:natlt BW.warp_size) -> shV |-> Frac (1.0R /. BW.warp_size) eV)
+    (fun (_:natlt BW.warp_size) ->
+       exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+    fn i { () };
+
+  forevery_zip
+    (fun (i:natlt BW.warp_size) ->
+       exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+    (fun (i:natlt BW.warp_size) ->
+       exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s);
+}
+
+let barrier1_proof
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  : stt_ghost unit emp_inames
+      (requires forall+ (i:natlt BW.warp_size). b1_pre d shK shV i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b1_post d shK shV i)
+  = barrier1_transform d shK shV
+
+inline_for_extraction noextract
+fn sdpa_flash_barrier1
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (lane : szlt warp_size)
+  (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (bproof : stt_ghost unit emp_inames
+      (requires forall+ (i:natlt BW.warp_size). b1_pre d shK shV i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b1_post d shK shV i))
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires b1_pre d shK shV (SZ.v lane % BW.warp_size)
+  ensures  b1_post d shK shV (SZ.v lane % BW.warp_size)
+{
+  BW.warp_barrier_wait () (b1_pre d shK shV) (b1_post d shK shV)
+    bproof #(BW.warp_size) #(SZ.v lane);
 }
