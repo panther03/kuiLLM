@@ -37,6 +37,179 @@ open Kuiper.EMatrix
 
 module SZ = Kuiper.SizeT
 module BW = Kuiper.Barrier.Warp
+module Trade = Pulse.Lib.Trade
+
+(* ── array1-over-tensor cell / ref shims ─────────────────────────────────────
+   Ported verbatim from [Kuiper.Kernel.FlashAttention] so we do not have to
+   [open] (and re-verify) that whole kernel.  These expose the 1-D whole/cell/ref
+   conversions used by the shcw scalar array and the per-row [mrow] bridge. *)
+
+let fa_abs_cons_nil_eq (len:nat)
+  : Lemma (abs (len @| INil) == (natlt len & unit))
+          [SMTPat (abs (len @| INil))]
+  = ()
+
+unfold
+let fa_abs_bij (#len : nat) : (abs (len @| INil) =~ natlt len) =
+  {
+    ff = (fun (i, ()) -> i);
+    gg = (fun i -> (i, ()));
+  }
+
+let fa_acc1_upd1 (#et:Type) (#len:nat) (s:chest1 et len) (i:natlt len) (v:et) (j:natlt len)
+  : Lemma (acc1 (upd1 s i v) j == (if j = i then v else acc1 s j))
+          [SMTPat (acc1 (upd1 s i v) j)]
+  = ()
+
+let fa_up_cidx1_eq (#d0:nat) (i:szlt d0)
+  : Lemma (up (cidx1 i) == idx1 (SZ.v i))
+          [SMTPat (up (cidx1 i))]
+  = ()
+
+let fa_tr_val_chest1_to_seq (#et:Type) (#len:nat) (v:chest1 et len)
+  : Lemma (tr_val (chest1_to_seq v) == v)
+          [SMTPat (tr_val (chest1_to_seq v))]
+  = introduce forall (i : abs (len @| INil)).
+        acc (tr_val (chest1_to_seq v)) i == acc v i
+    with ( let (j, _) = i in () );
+    Kuiper.Chest.lemma_equal_intro (tr_val (chest1_to_seq v)) v;
+    Kuiper.Chest.ext (tr_val (chest1_to_seq v)) v
+
+ghost
+fn explode1
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l)
+  (#f : perm)
+  (#s : chest1 et len)
+  requires a |-> Frac f s
+  ensures
+    forall+ (i : natlt len).
+      Cell a (idx1 i) |-> Frac f (acc1 s i)
+{
+  tensor_explode a #f #s;
+  forevery_iso fa_abs_bij (fun (i : abs (len @| INil)) -> Cell a i |-> Frac f (acc s i));
+  forevery_ext _ (fun (i : natlt len) -> Cell a (idx1 i) |-> Frac f (acc1 s i));
+  ()
+}
+
+ghost
+fn implode1
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l)
+  (#f : perm)
+  (#s : chest1 et len)
+  requires
+    pure (SZ.fits (tlayout_ulen l))
+  requires
+    forall+ (i : natlt len).
+      Cell a (idx1 i) |-> Frac f (acc1 s i)
+  ensures
+    a |-> Frac f s
+{
+  forevery_ext _ (fun (i : natlt len) -> Cell a (fa_abs_bij.gg i) |-> Frac f (acc s (fa_abs_bij.gg i)));
+  forevery_iso_back fa_abs_bij (fun (i : abs (len @| INil)) -> Cell a i |-> Frac f (acc s i));
+  tensor_implode a #f #s;
+}
+
+ghost
+fn extract_cell1
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l)
+  (i : natlt len)
+  (#f : perm)
+  (#s : chest1 et len)
+  requires
+    a |-> Frac f s **
+    pure (SZ.fits (tlayout_ulen l))
+  ensures
+    Cell a (idx1 i) |-> Frac f (acc1 s i) **
+    (forall* (si': et).
+      Cell a (idx1 i) |-> Frac f si' @==> a |-> Frac f (upd1 s i si' <: chest1 et len))
+{
+  explode1 a #f #s;
+  forevery_extract' #(natlt len) i _;
+  ghost fn aux (si' : et)
+    requires forall* (p': natlt len -> slprop).
+      p' i ** pure (forall (j:natlt len{~(eq2 #(natlt len) j i)}). p' j == (Cell a (idx1 j) |-> Frac f (acc1 s j)))
+        @==> (forall+ (j:natlt len). p' j)
+    ensures
+      Cell a (idx1 i) |-> Frac f si' @==> a |-> Frac f (upd1 s i si' <: chest1 et len)
+    {
+      let p' = (fun (j: natlt len) -> (Cell a (idx1 j)) |-> Frac f (acc1 (upd1 s i si' <: chest1 et len) j));
+      assert rewrites_to p' (fun (j: natlt len) -> (Cell a (idx1 j)) |-> Frac f (acc1 (upd1 s i si' <: chest1 et len) j));
+      elim_forall p';
+
+      Trade.intro_trade
+        (Cell a (idx1 i) |-> Frac f si')
+        (a |-> Frac f (upd1 s i si' <: chest1 et len))
+        (p' i ** pure (forall (j:natlt len{~(eq2 #(natlt len) j i)}). p' j == (Cell a (idx1 j) |-> Frac f (acc1 s j)))
+          @==> (forall+ (j:natlt len). p' j))
+        fn _ {
+          rewrite (Cell a (idx1 i) |-> Frac f si') as (p' i);
+          Trade.elim_trade _ _;
+          implode1 a #f #(upd1 s i si' <: chest1 et len);
+        };
+    };
+  intro_forall _ aux;
+  ()
+}
+
+ghost
+fn restore_cell1
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l)
+  (i : natlt len)
+  (#f : perm)
+  (#si': et)
+  (#s : chest1 et len)
+  requires
+    Cell a (idx1 i) |-> Frac f si' **
+    (forall* (si': et).
+      Cell a (idx1 i) |-> Frac f si' @==> a |-> Frac f (upd1 s i si' <: chest1 et len))
+  ensures
+    a |-> Frac f (upd1 s i si' <: chest1 et len)
+{
+  elim_forall si';
+  Trade.elim_trade _ _;
+}
+
+let ref_of_array_cell
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (i : natlt len)
+  : GTot (ref et)
+  = ref_of_tensor_cell a (idx1 i)
+
+inline_for_extraction noextract
+fn get_ref_of_array_cell
+  (#et : Type0) (#len : erased nat) (#l : layout1 len) {| ctlayout l |}
+  (a : array1 et l) (i : szlt len)
+  returns r : ref et
+  ensures pure (r == ref_of_array_cell a i)
+{
+  get_ref_of_tensor_cell a (cidx1 i)
+}
+
+ghost
+fn array1_cell_to_ref
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (i : natlt len)
+  (#f : perm) (#v : erased et)
+  requires Cell a (idx1 i) |-> Frac f v
+  ensures ref_of_array_cell a i |-> Frac f v
+{
+  tensor_cell_to_ref a (idx1 i);
+}
+
+ghost
+fn array1_cell_from_ref
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (i : natlt len)
+  (#f : perm) (#v : erased et)
+  requires ref_of_array_cell a i |-> Frac f v
+  ensures Cell a (idx1 i) |-> Frac f v
+{
+  tensor_cell_from_ref a (idx1 i);
+}
 
 (* Clamp a key index into [0, sk) so the mask read is unconditionally in bounds
    (a pure, F*-level [if] refines the result type). *)
@@ -776,15 +949,13 @@ fn sdpa_flash_barrier1
    restore wand, framed across softmax and consumed by barrier 3); lanes 16..31
    receive [emp].  Only shK/shS move; shV, shP, shO, ... are framed in [jt_body]. *)
 
-(* The softmax-input form of one score row [i] (i < 16): the row [mrow] at full
-   permission, plus the [mextract_row] wand restoring the [1 x 16] write-subtile. *)
-unfold let shS_row_live (#et:Type0)
-  (shS : array2 et (l2_row_major 16 16)) (i : natlt 16) : slprop
-= exists* (s : chest2 et 1 16).
-    (mrow (array2_subtile shS 1 16 i 0) 0 |-> Frac 1.0R (tr_val (ematrix_row s 0)))
-    ** (forall* (s':lseq et 16).
-          mrow (array2_subtile shS 1 16 i 0) 0 |-> Frac 1.0R (tr_val s') @==>
-          array2_subtile shS 1 16 i 0 |-> Frac 1.0R (ematrix_upd_row s 0 s'))
+(* One score/probability row [i] (i < 16) as its [1 x 16] write-subtile at full
+   permission.  [jt_body] locally bridges this to the [array1] [mrow] that
+   [softmax_upd] wants (via [mextract_row]/wand), so the barriers only ever move
+   clean subtile [pts_to]s -- no [mrow]/wand plumbing crosses a warp barrier. *)
+unfold let row_subtile (#et:Type0)
+  (shA : array2 et (l2_row_major 16 16)) (i : natlt 16) : slprop
+= exists* (r : chest2 et 1 16). array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
 
 unfold let b2_pre (#et:Type0) (d:szp)
   (shK : array2 et (l2_row_major 16 (SZ.v d)))
@@ -799,7 +970,7 @@ unfold let b2_post (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d))
   (i : natlt BW.warp_size) : slprop
 = (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
      array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
-  ** when__ (i < 16) (fun _ -> shS_row_live shS i)
+  ** when__ (i < 16) (fun _ -> row_subtile shS i)
 
 ghost
 fn barrier2_transform
@@ -837,20 +1008,18 @@ fn barrier2_transform
   forevery_map #(natlt 16)
     (fun (tid:natlt 16) ->
        array2_subtile shS 1 16 tid 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 tid 0))
-    (fun (tid:natlt 16) -> shS_row_live shS tid)
-    fn tid {
-      mextract_row (array2_subtile shS 1 16 tid 0) 0;
-    };
-  forevery_natlt_extend BW.warp_size (shS_row_live shS);
+    (fun (tid:natlt 16) -> row_subtile shS tid)
+    fn tid { () };
+  forevery_natlt_extend BW.warp_size (row_subtile shS);
   forevery_unrefine_pred' #(natlt BW.warp_size)
     (fun (i:natlt BW.warp_size) -> i < 16)
-    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> shS_row_live shS i);
+    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> row_subtile shS i);
 
   forevery_zip
     (fun (i:natlt BW.warp_size) ->
        exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
          array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
-    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> shS_row_live shS i));
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shS i));
 }
 
 let barrier2_proof
