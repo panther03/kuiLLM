@@ -736,10 +736,18 @@ fn barrier1_transform
        exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s);
 }
 
+(* The K/V ownership transform as a first-class [stt_ghost] value, to hand to
+   [warp_barrier_wait].  [d]/[shK]/[shV] are IMPLICIT so this is passed as the
+   bare name [barrier1_proof]: Pulse then recovers the implicits by unifying
+   against the barrier's expected [p]/[q] and passes it as a value.  Written as
+   an explicit ghost application ([barrier1_proof d shK shV]) it would instead be
+   sequenced as a ghost step in the single-lane caller, demanding the whole-warp
+   [forall+ i. b1_pre i] there (which no single lane holds). *)
 let barrier1_proof
-  (#et:Type0) (d:szp)
+  (#et:Type0) (#d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
-  (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (#shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (#shV : array2 et (l2_row_major 16 (SZ.v d)))
   : stt_ghost unit emp_inames
       (requires forall+ (i:natlt BW.warp_size). b1_pre d shK shV i)
       (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b1_post d shK shV i)
@@ -751,13 +759,10 @@ fn sdpa_flash_barrier1
   (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
   (lane : szlt warp_size)
   (shK shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (bproof : stt_ghost unit emp_inames
-      (requires forall+ (i:natlt BW.warp_size). b1_pre d shK shV i)
-      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b1_post d shK shV i))
   preserves thread_id BW.warp_size (SZ.v lane)
   requires b1_pre d shK shV (SZ.v lane % BW.warp_size)
   ensures  b1_post d shK shV (SZ.v lane % BW.warp_size)
 {
   BW.warp_barrier_wait () (b1_pre d shK shV) (b1_post d shK shV)
-    bproof #(BW.warp_size) #(SZ.v lane);
+    barrier1_proof #(BW.warp_size) #(SZ.v lane);
 }
