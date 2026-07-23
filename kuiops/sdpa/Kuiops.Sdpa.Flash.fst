@@ -576,3 +576,65 @@ fn sdpa_flash_kv_load
   };
   ()
 }
+
+(* ────────────────────────────────────────────────────────────────────────
+   sdpa_flash_scale  --  online-softmax rescale of the output tile
+   (etc/tc_flash_attn_fa1.cu, lines 190-191).
+
+   The CUDA loop [for idx = lane; idx < BM*HD; idx += WARP] does the in-place
+   row-broadcast multiply [Osh[idx] *= cw[idx / HD]] over the [bm x hd] output
+   tile.  The per-lane ownership of the [O] tile is exactly the strided one of
+   [sdpa_flash_kv_load], so we reuse the same [bm*hd <-> R x warp_size] reshape:
+   lane owns column [lane] ([kv_col]) with read+write permission.
+
+   The correction weights [cw] form a length-[bm] row vector; every lane reads
+   the whole vector (each cell [i = idx/hd] it touches), so it is passed with a
+   divided read-only fraction over the entire array -- no need to split it into
+   per-lane cells since it is read exclusively.  Memory safety only. *)
+fn sdpa_flash_scale
+  (#et : Type0) {| scalar et |}
+  (bm hd r : szp)
+  (lane : szlt warp_size)
+  (#_ : squash (SZ.v bm * SZ.v hd == SZ.v r * SZ.v warp_size))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v hd)))
+  (#lcw : layout1 (SZ.v bm))
+  {| ctlayout lcw |}
+  (shO : array2 et (l2_row_major bm hd))
+  (shcw : array1 et lcw)
+  (#fcw : perm)
+  (#ecw : chest1 et (SZ.v bm))
+  (#eOc0 : chest2 et (SZ.v r / 1) (SZ.v warp_size / SZ.v warp_size))
+  requires
+    (shcw |-> Frac fcw ecw) **
+    (kv_col bm hd r () shO lane |-> Frac 1.0R eOc0)
+  ensures
+    (shcw |-> Frac fcw ecw) **
+    (exists* eOc. kv_col bm hd r () shO lane |-> Frac 1.0R eOc)
+{
+  let cstrO = c_stride_subtile_layout
+    (tlayout_bij (kv_bij bm hd r ()) (l2_row_major bm hd)) #(kv_ctl bm hd r () ())
+    1 (SZ.v warp_size) 0 (SZ.v lane);
+
+  let mut a : sz = 0sz;
+  while (!a <^ r)
+    invariant
+      live a **
+      (shcw |-> Frac fcw ecw) **
+      (exists* eOc. kv_col bm hd r () shO lane |-> Frac 1.0R eOc) **
+      pure (SZ.v !a <= SZ.v r)
+    decreases (r - !a)
+  {
+    let va0 = !a;
+    let va : szlt r = va0;
+    FStar.Math.Lemmas.lemma_mult_le_right (SZ.v warp_size) (SZ.v va) (SZ.v r - 1);
+    let p : szlt (bm *^ hd) = warp_size *^ va +^ lane;
+    div_lt_lem (SZ.v p) (SZ.v bm) (SZ.v hd);
+    let i : szlt bm = p /^ hd;
+
+    let cwv = tensor_read shcw (cidx1 i);
+    let ov  = tensor_read #_ #_ #_ #_ #cstrO (kv_col bm hd r () shO lane) (cidx2 va 0sz);
+    tensor_write #_ #_ #_ #_ #cstrO (kv_col bm hd r () shO lane) (cidx2 va 0sz) (ov `mul` cwv);
+    a := !a +^ 1sz;
+  };
+  ()
+}
