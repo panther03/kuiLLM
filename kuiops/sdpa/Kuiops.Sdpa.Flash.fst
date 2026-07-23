@@ -1145,3 +1145,81 @@ fn sdpa_flash_barrier2
   BW.warp_barrier_wait () (b2_pre d shK shS) (b2_post d shK shS)
     barrier2_proof #(BW.warp_size) #(SZ.v lane);
 }
+
+(* ── Barrier 3 (CUDA line 188): softmax_upd -> scale ───────────────────────────
+   The three arrays the softmax lanes exclusively owned per-row (shS, shP) or
+   per-cell (shcw) are returned to the collective whole-tile [1/warp] fraction so
+   the following [scale] (and next-iteration [qk_mm]) can read them. *)
+unfold let b3_pre (#et:Type0) (#lcw:layout1 16)
+  (shS shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  (i : natlt BW.warp_size) : slprop
+= when__ (i < 16) (fun _ -> row_subtile shS i)
+  ** when__ (i < 16) (fun _ -> row_subtile shP i)
+  ** when__ (i < 16) (fun _ -> cell_full shcw i)
+
+unfold let b3_post (#et:Type0) (#lcw:layout1 16)
+  (shS shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  (i : natlt BW.warp_size) : slprop
+= (exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+
+ghost
+fn barrier3_transform
+  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (shS shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i
+  ensures  forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i
+{
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shS i))
+    (fun (i:natlt BW.warp_size) ->
+       when__ (i < 16) (fun _ -> row_subtile shP i)
+       ** when__ (i < 16) (fun _ -> cell_full shcw i));
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shP i))
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> cell_full shcw i));
+
+  lower_32to16 (row_subtile shS);
+  rows16_to_whole32 shS;
+  lower_32to16 (row_subtile shP);
+  rows16_to_whole32 shP;
+  lower_32to16 (cell_full shcw);
+  cells16_to_whole32 shcw;
+
+  forevery_zip
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
+  forevery_zip
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) ->
+       (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+       ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
+}
+
+let barrier3_proof
+  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (#shS : array2 et (l2_row_major 16 16))
+  (#shP : array2 et (l2_row_major 16 16))
+  (#shcw : array1 et lcw)
+  : stt_ghost unit emp_inames
+      (requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i)
+  = barrier3_transform shS shP shcw
+
+inline_for_extraction noextract
+fn sdpa_flash_barrier3
+  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (lane : szlt warp_size)
+  (shS shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires b3_pre shS shP shcw (SZ.v lane % BW.warp_size)
+  ensures  b3_post shS shP shcw (SZ.v lane % BW.warp_size)
+{
+  BW.warp_barrier_wait () (b3_pre shS shP shcw) (b3_post shS shP shcw)
+    barrier3_proof #(BW.warp_size) #(SZ.v lane);
+}
