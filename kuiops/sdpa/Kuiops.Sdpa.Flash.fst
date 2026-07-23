@@ -957,6 +957,35 @@ unfold let row_subtile (#et:Type0)
   (shA : array2 et (l2_row_major 16 16)) (i : natlt 16) : slprop
 = exists* (r : chest2 et 1 16). array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
 
+(* Lift the 16 active row-subtiles to a full 32-lane [forall+] (inactive = emp)
+   and the reverse.  Shared by b2 (forward), b3/b5 (reverse). *)
+ghost
+fn lift_rows_16to32 (#et:Type0)
+  (shA : array2 et (l2_row_major 16 16))
+  requires forall+ (i:natlt 16). row_subtile shA i
+  ensures  forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> row_subtile shA i)
+{
+  forevery_natlt_extend BW.warp_size (row_subtile shA);
+  forevery_unrefine_pred' #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) -> i < 16)
+    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> row_subtile shA i);
+}
+
+ghost
+fn lower_rows_32to16 (#et:Type0)
+  (shA : array2 et (l2_row_major 16 16))
+  requires forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> row_subtile shA i)
+  ensures  forall+ (i:natlt 16). row_subtile shA i
+{
+  forevery_refine_split (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shA i))
+    (fun (i:natlt BW.warp_size) -> i < 16);
+  drop_ (forall+ (i:natlt BW.warp_size { ~(i < 16) }). when__ (i < 16) (fun _ -> row_subtile shA i));
+  forevery_ext #(i:natlt BW.warp_size { i < 16 })
+    (fun (i:natlt BW.warp_size { i < 16 }) -> when__ (i < 16) (fun _ -> row_subtile shA i))
+    (fun (i:natlt BW.warp_size { i < 16 }) -> row_subtile shA i);
+  forevery_natlt_restrict BW.warp_size (row_subtile shA);
+}
+
 unfold let b2_pre (#et:Type0) (d:szp)
   (shK : array2 et (l2_row_major 16 (SZ.v d)))
   (shS : array2 et (l2_row_major 16 16))
@@ -1010,10 +1039,7 @@ fn barrier2_transform
        array2_subtile shS 1 16 tid 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 tid 0))
     (fun (tid:natlt 16) -> row_subtile shS tid)
     fn tid { () };
-  forevery_natlt_extend BW.warp_size (row_subtile shS);
-  forevery_unrefine_pred' #(natlt BW.warp_size)
-    (fun (i:natlt BW.warp_size) -> i < 16)
-    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> row_subtile shS i);
+  lift_rows_16to32 shS;
 
   forevery_zip
     (fun (i:natlt BW.warp_size) ->
