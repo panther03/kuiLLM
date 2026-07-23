@@ -1079,35 +1079,35 @@ fn whole32_to_cells16 (#et:Type0) (#lcw:layout1 16)
     fn i { () };
 }
 
-unfold let b2_pre (#et:Type0) (d:szp)
-  (shK : array2 et (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et (l2_row_major 16 16))
+unfold let b2_pre (#et_ab #et_acc:Type0) (d:szp)
+  (shK : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
   (i : natlt BW.warp_size) : slprop
-= (exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
-  ** (exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+= (exists* (s:chest2 et_ab (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+  ** (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
 
-unfold let b2_post (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d))
-  (shK : array2 et (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et (l2_row_major 16 16))
+unfold let b2_post (#et_ab #et_acc:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d))
+  (shK : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
   (i : natlt BW.warp_size) : slprop
-= (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+= (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
      array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
   ** when__ (i < 16) (fun _ -> row_subtile shS i)
 
 ghost
 fn barrier2_transform
-  (#et:Type0) (d:szp)
+  (#et_ab #et_acc:Type0) (d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
-  (shK : array2 et (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et (l2_row_major 16 16))
+  (shK : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
   requires forall+ (i:natlt BW.warp_size). b2_pre d shK shS i
   ensures  forall+ (i:natlt BW.warp_size). b2_post d shK shS i
 {
   forevery_unzip
     (fun (i:natlt BW.warp_size) ->
-       exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+       exists* (s:chest2 et_ab (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
     (fun (i:natlt BW.warp_size) ->
-       exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e);
+       exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e);
 
   (* shK: shared col-major fraction -> exclusive stride sub-tiles *)
   tensor_gather_n_underspec (row2col shK) BW.warp_size;
@@ -1121,16 +1121,16 @@ fn barrier2_transform
 
   forevery_zip
     (fun (i:natlt BW.warp_size) ->
-       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+       exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
          array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
     (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shS i));
 }
 
 let barrier2_proof
-  (#et:Type0) (#d:szp)
+  (#et_ab #et_acc:Type0) (#d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
-  (#shK : array2 et (l2_row_major 16 (SZ.v d)))
-  (#shS : array2 et (l2_row_major 16 16))
+  (#shK : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (#shS : array2 et_acc (l2_row_major 16 16))
   : stt_ghost unit emp_inames
       (requires forall+ (i:natlt BW.warp_size). b2_pre d shK shS i)
       (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b2_post d shK shS i)
@@ -1138,11 +1138,11 @@ let barrier2_proof
 
 inline_for_extraction noextract
 fn sdpa_flash_barrier2
-  (#et:Type0) (d:szp)
+  (#et_ab #et_acc:Type0) (d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
   (lane : szlt warp_size)
-  (shK : array2 et (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et (l2_row_major 16 16))
+  (shK : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
   preserves thread_id BW.warp_size (SZ.v lane)
   requires b2_pre d shK shS (SZ.v lane % BW.warp_size)
   ensures  b2_post d shK shS (SZ.v lane % BW.warp_size)
@@ -1155,27 +1155,30 @@ fn sdpa_flash_barrier2
    The three arrays the softmax lanes exclusively owned per-row (shS, shP) or
    per-cell (shcw) are returned to the collective whole-tile [1/warp] fraction so
    the following [scale] (and next-iteration [qk_mm]) can read them. *)
-unfold let b3_pre (#et:Type0) (#lcw:layout1 16)
-  (shS shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+unfold let b3_pre (#et_ab #et_acc:Type0) (#lcw:layout1 16)
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   (i : natlt BW.warp_size) : slprop
 = when__ (i < 16) (fun _ -> row_subtile shS i)
   ** when__ (i < 16) (fun _ -> row_subtile shP i)
   ** when__ (i < 16) (fun _ -> cell_full shcw i)
 
-unfold let b3_post (#et:Type0) (#lcw:layout1 16)
-  (shS shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+unfold let b3_post (#et_ab #et_acc:Type0) (#lcw:layout1 16)
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   (i : natlt BW.warp_size) : slprop
-= (exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
-  ** (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-  ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+= (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
 
 ghost
 fn barrier3_transform
-  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
-  (shS shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+  (#et_ab #et_acc:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i
   ensures  forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i
 {
@@ -1196,20 +1199,20 @@ fn barrier3_transform
   cells16_to_whole32 shcw;
 
   forevery_zip
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
   forevery_zip
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
     (fun (i:natlt BW.warp_size) ->
-       (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-       ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
+       (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+       ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
 }
 
 let barrier3_proof
-  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
-  (#shS : array2 et (l2_row_major 16 16))
-  (#shP : array2 et (l2_row_major 16 16))
-  (#shcw : array1 et lcw)
+  (#et_ab #et_acc:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (#shS : array2 et_acc (l2_row_major 16 16))
+  (#shP : array2 et_ab (l2_row_major 16 16))
+  (#shcw : array1 et_acc lcw)
   : stt_ghost unit emp_inames
       (requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i)
       (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i)
@@ -1217,10 +1220,11 @@ let barrier3_proof
 
 inline_for_extraction noextract
 fn sdpa_flash_barrier3
-  (#et:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (#et_ab #et_acc:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
   (lane : szlt warp_size)
-  (shS shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   preserves thread_id BW.warp_size (SZ.v lane)
   requires b3_pre shS shP shcw (SZ.v lane % BW.warp_size)
   ensures  b3_post shS shP shcw (SZ.v lane % BW.warp_size)
@@ -1249,43 +1253,43 @@ fn sdpa_flash_barrier4
    loop-invariant resting forms the next iteration expects: shV to the exclusive
    stride sub-tiles kv_load overwrites, shP to per-row (softmax writes), shcw to
    per-cell (softmax writes).  shK/shS/shO already rest in their invariant form. *)
-unfold let b5_pre (#et:Type0) (d:szp) (#lcw:layout1 16)
-  (shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+unfold let b5_pre (#et_ab #et_acc:Type0) (d:szp) (#lcw:layout1 16)
+  (shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   (i : natlt BW.warp_size) : slprop
-= (exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
-  ** (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-  ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+= (exists* (s:chest2 et_ab 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+  ** (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
 
-unfold let b5_post (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
-  (shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+unfold let b5_post (#et_ab #et_acc:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
+  (shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   (i : natlt BW.warp_size) : slprop
-= (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+= (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
      array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
   ** when__ (i < 16) (fun _ -> row_subtile shP i)
   ** when__ (i < 16) (fun _ -> cell_full shcw i)
 
 ghost
 fn barrier5_transform
-  (#et:Type0) (d:szp)
+  (#et_ab #et_acc:Type0) (d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
-  (shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+  (shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   requires forall+ (i:natlt BW.warp_size). b5_pre d shV shP shcw i
   ensures  forall+ (i:natlt BW.warp_size). b5_post d shV shP shcw i
 {
   forevery_unzip
-    (fun (i:natlt BW.warp_size) -> exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+    (fun (i:natlt BW.warp_size) -> exists* (s:chest2 et_ab 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
     (fun (i:natlt BW.warp_size) ->
-       (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-       ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
+       (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+       ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
   forevery_unzip
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
 
   (* shV: whole 1/warp fraction -> exclusive stride sub-tiles *)
   tensor_gather_n_underspec shV BW.warp_size;
@@ -1304,7 +1308,7 @@ fn barrier5_transform
     (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> cell_full shcw i));
   forevery_zip
     (fun (i:natlt BW.warp_size) ->
-       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+       exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
          array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
     (fun (i:natlt BW.warp_size) ->
        when__ (i < 16) (fun _ -> row_subtile shP i)
@@ -1312,11 +1316,11 @@ fn barrier5_transform
 }
 
 let barrier5_proof
-  (#et:Type0) (#d:szp)
+  (#et_ab #et_acc:Type0) (#d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
-  (#shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (#shP : array2 et (l2_row_major 16 16))
-  (#shcw : array1 et lcw)
+  (#shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (#shP : array2 et_ab (l2_row_major 16 16))
+  (#shcw : array1 et_acc lcw)
   : stt_ghost unit emp_inames
       (requires forall+ (i:natlt BW.warp_size). b5_pre d shV shP shcw i)
       (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b5_post d shV shP shcw i)
@@ -1324,12 +1328,12 @@ let barrier5_proof
 
 inline_for_extraction noextract
 fn sdpa_flash_barrier5
-  (#et:Type0) (d:szp)
+  (#et_ab #et_acc:Type0) (d:szp)
   (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
   (lane : szlt warp_size)
-  (shV : array2 et (l2_row_major 16 (SZ.v d)))
-  (shP : array2 et (l2_row_major 16 16))
-  (shcw : array1 et lcw)
+  (shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
   preserves thread_id BW.warp_size (SZ.v lane)
   requires b5_pre d shV shP shcw (SZ.v lane % BW.warp_size)
   ensures  b5_post d shV shP shcw (SZ.v lane % BW.warp_size)
