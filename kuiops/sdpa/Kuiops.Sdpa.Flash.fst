@@ -957,33 +957,121 @@ unfold let row_subtile (#et:Type0)
   (shA : array2 et (l2_row_major 16 16)) (i : natlt 16) : slprop
 = exists* (r : chest2 et 1 16). array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
 
-(* Lift the 16 active row-subtiles to a full 32-lane [forall+] (inactive = emp)
-   and the reverse.  Shared by b2 (forward), b3/b5 (reverse). *)
+(* Lift 16 active [forall+] entries to a full 32-lane [forall+] (inactive = emp)
+   and the reverse.  Generic over the per-lane payload [p]. *)
 ghost
-fn lift_rows_16to32 (#et:Type0)
-  (shA : array2 et (l2_row_major 16 16))
-  requires forall+ (i:natlt 16). row_subtile shA i
-  ensures  forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> row_subtile shA i)
+fn lift_16to32 (p : natlt 16 -> slprop)
+  requires forall+ (i:natlt 16). p i
+  ensures  forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> p i)
 {
-  forevery_natlt_extend BW.warp_size (row_subtile shA);
+  forevery_natlt_extend BW.warp_size p;
   forevery_unrefine_pred' #(natlt BW.warp_size)
     (fun (i:natlt BW.warp_size) -> i < 16)
-    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> row_subtile shA i);
+    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> p i);
 }
 
 ghost
-fn lower_rows_32to16 (#et:Type0)
+fn lower_32to16 (p : natlt 16 -> slprop)
+  requires forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> p i)
+  ensures  forall+ (i:natlt 16). p i
+{
+  forevery_refine_split (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> p i))
+    (fun (i:natlt BW.warp_size) -> i < 16);
+  drop_ (forall+ (i:natlt BW.warp_size { ~(i < 16) }). when__ (i < 16) (fun _ -> p i));
+  forevery_ext #(i:natlt BW.warp_size { i < 16 })
+    (fun (i:natlt BW.warp_size { i < 16 }) -> when__ (i < 16) (fun _ -> p i))
+    (fun (i:natlt BW.warp_size { i < 16 }) -> p i);
+  forevery_natlt_restrict BW.warp_size p;
+}
+
+
+(* Whole 1/warp fraction (all 32 lanes) <-> 16 exclusive row-subtiles.  Used by
+   b2 (whole->rows, forward), b3/b5 (rows->whole, reverse). *)
+ghost
+fn whole32_to_rows16 (#et:Type0)
   (shA : array2 et (l2_row_major 16 16))
-  requires forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> row_subtile shA i)
+  requires forall+ (i:natlt BW.warp_size). (exists* (e:chest2 et 16 16). shA |-> Frac (1.0R /. BW.warp_size) e)
   ensures  forall+ (i:natlt 16). row_subtile shA i
 {
-  forevery_refine_split (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shA i))
-    (fun (i:natlt BW.warp_size) -> i < 16);
-  drop_ (forall+ (i:natlt BW.warp_size { ~(i < 16) }). when__ (i < 16) (fun _ -> row_subtile shA i));
-  forevery_ext #(i:natlt BW.warp_size { i < 16 })
-    (fun (i:natlt BW.warp_size { i < 16 }) -> when__ (i < 16) (fun _ -> row_subtile shA i))
-    (fun (i:natlt BW.warp_size { i < 16 }) -> row_subtile shA i);
-  forevery_natlt_restrict BW.warp_size (row_subtile shA);
+  tensor_gather_n_underspec shA BW.warp_size;
+  with eS. assert (shA |-> Frac 1.0R eS);
+  array2_tile shA 1 16;
+  forevery_unfactor' 16 16 1
+    (fun (tr:natlt 16) (tc:natlt 1) ->
+       array2_subtile shA 1 16 tr tc |-> Frac 1.0R (ematrix_subtile eS 1 16 tr tc));
+  forevery_ext #(natlt 16)
+    (fun (i:natlt 16) ->
+       array2_subtile shA 1 16 (i / 1) (i % 1) |-> Frac 1.0R (ematrix_subtile eS 1 16 (i / 1) (i % 1)))
+    (fun (i:natlt 16) ->
+       array2_subtile shA 1 16 i 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 i 0));
+  forevery_map #(natlt 16)
+    (fun (tid:natlt 16) ->
+       array2_subtile shA 1 16 tid 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 tid 0))
+    (fun (tid:natlt 16) -> row_subtile shA tid)
+    fn tid { () };
+}
+
+ghost
+fn rows16_to_whole32 (#et:Type0)
+  (shA : array2 et (l2_row_major 16 16))
+  requires forall+ (i:natlt 16). row_subtile shA i
+  ensures  forall+ (i:natlt BW.warp_size). (exists* (e:chest2 et 16 16). shA |-> Frac (1.0R /. BW.warp_size) e)
+{
+  let rf = forevery_exists #(natlt 16)
+    (fun (i:natlt 16) (r:chest2 et 1 16) -> array2_subtile shA 1 16 i 0 |-> Frac 1.0R r);
+  forevery_ext #(natlt 16)
+    (fun (i:natlt 16) -> array2_subtile shA 1 16 i 0 |-> Frac 1.0R (rf i))
+    (fun (i:natlt 16) -> array2_subtile shA 1 16 (i / 1) (i % 1) |-> Frac 1.0R (rf (i / 1)));
+  forevery_factor' 16 16 1
+    (fun (tr:natlt 16) (tc:natlt 1) -> array2_subtile shA 1 16 tr tc |-> Frac 1.0R (rf tr));
+  array2_untile' shA 1 16 (fun (tr:natlt 16) (tc:natlt 1) -> rf tr);
+  tensor_share_n shA BW.warp_size;
+  forevery_map #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) ->
+       shA |-> Frac (1.0R /. BW.warp_size) (ematrix_from_tiles 1 16 (fun (tr:natlt 16) (tc:natlt 1) -> rf tr)))
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shA |-> Frac (1.0R /. BW.warp_size) e)
+    fn i { () };
+}
+
+(* shcw scalar array (length 16): whole 1/warp fraction (all 32) <-> 16 exclusive
+   cells (via [Cell]).  Used by b3 (cells->whole) and b5 (whole->cells). *)
+unfold let cell_full (#et:Type0) (#lcw:layout1 16)
+  (shcw : array1 et lcw) (i : natlt 16) : slprop
+= exists* (v:et). Cell shcw (idx1 i) |-> Frac 1.0R v
+
+ghost
+fn cells16_to_whole32 (#et:Type0) (#lcw:layout1 16)
+  (shcw : array1 et lcw)
+  requires (forall+ (i:natlt 16). cell_full shcw i) ** pure (SZ.fits (tlayout_ulen lcw))
+  ensures  forall+ (i:natlt BW.warp_size). (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+{
+  let vf = forevery_exists #(natlt 16)
+    (fun (i:natlt 16) (v:et) -> Cell shcw (idx1 i) |-> Frac 1.0R v);
+  let s : chest1 et 16 = mk1 vf;
+  forevery_ext #(natlt 16)
+    (fun (i:natlt 16) -> Cell shcw (idx1 i) |-> Frac 1.0R (vf i))
+    (fun (i:natlt 16) -> Cell shcw (idx1 i) |-> Frac 1.0R (acc1 s i));
+  implode1 shcw #1.0R #s;
+  tensor_share_n shcw BW.warp_size;
+  forevery_map #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) -> shcw |-> Frac (1.0R /. BW.warp_size) s)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+    fn i { () };
+}
+
+ghost
+fn whole32_to_cells16 (#et:Type0) (#lcw:layout1 16)
+  (shcw : array1 et lcw)
+  requires forall+ (i:natlt BW.warp_size). (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+  ensures  forall+ (i:natlt 16). cell_full shcw i
+{
+  tensor_gather_n_underspec shcw BW.warp_size;
+  with s. assert (shcw |-> Frac 1.0R s);
+  explode1 shcw #1.0R #s;
+  forevery_map #(natlt 16)
+    (fun (i:natlt 16) -> Cell shcw (idx1 i) |-> Frac 1.0R (acc1 s i))
+    (fun (i:natlt 16) -> cell_full shcw i)
+    fn i { () };
 }
 
 unfold let b2_pre (#et:Type0) (d:szp)
@@ -1023,23 +1111,8 @@ fn barrier2_transform
   warp_split_stride shK;
 
   (* shS: whole-tile 1/warp fraction -> per-row full permission (16 active) + emp *)
-  tensor_gather_n_underspec shS BW.warp_size;
-  with eS. assert (shS |-> Frac 1.0R eS);
-  array2_tile shS 1 16;
-  forevery_unfactor' 16 16 1
-    (fun (tr:natlt 16) (tc:natlt 1) ->
-       array2_subtile shS 1 16 tr tc |-> Frac 1.0R (ematrix_subtile eS 1 16 tr tc));
-  forevery_ext #(natlt 16)
-    (fun (i:natlt 16) ->
-       array2_subtile shS 1 16 (i / 1) (i % 1) |-> Frac 1.0R (ematrix_subtile eS 1 16 (i / 1) (i % 1)))
-    (fun (i:natlt 16) ->
-       array2_subtile shS 1 16 i 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 i 0));
-  forevery_map #(natlt 16)
-    (fun (tid:natlt 16) ->
-       array2_subtile shS 1 16 tid 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 tid 0))
-    (fun (tid:natlt 16) -> row_subtile shS tid)
-    fn tid { () };
-  lift_rows_16to32 shS;
+  whole32_to_rows16 shS;
+  lift_16to32 (row_subtile shS);
 
   forevery_zip
     (fun (i:natlt BW.warp_size) ->
