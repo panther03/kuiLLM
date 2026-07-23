@@ -1238,3 +1238,97 @@ fn sdpa_flash_barrier4
   BW.warp_barrier_wait () warp_emp_pred warp_emp_pred warp_emp_proof
     #(BW.warp_size) #(SZ.v lane);
 }
+
+(* ── Barrier 5 (CUDA line 208): loop edge -> next iteration ────────────────────
+   Restores the three arrays whose form pv_mm/scale left "collective" back to the
+   loop-invariant resting forms the next iteration expects: shV to the exclusive
+   stride sub-tiles kv_load overwrites, shP to per-row (softmax writes), shcw to
+   per-cell (softmax writes).  shK/shS/shO already rest in their invariant form. *)
+unfold let b5_pre (#et:Type0) (d:szp) (#lcw:layout1 16)
+  (shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  (i : natlt BW.warp_size) : slprop
+= (exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+  ** (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+  ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+
+unfold let b5_post (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
+  (shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  (i : natlt BW.warp_size) : slprop
+= (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** when__ (i < 16) (fun _ -> row_subtile shP i)
+  ** when__ (i < 16) (fun _ -> cell_full shcw i)
+
+ghost
+fn barrier5_transform
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
+  (shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  requires forall+ (i:natlt BW.warp_size). b5_pre d shV shP shcw i
+  ensures  forall+ (i:natlt BW.warp_size). b5_post d shV shP shcw i
+{
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) -> exists* (s:chest2 et 16 (SZ.v d)). shV |-> Frac (1.0R /. BW.warp_size) s)
+    (fun (i:natlt BW.warp_size) ->
+       (exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+       ** (exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
+    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
+
+  (* shV: whole 1/warp fraction -> exclusive stride sub-tiles *)
+  tensor_gather_n_underspec shV BW.warp_size;
+  warp_split_stride shV;
+
+  (* shP: whole -> per-row (16 active) + emp *)
+  whole32_to_rows16 shP;
+  lift_16to32 (row_subtile shP);
+
+  (* shcw: whole -> per-cell (16 active) + emp *)
+  whole32_to_cells16 shcw;
+  lift_16to32 (cell_full shcw);
+
+  forevery_zip
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shP i))
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> cell_full shcw i));
+  forevery_zip
+    (fun (i:natlt BW.warp_size) ->
+       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+         array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+    (fun (i:natlt BW.warp_size) ->
+       when__ (i < 16) (fun _ -> row_subtile shP i)
+       ** when__ (i < 16) (fun _ -> cell_full shcw i));
+}
+
+let barrier5_proof
+  (#et:Type0) (#d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
+  (#shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (#shP : array2 et (l2_row_major 16 16))
+  (#shcw : array1 et lcw)
+  : stt_ghost unit emp_inames
+      (requires forall+ (i:natlt BW.warp_size). b5_pre d shV shP shcw i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b5_post d shV shP shcw i)
+  = barrier5_transform d shV shP shcw
+
+inline_for_extraction noextract
+fn sdpa_flash_barrier5
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#lcw:layout1 16)
+  (lane : szlt warp_size)
+  (shV : array2 et (l2_row_major 16 (SZ.v d)))
+  (shP : array2 et (l2_row_major 16 16))
+  (shcw : array1 et lcw)
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires b5_pre d shV shP shcw (SZ.v lane % BW.warp_size)
+  ensures  b5_post d shV shP shcw (SZ.v lane % BW.warp_size)
+{
+  BW.warp_barrier_wait () (b5_pre d shV shP shcw) (b5_post d shV shP shcw)
+    barrier5_proof #(BW.warp_size) #(SZ.v lane);
+}
