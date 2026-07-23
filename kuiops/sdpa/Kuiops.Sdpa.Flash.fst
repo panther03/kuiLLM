@@ -766,3 +766,114 @@ fn sdpa_flash_barrier1
   BW.warp_barrier_wait () (b1_pre d shK shV) (b1_post d shK shV)
     barrier1_proof #(BW.warp_size) #(SZ.v lane);
 }
+
+(* ── barrier 2 : qk_mm -> softmax (CUDA line 148) ─────────────────────────────
+   K is done being read (as [row2col shK], shared col-major fraction), so it goes
+   back to the [warp_size] exclusive stride sub-tiles [kv_load] will overwrite next
+   iteration.  The score tile [shS], produced by qk_mm as a whole-tile [1/warp]
+   fraction over all 32 lanes, is handed to the 16 active [softmax] lanes: each
+   lane [i < 16] receives its row [i] at full permission (plus the [mextract_row]
+   restore wand, framed across softmax and consumed by barrier 3); lanes 16..31
+   receive [emp].  Only shK/shS move; shV, shP, shO, ... are framed in [jt_body]. *)
+
+(* The softmax-input form of one score row [i] (i < 16): the row [mrow] at full
+   permission, plus the [mextract_row] wand restoring the [1 x 16] write-subtile. *)
+unfold let shS_row_live (#et:Type0)
+  (shS : array2 et (l2_row_major 16 16)) (i : natlt 16) : slprop
+= exists* (s : chest2 et 1 16).
+    (mrow (array2_subtile shS 1 16 i 0) 0 |-> Frac 1.0R (tr_val (ematrix_row s 0)))
+    ** (forall* (s':lseq et 16).
+          mrow (array2_subtile shS 1 16 i 0) 0 |-> Frac 1.0R (tr_val s') @==>
+          array2_subtile shS 1 16 i 0 |-> Frac 1.0R (ematrix_upd_row s 0 s'))
+
+unfold let b2_pre (#et:Type0) (d:szp)
+  (shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et (l2_row_major 16 16))
+  (i : natlt BW.warp_size) : slprop
+= (exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+  ** (exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+
+unfold let b2_post (#et:Type0) (d:szp) (#_ : squash (16 /?+ SZ.v d))
+  (shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et (l2_row_major 16 16))
+  (i : natlt BW.warp_size) : slprop
+= (exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** when__ (i < 16) (fun _ -> shS_row_live shS i)
+
+ghost
+fn barrier2_transform
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et (l2_row_major 16 16))
+  requires forall+ (i:natlt BW.warp_size). b2_pre d shK shS i
+  ensures  forall+ (i:natlt BW.warp_size). b2_post d shK shS i
+{
+  forevery_unzip
+    (fun (i:natlt BW.warp_size) ->
+       exists* (s:chest2 et (SZ.v d) 16). row2col shK |-> Frac (1.0R /. BW.warp_size) s)
+    (fun (i:natlt BW.warp_size) ->
+       exists* (e:chest2 et 16 16). shS |-> Frac (1.0R /. BW.warp_size) e);
+
+  (* shK: shared col-major fraction -> exclusive stride sub-tiles *)
+  tensor_gather_n_underspec (row2col shK) BW.warp_size;
+  with sKc. assert (row2col shK |-> Frac 1.0R sKc);
+  ghost_transpose1_back shK;
+  warp_split_stride shK;
+
+  (* shS: whole-tile 1/warp fraction -> per-row full permission (16 active) + emp *)
+  tensor_gather_n_underspec shS BW.warp_size;
+  with eS. assert (shS |-> Frac 1.0R eS);
+  array2_tile shS 1 16;
+  forevery_unfactor' 16 16 1
+    (fun (tr:natlt 16) (tc:natlt 1) ->
+       array2_subtile shS 1 16 tr tc |-> Frac 1.0R (ematrix_subtile eS 1 16 tr tc));
+  forevery_ext #(natlt 16)
+    (fun (i:natlt 16) ->
+       array2_subtile shS 1 16 (i / 1) (i % 1) |-> Frac 1.0R (ematrix_subtile eS 1 16 (i / 1) (i % 1)))
+    (fun (i:natlt 16) ->
+       array2_subtile shS 1 16 i 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 i 0));
+  forevery_map #(natlt 16)
+    (fun (tid:natlt 16) ->
+       array2_subtile shS 1 16 tid 0 |-> Frac 1.0R (ematrix_subtile eS 1 16 tid 0))
+    (fun (tid:natlt 16) -> shS_row_live shS tid)
+    fn tid {
+      mextract_row (array2_subtile shS 1 16 tid 0) 0;
+    };
+  forevery_natlt_extend BW.warp_size (shS_row_live shS);
+  forevery_unrefine_pred' #(natlt BW.warp_size)
+    (fun (i:natlt BW.warp_size) -> i < 16)
+    (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> shS_row_live shS i);
+
+  forevery_zip
+    (fun (i:natlt BW.warp_size) ->
+       exists* (r:chest2 et (16 / warp_row_span) (SZ.v d / 16)).
+         array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> shS_row_live shS i));
+}
+
+let barrier2_proof
+  (#et:Type0) (#d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (#shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (#shS : array2 et (l2_row_major 16 16))
+  : stt_ghost unit emp_inames
+      (requires forall+ (i:natlt BW.warp_size). b2_pre d shK shS i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b2_post d shK shS i)
+  = barrier2_transform d shK shS
+
+inline_for_extraction noextract
+fn sdpa_flash_barrier2
+  (#et:Type0) (d:szp)
+  (#_ : squash (16 /?+ SZ.v d)) (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (lane : szlt warp_size)
+  (shK : array2 et (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et (l2_row_major 16 16))
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires b2_pre d shK shS (SZ.v lane % BW.warp_size)
+  ensures  b2_post d shK shS (SZ.v lane % BW.warp_size)
+{
+  BW.warp_barrier_wait () (b2_pre d shK shS) (b2_post d shK shS)
+    barrier2_proof #(BW.warp_size) #(SZ.v lane);
+}
