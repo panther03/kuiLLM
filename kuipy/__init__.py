@@ -12,7 +12,7 @@ Public surface:
   * ``batch_capture()`` — warm-up context that extracts every matched kernel and
     builds them in one combined compilation.
   * ``verify`` (``kuipy.verify``) — numerical check vs stock PyTorch.
-  * ``tracing`` (``kuipy.inductor.tracing``) — op inventory + KERNELS.md dump.
+  * ``tracing`` (``kuipy.inductor.tracing``) — graph + op inventory Markdown dump.
   * ``is_available()`` — whether the Kuiper JIT toolchain is reachable.
 """
 from . import config as C

@@ -107,6 +107,28 @@ def test_tracer_records_inventory(tmp_path):
     assert "aten::mm" in text and "yes" in text
 
 
+def test_tracer_records_dependency_graph(tmp_path):
+    def fn(a, b):
+        return torch.sin(torch.mm(a, b))
+
+    graph = _fake_graph(fn, torch.randn(8, 8), torch.randn(8, 8))
+    tracing.reset()
+    tracing.set_enabled(True)
+    try:
+        passes.KuiperPostGradPass(replace=False)(graph)
+    finally:
+        tracing.set_enabled(False)
+
+    out = tmp_path / "K.md"
+    tracing.dump_markdown(str(out))
+    text = out.read_text()
+    assert "## Kernel dependency graph" in text
+    assert "```mermaid" in text
+    assert "aten::mm" in text and "aten::sin" in text
+    assert " --> " in text
+    assert "classDef kuiper" in text and "classDef fallback" in text
+
+
 def test_custom_fusion_rule_runs():
     calls = []
 

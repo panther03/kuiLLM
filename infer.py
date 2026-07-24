@@ -17,8 +17,8 @@ Flags of note:
   * ``--batch N``       inference batch size.
   * ``--nsys``          bracket only the measured decode in the CUDA profiler API
                         (for ``nsys --capture-range=cudaProfilerApi``).
-  * ``--dump-kernels``  trace every op the compiled graph runs and (re)write
-                        ``KERNELS.md``.
+  * ``--dump-kernels``  trace the compiled graph and (re)write ``KERNELS.md``
+                        with a dependency visualization and operator inventory.
 """
 
 import argparse
@@ -173,7 +173,8 @@ def main():
     ap.add_argument("--nsys", action="store_true",
                     help="bracket only the measured decode in the CUDA profiler API.")
     ap.add_argument("--dump-kernels", nargs="?", const="KERNELS.md", default=None,
-                    help="trace ops the compiled graph runs and write a KERNELS.md table.")
+                    help="trace the compiled graph and write a Mermaid visualization "
+                         "and operator table to KERNELS.md.")
     args = ap.parse_args()
 
     use_kuiper = not args.no_kuiper

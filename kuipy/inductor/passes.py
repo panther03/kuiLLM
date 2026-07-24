@@ -57,14 +57,16 @@ class KuiperPostGradPass(CustomGraphPass):
             for rule in _fusion_rules:
                 changed = bool(rule(graph)) or changed
 
+        graph_trace = tracing.begin_graph(graph)
         for node in list(graph.nodes):
             claimed = custom_ops.claim(node)
-            tracing.record_node(node, claimed is not None)
+            tracing.record_node(node, claimed is not None, graph_trace)
             if not self.replace or claimed is None:
                 continue
             new_target, new_args = claimed
             _replace(graph, node, new_target, new_args)
             changed = True
+        tracing.finish_graph(graph_trace)
 
         if changed:
             graph.lint()

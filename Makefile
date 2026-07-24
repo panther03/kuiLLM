@@ -25,7 +25,7 @@ infer-no-kuiper:
 verify:
 	python3 infer.py --verify
 
-# Trace the ops the compiled graph runs and (re)write KERNELS.md.
+# Trace the compiled graph and write its visualization and inventory to KERNELS.md.
 dump-kernels:
 	python3 infer.py --dump-kernels KERNELS.md
 
