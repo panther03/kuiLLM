@@ -8,7 +8,7 @@ open Kuiper
 open Kuiper.Tensor.Layout.Alg { l1_forward }
 open Kuiper.Float.Casts
 open Kuiper.Kernel.Map
-open Kuiops.Elementwise
+open Kuiops.ElementwiseOps
 
 {% if kind == "map" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =

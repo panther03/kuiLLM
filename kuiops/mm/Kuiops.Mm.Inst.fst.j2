@@ -6,6 +6,9 @@ module {{ module }}
 
 open Kuiper
 
+// TODO: just use TensorCore2D.To with comb2_to. Even though it's not allowed by the separation logic, pass C matrix as C and D aliased. It is fine in the actual implementation.
+// Blocktiling2D as fallback (logic for that is in the python) for unsupported dtypes.
+
 {% if impl == "tc2d"%} 
 open Klas.GEMM.TensorCore2D.Inst
 // bind (rows cols shared) and forward in the spec's native (rows shared cols)
@@ -13,7 +16,6 @@ open Klas.GEMM.TensorCore2D.Inst
 let {{name}} (rows cols shared: szp) = spec {{ in_et }} {{ out_et }} {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz rows shared cols
 {% elif impl == "bt2d" and in_et == out_et %}
 open Klas.GEMM.BlockTiling2D.Inst
-// LATER: our own specialized version of bt2d that we don't need to pass alpha, beta to (not used here)
 let {{name}} (rows cols shared: szp) = spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ in_et }} one zero #rows #cols #shared
 {% else %}
 UNSUPPORTED MM IMPL

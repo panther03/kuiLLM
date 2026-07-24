@@ -5,8 +5,5 @@ module {{ module }}
 // Generated from kuiops/addmm/Kuiops.Addmm.Inst.fst.j2
 
 open Kuiper
-open Klas.GEMM.BlockTiling2D.Inst
 
-// gC := beta * gC + alpha * (gA @ gB); caller preloads gC with the bias.
-let {{ name }} (rows shared cols: szp) (alpha beta: {{ et }}) =
-  spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ et }} alpha beta #rows #shared #cols
+// TODO: just use TensorCore2D.To with lincomb_to. Blocktiling2D as fallback (logic for that is in the python) for unsupported dtypes.
