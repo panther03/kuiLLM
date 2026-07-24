@@ -21,6 +21,7 @@ module Kuiops.Sdpa.Flash
 open Kuiper
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout
+open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
 open Kuiper.Array2.Strided
@@ -173,6 +174,8 @@ fn restore_cell1
   elim_forall si';
   Trade.elim_trade _ _;
 }
+
+let szlt_coerce (#n:int) (i:sz{SZ.v i < n}) : szlt n = i
 
 let ref_of_array_cell
   (#et : Type0) (#len : nat) (#l : layout1 len)
@@ -1340,4 +1343,398 @@ fn sdpa_flash_barrier5
 {
   BW.warp_barrier_wait () (b5_pre d shV shP shcw) (b5_post d shV shP shcw)
     barrier5_proof #(BW.warp_size) #(SZ.v lane);
+}
+
+(* ── single-lane when__ intro/elim (from Kuiper.Sparse.SPMM) ──────────────────
+   [jt_body] holds one lane's slice of each barrier's [forall+]; inside the
+   [if lane < 16] guard it must unwrap / rewrap the [when__ (i<16)] payloads. *)
+ghost
+fn when__elim_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
+  requires when__ b q
+  ensures q ()
+{ rewrite when__ b q as q (); }
+
+ghost
+fn when__elim_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
+  requires when__ b q
+  ensures emp
+{ rewrite when__ b q as emp; }
+
+ghost
+fn when__intro_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
+  requires q ()
+  ensures when__ b q
+{ rewrite q () as when__ b q; }
+
+ghost
+fn when__intro_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
+  requires emp
+  ensures when__ b q
+{ rewrite emp as when__ b q; }
+
+(* ── sdpa_flash_jt_body : one key-tile iteration (CUDA lines 128-210) ──────────
+   The body of the [for jt] loop, executed by a single lane.  It chains the five
+   leaf functions with the five warp-barrier separators:
+
+     kv_load ; barrier1 ; qk_mm ; barrier2 ; (if lane<16 softmax_upd) ;
+     barrier3 ; scale ; barrier4 ; pv_mm ; barrier5
+
+   Because this is a loop body its pre- and post-condition are the same resting
+   invariant [jt_rest] (the state each barrier leaves for the next iteration).
+   HD is packed to D here (hd = d): the K/V/Q/O tiles are all [16 x d].
+
+   Element types match the CUDA exactly: scores/max/sum/corr/O/PVc are [et_acc]
+   (f32-like); K/V/Q/P/mask are [et_ab] (bf16-like). *)
+unfold
+let jt_rest
+  (#et_ab #et_acc : Type0)
+  (d sk : szp) (b hq sq : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
+  (#lgmask : layout4 b hq sq sk)
+  (#lcw #lm #ll : layout1 16)
+  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shO : array2 et_acc (l2_row_major 16 (SZ.v d)))
+  (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
+  (shm : array1 et_acc lm)
+  (shl : array1 et_acc ll)
+  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : array4 et_ab lgmask)
+  (#fQ #fKg #fVg #fmask : perm)
+  (#eQ : chest2 et_ab 16 (SZ.v d))
+  (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (i : natlt BW.warp_size) : slprop
+= (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+  ** when__ (i < 16) (fun _ -> row_subtile shP i)
+  ** when__ (i < 16) (fun _ -> cell_full shcw i)
+  ** when__ (i < 16) (fun _ -> cell_full shm i)
+  ** when__ (i < 16) (fun _ -> cell_full shl i)
+  ** (exists* (e:chest2 et_acc lane_row_span (SZ.v d / 16)).
+     array2_stride_subtile shO warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R e)
+  ** (shQ |-> Frac fQ eQ)
+  ** (exists* (e:chest2 et_acc 16 16). shPVc |-> Frac (1.0R /. BW.warp_size) e)
+  ** (gK |-> Frac fKg eKg) ** (gV |-> Frac fVg eVg) ** (gmask |-> Frac fmask emask)
+
+(* Re-index a whole strided [(warp_row_span, 16)] sub-tile from lane residue [i]
+   to [j] when [i == j] (they always are: a lane's [SZ.v lane % warp_size] equals
+   [SZ.v lane]).  Bridges the barrier convention (residue [SZ.v lane % warp_size])
+   to the leaf convention (residue [SZ.v lane]); it moves no ownership. *)
+ghost
+fn stride_reindex
+  (#et:Type0) (#cols:nat) (#l:layout2 16 cols)
+  (#_ : squash (warp_row_span /?+ 16))
+  (#_ : squash (16 /?+ cols))
+  (shX : array2 et l)
+  (i j : natlt BW.warp_size)
+  requires
+    pure (i == j) **
+    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
+       array2_stride_subtile shX warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ensures
+    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
+       array2_stride_subtile shX warp_row_span 16 (j / 16) (j % 16) |-> Frac 1.0R r)
+{
+  with r. assert (array2_stride_subtile shX warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r);
+  rewrite (array2_stride_subtile shX warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+       as (array2_stride_subtile shX warp_row_span 16 (j / 16) (j % 16) |-> Frac 1.0R r);
+}
+
+(* Re-index a [when__ (i<16)] row / cell payload from lane residue [i] to [j]
+   when [i == j].  Same purpose as [stride_reindex] for the [when__]-guarded
+   softmax rows/cells that the barriers state at [SZ.v lane % warp_size]. *)
+ghost
+fn row_reindex (#et:Type0) (shA : array2 et (l2_row_major 16 16)) (i j : natlt BW.warp_size)
+  requires pure (i == j) ** when__ (i < 16) (fun _ -> row_subtile shA i)
+  ensures  when__ (j < 16) (fun _ -> row_subtile shA j)
+{
+  rewrite (when__ (i < 16) (fun _ -> row_subtile shA i))
+       as (when__ (j < 16) (fun _ -> row_subtile shA j));
+}
+
+ghost
+fn cell_reindex (#et:Type0) (#l:layout1 16) (shA : array1 et l) (i j : natlt BW.warp_size)
+  requires pure (i == j) ** when__ (i < 16) (fun _ -> cell_full shA i)
+  ensures  when__ (j < 16) (fun _ -> cell_full shA j)
+{
+  rewrite (when__ (i < 16) (fun _ -> cell_full shA i))
+       as (when__ (j < 16) (fun _ -> cell_full shA j));
+}
+
+(* Online-softmax update for a single active lane [lane16 < 16].  Factored into
+   its own function so the [mrow]/ref plumbing (and its local [let]-bound refs)
+   stay behind a clean spec: the [jt] body can call it inside [if lane < 16]
+   without the branch leaking existentials that would block the branch join. *)
+inline_for_extraction noextract
+fn sdpa_flash_softmax_active
+  (#et_ab #et_acc : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  {| FC.float_cast et_acc et_ab |}
+  (b hq sq sk : szp)
+  (#lgmask : layout4 b hq sq sk) {| ctlayout lgmask |}
+  (#lcw #lm #ll : layout1 16) {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
+  (shm : array1 et_acc lm)
+  (shl : array1 et_acc ll)
+  (gmask : array4 et_ab lgmask)
+  (lane16 : szlt 16)
+  (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
+  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (#fmask : perm)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  preserves (gmask |-> Frac fmask emask)
+  requires
+    row_subtile shS (SZ.v lane16) ** row_subtile shP (SZ.v lane16)
+    ** cell_full shcw (SZ.v lane16) ** cell_full shm (SZ.v lane16) ** cell_full shl (SZ.v lane16)
+  ensures
+    row_subtile shS (SZ.v lane16) ** row_subtile shP (SZ.v lane16)
+    ** cell_full shcw (SZ.v lane16) ** cell_full shm (SZ.v lane16) ** cell_full shl (SZ.v lane16)
+{
+  unfold (row_subtile shS (SZ.v lane16));
+  unfold (row_subtile shP (SZ.v lane16));
+  unfold (cell_full shcw (SZ.v lane16));
+  unfold (cell_full shm (SZ.v lane16));
+  unfold (cell_full shl (SZ.v lane16));
+
+  with rS. assert (array2_subtile shS 1 16 (SZ.v lane16) 0 |-> Frac 1.0R rS);
+  mextract_row (array2_subtile shS 1 16 (SZ.v lane16) 0) 0;
+  with rP. assert (array2_subtile shP 1 16 (SZ.v lane16) 0 |-> Frac 1.0R rP);
+  mextract_row (array2_subtile shP 1 16 (SZ.v lane16) 0) 0;
+
+  array1_cell_to_ref shm (SZ.v lane16);
+  let rm = get_ref_of_array_cell shm lane16;
+  array1_cell_to_ref shl (SZ.v lane16);
+  let rl = get_ref_of_array_cell shl lane16;
+  array1_cell_to_ref shcw (SZ.v lane16);
+  let rcw = get_ref_of_array_cell shcw lane16;
+
+  with vmr0. assert (ref_of_array_cell shm (SZ.v lane16) |-> Frac 1.0R vmr0);
+  rewrite (ref_of_array_cell shm (SZ.v lane16) |-> Frac 1.0R vmr0) as (rm |-> Frac 1.0R vmr0);
+  with vlr0. assert (ref_of_array_cell shl (SZ.v lane16) |-> Frac 1.0R vlr0);
+  rewrite (ref_of_array_cell shl (SZ.v lane16) |-> Frac 1.0R vlr0) as (rl |-> Frac 1.0R vlr0);
+  with vcr0. assert (ref_of_array_cell shcw (SZ.v lane16) |-> Frac 1.0R vcr0);
+  rewrite (ref_of_array_cell shcw (SZ.v lane16) |-> Frac 1.0R vcr0) as (rcw |-> Frac 1.0R vcr0);
+
+  sdpa_flash_softmax_upd 16sz b hq sq sk
+    #_ #_ #_
+    #(ctlayout_slice (subtile_layout (l2_row_major 16 16) 1 16 (SZ.v lane16) 0) #(c_subtile_layout (l2_row_major 16 16) #(c_l2_row_major 16 16sz) 1 16 (SZ.v lane16) 0) 0 0)
+    #(ctlayout_slice (subtile_layout (l2_row_major 16 16) 1 16 (SZ.v lane16) 0) #(c_subtile_layout (l2_row_major 16 16) #(c_l2_row_major 16 16sz) 1 16 (SZ.v lane16) 0) 0 0)
+    #solve
+    (mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0)
+    (mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0)
+    gmask rm rl rcw bi qh qpos k0 cbound row_active causal scale;
+
+  with vSr. assert ((mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0
+                     <: array1 et_acc (mrow_layout (array2_subtile shS 1 16 (SZ.v lane16) 0) 0))
+                    |-> Frac 1.0R vSr);
+  rewrite ((mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_acc (mrow_layout (array2_subtile shS 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R vSr)
+       as ((mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_acc (mrow_layout (array2_subtile shS 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R (tr_val (chest1_to_seq vSr)));
+  elim_forall (chest1_to_seq vSr);
+  Trade.elim_trade ((mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_acc (mrow_layout (array2_subtile shS 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R (tr_val (chest1_to_seq vSr))) _;
+
+  with vPr. assert ((mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0
+                     <: array1 et_ab (mrow_layout (array2_subtile shP 1 16 (SZ.v lane16) 0) 0))
+                    |-> Frac 1.0R vPr);
+  rewrite ((mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_ab (mrow_layout (array2_subtile shP 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R vPr)
+       as ((mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_ab (mrow_layout (array2_subtile shP 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R (tr_val (chest1_to_seq vPr)));
+  elim_forall (chest1_to_seq vPr);
+  Trade.elim_trade ((mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0
+            <: array1 et_ab (mrow_layout (array2_subtile shP 1 16 (SZ.v lane16) 0) 0)) |-> Frac 1.0R (tr_val (chest1_to_seq vPr))) _;
+
+  with vmr. assert (rm |-> Frac 1.0R vmr);
+  rewrite (rm |-> Frac 1.0R vmr) as (ref_of_array_cell shm (SZ.v lane16) |-> Frac 1.0R vmr);
+  array1_cell_from_ref shm (SZ.v lane16);
+  with vlr. assert (rl |-> Frac 1.0R vlr);
+  rewrite (rl |-> Frac 1.0R vlr) as (ref_of_array_cell shl (SZ.v lane16) |-> Frac 1.0R vlr);
+  array1_cell_from_ref shl (SZ.v lane16);
+  with vcr. assert (rcw |-> Frac 1.0R vcr);
+  rewrite (rcw |-> Frac 1.0R vcr) as (ref_of_array_cell shcw (SZ.v lane16) |-> Frac 1.0R vcr);
+  array1_cell_from_ref shcw (SZ.v lane16);
+
+  fold (row_subtile shS (SZ.v lane16));
+  fold (row_subtile shP (SZ.v lane16));
+  fold (cell_full shcw (SZ.v lane16));
+  fold (cell_full shm (SZ.v lane16));
+  fold (cell_full shl (SZ.v lane16));
+}
+
+(* Guarded wrapper: run the online-softmax update on the [< 16] active lanes and
+   no-op on the rest.  It owns the branch: with an *explicit* pre==post the two
+   arms are each checked against a fixed (non-dependent) [when__] frame, avoiding
+   the fragile automatic join that mixes the near-identical [when__] payloads. *)
+inline_for_extraction noextract
+fn sdpa_flash_softmax_maybe
+  (#et_ab #et_acc : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  {| FC.float_cast et_acc et_ab |}
+  (b hq sq sk : szp)
+  (#lgmask : layout4 b hq sq sk) {| ctlayout lgmask |}
+  (#lcw #lm #ll : layout1 16) {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
+  (shm : array1 et_acc lm)
+  (shl : array1 et_acc ll)
+  (gmask : array4 et_ab lgmask)
+  (lane : szlt warp_size)
+  (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
+  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (#fmask : perm)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  preserves (gmask |-> Frac fmask emask)
+  requires
+    when__ (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane))
+  ensures
+    when__ (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane))
+{
+  let active = lane <^ 16sz;
+  if active {
+    when__elim_true (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
+    when__elim_true (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
+    when__elim_true (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
+    when__elim_true (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
+    when__elim_true (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+
+    sdpa_flash_softmax_active b hq sq sk shS shP shcw shm shl gmask
+      (szlt_coerce lane) bi qh qpos k0 cbound row_active causal scale;
+
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+  } else {
+    assert pure ((SZ.v lane < 16) == false);
+    when__elim_false (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
+    when__elim_false (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
+    when__elim_false (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
+    when__elim_false (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
+    when__elim_false (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+  }
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_jt_body
+  (#et_ab #et_acc : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  {| FC.float_cast et_acc et_ab |}
+  (d sk : szp) (b hq sq : szp)
+  (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
+  (#lgmask : layout4 b hq sq sk)
+  (#lcw #lm #ll : layout1 16)
+  (#_ : squash (16 /?+ SZ.v d))
+  (#_ : squash (warp_row_span /?+ 16))
+  (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (#_ : squash (SZ.fits (tlayout_ulen lcw)))
+  (#_ : squash (valid_frag_et_comb et_ab et_acc))
+  (#_ : squash (valid_frag_et_dims et_ab FragA 16 16 16))
+  (#_ : squash (valid_frag_et_dims et_ab FragB 16 16 16))
+  (#_ : squash (valid_frag_et_dims et_acc FragAcc 16 16 16))
+  {| ctlayout lgK |} {| ctlayout lgV |} {| ctlayout lgmask |}
+  {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
+  (lane : szlt warp_size)
+  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shS : array2 et_acc (l2_row_major 16 16))
+  (shP : array2 et_ab (l2_row_major 16 16))
+  (shO : array2 et_acc (l2_row_major 16 (SZ.v d)))
+  (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shcw : array1 et_acc lcw)
+  (shm : array1 et_acc lm)
+  (shl : array1 et_acc ll)
+  (gK : array2 et_ab lgK { Kuiper.Tensor.is_global gK })
+  (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
+  (gmask : array4 et_ab lgmask)
+  (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
+  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (#fQ #fKg #fVg #fmask : perm)
+  (#eQ : chest2 et_ab 16 (SZ.v d))
+  (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  preserves thread_id BW.warp_size (SZ.v lane)
+  requires
+    jt_rest #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask (SZ.v lane)
+  ensures
+    jt_rest #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask (SZ.v lane)
+{
+  assert pure (SZ.v lane % BW.warp_size == SZ.v lane);
+
+  (* K/V shared load (leaf uses residue [SZ.v lane]); then bridge to the barrier
+     residue and run barrier 1 (K/V -> readable). *)
+  sdpa_flash_kv_load 16sz d sk lane k0 gK gV shK shV;
+  stride_reindex shK (SZ.v lane) (SZ.v lane % BW.warp_size);
+  stride_reindex shV (SZ.v lane) (SZ.v lane % BW.warp_size);
+  sdpa_flash_barrier1 d lane shK shV;
+
+  (* Q@K^T score matmul, then barrier 2 (K -> stride sub-tiles, S -> rows). *)
+  sdpa_flash_qk_mm d d shQ (row2col shK) shS;
+  sdpa_flash_barrier2 d lane shK shS;
+
+  (* Bridge barrier-2 outputs (K stride, S row) back to the leaf residue. *)
+  stride_reindex shK (SZ.v lane % BW.warp_size) (SZ.v lane);
+  row_reindex shS (SZ.v lane % BW.warp_size) (SZ.v lane);
+
+  (* Online-softmax update on the 16 active lanes (guarded wrapper owns the if). *)
+  sdpa_flash_softmax_maybe b hq sq sk shS shP shcw shm shl gmask
+    lane bi qh qpos k0 cbound row_active causal scale;
+
+  (* Bridge S/P rows + cw cell to the barrier residue, run barrier 3
+     (rows/cells -> whole tiles). *)
+  row_reindex shS (SZ.v lane) (SZ.v lane % BW.warp_size);
+  row_reindex shP (SZ.v lane) (SZ.v lane % BW.warp_size);
+  cell_reindex shcw (SZ.v lane) (SZ.v lane % BW.warp_size);
+  sdpa_flash_barrier3 lane shS shP shcw;
+
+  (* Rescale, barrier 4, P@V (all use residue [SZ.v lane]). *)
+  sdpa_flash_scale d lane shO shcw;
+  sdpa_flash_barrier4 lane;
+  sdpa_flash_pv_mm d d lane shP shV shPVc shO;
+
+  (* Barrier 5, then bridge its outputs (V stride, P row, cw cell) back to the
+     resting residue [SZ.v lane]. *)
+  sdpa_flash_barrier5 d lane shV shP shcw;
+  stride_reindex shV (SZ.v lane % BW.warp_size) (SZ.v lane);
+  row_reindex shP (SZ.v lane % BW.warp_size) (SZ.v lane);
+  cell_reindex shcw (SZ.v lane % BW.warp_size) (SZ.v lane);
 }
