@@ -1738,3 +1738,762 @@ fn sdpa_flash_jt_body
   row_reindex shP (SZ.v lane % BW.warp_size) (SZ.v lane);
   cell_reindex shcw (SZ.v lane % BW.warp_size) (SZ.v lane);
 }
+
+(* Ownership of the row-major cells visited by
+   [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
+let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
+  ij:(natlt rows & natlt cols) {
+    (ij._1 * cols + ij._2) % nthr == tid}
+
+unfold
+let strided_cells2
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (shA : array2 et l) (nthr : pos) (tid : natlt nthr) : slprop
+= forall+ (ij : stride_index2 rows cols nthr tid).
+    exists* (v : et). tensor_pts_to_cell shA (idx2 ij._1 ij._2) v
+
+unfold
+let cell_full_n
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (shA : array1 et l) (i : natlt len) : slprop
+= exists* (v : et). tensor_pts_to_cell shA (idx1 i) v
+
+inline_for_extraction noextract
+let lane_active (bm : szp) (lane : szlt warp_size) : bool =
+  lane <^ bm
+
+let ml_cells
+  (#et : Type0) (bm : szp)
+  (#lm #ll : layout1 bm)
+  (shm : array1 et lm) (shl : array1 et ll)
+  (lane : szlt warp_size) : slprop
+= cell_full_n shm (SZ.v (clamp_lt bm lane)) **
+  cell_full_n shl (SZ.v (clamp_lt bm lane))
+
+inline_for_extraction noextract
+let optional_inc (b : bool) (x : sz { SZ.fits (SZ.v x + 1) }) : sz =
+  if b then x +^ 1sz else 0sz
+
+let sz_of_szp (x : szp) : sz = x
+
+inline_for_extraction noextract
+fn sdpa_flash_ml_init_active
+  (#et #et_q : Type0) {| scalar et |} {| floating et |}
+  (bm : szp)
+  (b hq sq d : szp)
+  (#lq : layout4 b hq sq d)
+  (#lm #ll : layout1 bm) {| ctlayout lm |} {| ctlayout ll |}
+  (shm : array1 et lm) (shl : array1 et ll)
+  (gQ : array4 et_q lq)
+  (lane : szlt bm)
+  (#fQ : perm) (#eQ : chest (b @| hq @| sq @| d @| INil) et_q)
+  preserves (gQ |-> Frac fQ eQ)
+  requires cell_full_n shm (SZ.v lane) ** cell_full_n shl (SZ.v lane)
+  ensures  cell_full_n shm (SZ.v lane) ** cell_full_n shl (SZ.v lane)
+{
+  unfold (cell_full_n shm (SZ.v lane));
+  unfold (cell_full_n shl (SZ.v lane));
+  with vm. assert (tensor_pts_to_cell shm (idx1 (SZ.v lane)) vm);
+  rewrite (tensor_pts_to_cell shm (idx1 (SZ.v lane)) vm)
+       as (tensor_pts_to_cell shm (up (cidx1 lane)) vm);
+  tensor_write_cell shm (cidx1 lane) (neg infinity);
+  with vl. assert (tensor_pts_to_cell shl (idx1 (SZ.v lane)) vl);
+  rewrite (tensor_pts_to_cell shl (idx1 (SZ.v lane)) vl)
+       as (tensor_pts_to_cell shl (up (cidx1 lane)) vl);
+  tensor_write_cell shl (cidx1 lane) zero;
+  fold (cell_full_n shm (SZ.v lane));
+  fold (cell_full_n shl (SZ.v lane));
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_ml_init_maybe
+  (#et #et_q : Type0) {| scalar et |} {| floating et |}
+  (bm : szp)
+  (b hq sq d : szp)
+  (#lq : layout4 b hq sq d)
+  (#lm #ll : layout1 bm) {| ctlayout lm |} {| ctlayout ll |}
+  (shm : array1 et lm) (shl : array1 et ll)
+  (gQ : array4 et_q lq)
+  (lane : szlt warp_size)
+  (#fQ : perm) (#eQ : chest (b @| hq @| sq @| d @| INil) et_q)
+  preserves (gQ |-> Frac fQ eQ)
+  requires if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+  ensures  if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+{
+  let active = lane_active bm lane;
+  if active {
+    if_elim_true _;
+    unfold (ml_cells bm shm shl lane);
+    sdpa_flash_ml_init_active bm b hq sq d shm shl gQ (clamp_lt bm lane);
+    fold (ml_cells bm shm shl lane);
+    if_intro_true (ml_cells bm shm shl lane);
+  } else {
+    if_elim_false (ml_cells bm shm shl lane);
+    if_intro_false (ml_cells bm shm shl lane);
+  }
+}
+
+(* Block-strided Q cache load and per-warp M/L/O initialization
+   (tc_flash_attn_fa1.cu, lines 104-114). *)
+inline_for_extraction noextract
+fn sdpa_flash_q_load
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab |}
+  {| scalar et_acc |} {| floating et_acc |}
+  (bm d nthr : szp)
+  (b hq sq : szp)
+  (#lgQ : layout4 b hq sq d) {| ctlayout lgQ |}
+  (#lm #ll : layout1 bm) {| ctlayout lm |} {| ctlayout ll |}
+  (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
+  (shQ : array2 et_ab (l2_row_major bm d))
+  (shm : array1 et_acc lm) (shl : array1 et_acc ll)
+  (shO : array2 et_acc (l2_row_major bm d))
+  (tid : szlt nthr) (lane : szlt warp_size)
+  (bi : szlt b) (r0 : sz) (rows : szp) (group : szp) (kvh : sz)
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d + SZ.v nthr)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d + BW.warp_size)))
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
+  (#fQ : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  requires
+    (gQ |-> Frac fQ eQ) **
+    strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+    strided_cells2 shO BW.warp_size (SZ.v lane) **
+    if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+  ensures
+    (gQ |-> Frac fQ eQ) **
+    strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+    strided_cells2 shO BW.warp_size (SZ.v lane) **
+    if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+{
+  let ncells : sz = bm *^ d;
+  let mut idx : sz = tid;
+  let mut iter : sz = 0sz;
+  while (!idx <^ ncells)
+    invariant
+      live idx ** live iter **
+      (gQ |-> Frac fQ eQ) **
+      strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+      strided_cells2 shO BW.warp_size (SZ.v lane) **
+      if_ (lane_active bm lane) (ml_cells bm shm shl lane) **
+      pure (SZ.v !idx % SZ.v nthr == SZ.v tid) **
+      pure (SZ.v !idx < SZ.v bm * SZ.v d + SZ.v nthr) **
+      pure (SZ.v !iter <= SZ.v !idx)
+    decreases (SZ.v ncells - SZ.v !iter)
+  {
+    let flat = !idx;
+    let i : szlt bm = flat /^ d;
+    let dd : szlt d = flat %^ d;
+    let r = r0 +^ i;
+    let rr : szlt rows = clamp_lt rows r;
+    let qh0 = kvh *^ group +^ (rr /^ sq);
+    let qh1 : szlt hq = clamp_lt hq qh0;
+    let qpos : szlt sq = rr %^ sq;
+    let qread = tensor_read gQ (cidx4 bi qh1 qpos dd);
+    let qv : et_ab = if (r <^ rows) { qread } else { zero #et_ab #_ };
+    FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
+    unfold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
+    let ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid) =
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_extract'
+      #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) ij _;
+    with oldq. assert (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) oldq);
+    rewrite (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) oldq)
+         as (tensor_pts_to_cell shQ (up (cidx2 i dd)) oldq);
+    tensor_write_cell shQ (cidx2 i dd) qv;
+    with newq. assert (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq);
+    rewrite (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq)
+         as (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) newq);
+    elim_forall
+      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) ->
+        exists* x. tensor_pts_to_cell shQ (idx2 ij._1 ij._2) x);
+    Trade.elim_trade _ _;
+    fold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 (SZ.v nthr);
+    let next = !idx +^ nthr;
+    assert pure (SZ.v !idx < SZ.v next);
+    idx := next;
+    iter := !iter +^ 1sz;
+  };
+
+  sdpa_flash_ml_init_maybe bm b hq sq d shm shl gQ lane;
+
+  idx := lane;
+  iter := 0sz;
+  while (!idx <^ ncells)
+    invariant
+      live idx ** live iter **
+      (gQ |-> Frac fQ eQ) **
+      strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+      strided_cells2 shO BW.warp_size (SZ.v lane) **
+      if_ (lane_active bm lane) (ml_cells bm shm shl lane) **
+      pure (SZ.v !idx % BW.warp_size == SZ.v lane) **
+      pure (SZ.v !idx < SZ.v bm * SZ.v d + BW.warp_size) **
+      pure (SZ.v !iter <= SZ.v !idx)
+    decreases (SZ.v ncells - SZ.v !iter)
+  {
+    let flat = !idx;
+    let i : szlt bm = flat /^ d;
+    let dd : szlt d = flat %^ d;
+    FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
+    unfold strided_cells2 shO BW.warp_size (SZ.v lane);
+    let ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane) =
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    assert pure (ij._1 == SZ.v i);
+    assert pure (ij._2 == SZ.v dd);
+    forevery_extract'
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ij _;
+    with oldo. assert (tensor_pts_to_cell shO (idx2 ij._1 ij._2) oldo);
+    rewrite (tensor_pts_to_cell shO (idx2 ij._1 ij._2) oldo)
+         as (tensor_pts_to_cell shO (up (cidx2 i dd)) oldo);
+    tensor_write_cell shO (cidx2 i dd) (zero #et_acc #_);
+    with newo. assert (tensor_pts_to_cell shO (up (cidx2 i dd)) newo);
+    rewrite (tensor_pts_to_cell shO (up (cidx2 i dd)) newo)
+         as (tensor_pts_to_cell shO (idx2 ij._1 ij._2) newo);
+    elim_forall
+      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ->
+        exists* x. tensor_pts_to_cell shO (idx2 ij._1 ij._2) x);
+    Trade.elim_trade _ _;
+    fold strided_cells2 shO BW.warp_size (SZ.v lane);
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 BW.warp_size;
+    let next = !idx +^ 32sz;
+    assert pure (SZ.v !idx < SZ.v next);
+    idx := next;
+    iter := !iter +^ 1sz;
+  };
+  ()
+}
+
+(* Causal early-exit bound (tc_flash_attn_fa1.cu, lines 118-127).  The CUDA
+   initializes [maxpos] to -1; [found] keeps that case representable with [sz]:
+   no valid row leaves [kmax = sk - sq], while a valid maximum contributes the
+   additional [maxpos + 1]. *)
+inline_for_extraction noextract
+fn sdpa_flash_causal_active
+  (bm sk sq rows : szp)
+  (r0 : sz)
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  returns kmax : sz
+  ensures pure (SZ.v kmax <= SZ.v sk)
+{
+  let mut maxpos : sz = 0sz;
+  let mut found : bool = false;
+  let mut i : sz = 0sz;
+  while (!i <^ bm)
+    invariant
+      live i ** live maxpos ** live found **
+      pure (SZ.v !i <= SZ.v bm) **
+      pure (SZ.v !maxpos < SZ.v sq)
+    decreases (bm - !i)
+  {
+    let vi = !i;
+    let r = r0 +^ vi;
+    let valid = r <^ rows;
+    let pos : szlt sq = r %^ sq;
+    let take = valid && ((not !found) || (pos >^ !maxpos));
+    let nextmax : sz = if take { (pos <: sz) } else { !maxpos };
+    maxpos := nextmax;
+    found := !found || valid;
+    i := !i +^ 1sz;
+  };
+  let base = sk -^ sq;
+  let extra = optional_inc !found !maxpos;
+  SZ.smin sk (base +^ extra)
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_causal_mask
+  (bm bn sk sq rows : szp)
+  (r0 : sz) (causal : bool)
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  returns nkt : sz
+  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1)
+{
+  let kmax : sz =
+    if causal { sdpa_flash_causal_active bm sk sq rows r0 } else { sz_of_szp sk };
+  let r = SZ.sdivup kmax bn;
+  SZ.lem_sdivup kmax bn;
+  r
+}
+
+let combine_active (bm : szp) (w : sz) (lane : szlt warp_size) : bool =
+  (w = 0sz) && (lane <^ bm)
+
+let combine_cells
+  (#et : Type0) (nw bm : szp)
+  (#lgm #lgl : layout1 bm)
+  (shscale : array2 et (l2_row_major nw bm))
+  (shgm : array1 et lgm) (shgl : array1 et lgl)
+  (lane : szlt warp_size) : slprop
+= (exists* (e : chest2 et (SZ.v nw) 1).
+     tensor_pts_to
+       (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v (clamp_lt bm lane))) e)
+  ** cell_full_n shgm (SZ.v (clamp_lt bm lane))
+  ** cell_full_n shgl (SZ.v (clamp_lt bm lane))
+
+inline_for_extraction noextract
+fn sdpa_flash_combine_partials_active
+  (#et : Type0) {| scalar et |} {| floating et |}
+  (nw bm : szp)
+  (#lgm #lgl : layout1 bm) {| ctlayout lgm |} {| ctlayout lgl |}
+  (shM shL shscale : array2 et (l2_row_major nw bm))
+  (shgm : array1 et lgm) (shgl : array1 et lgl)
+  (lane : szlt bm)
+  (#fM #fL : perm)
+  (#eM #eL : chest2 et (SZ.v nw) (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  preserves
+    (shM |-> Frac fM eM) ** (shL |-> Frac fL eL)
+  requires
+    (exists* (e : chest2 et (SZ.v nw) 1).
+       tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e)
+    ** cell_full_n shgm (SZ.v lane)
+    ** cell_full_n shgl (SZ.v lane)
+  ensures
+    (exists* (e : chest2 et (SZ.v nw) 1).
+       tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e)
+    ** cell_full_n shgm (SZ.v lane)
+    ** cell_full_n shgl (SZ.v lane)
+{
+  let mut gm : et = neg infinity;
+  let mut ww : sz = 0sz;
+  while (!ww <^ nw)
+    invariant
+      live gm ** live ww **
+      (shM |-> Frac fM eM) ** (shL |-> Frac fL eL) **
+      (exists* (e : chest2 et (SZ.v nw) 1).
+         tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e) **
+      cell_full_n shgm (SZ.v lane) **
+      cell_full_n shgl (SZ.v lane) **
+      pure (SZ.v !ww <= SZ.v nw)
+    decreases (nw - !ww)
+  {
+    let vww = !ww;
+    let iw : szlt nw = vww;
+    let mv = tensor_read shM (cidx2 iw lane);
+    gm := fmax !gm mv;
+    ww := !ww +^ 1sz;
+  };
+
+  let mut gl : et = zero;
+  ww := 0sz;
+  while (!ww <^ nw)
+    invariant
+      live gm ** live gl ** live ww **
+      (shM |-> Frac fM eM) ** (shL |-> Frac fL eL) **
+      (exists* (e : chest2 et (SZ.v nw) 1).
+         tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e) **
+      cell_full_n shgm (SZ.v lane) **
+      cell_full_n shgl (SZ.v lane) **
+      pure (SZ.v !ww <= SZ.v nw)
+    decreases (nw - !ww)
+  {
+    let vww = !ww;
+    let iw : szlt nw = vww;
+    let mv = tensor_read shM (cidx2 iw lane);
+    let lv = tensor_read shL (cidx2 iw lane);
+    let sc = fexp (mv `sub` !gm);
+    (* TODO(line 223): clamp [sc] to zero when not finite once Kuiper has an
+       extractable [isfinite].  The current [kind] test is ghost-only. *)
+    let cscale = c_stride_subtile_layout
+      (l2_row_major nw bm) 1 (SZ.v bm) 0 (SZ.v lane);
+    tensor_write #_ #_ #_ #_ #cscale
+      (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane))
+      (cidx2 iw 0sz) sc;
+    gl := !gl `add` (sc `mul` lv);
+    ww := !ww +^ 1sz;
+  };
+
+  unfold (cell_full_n shgm (SZ.v lane));
+  with oldgm. assert (tensor_pts_to_cell shgm (idx1 (SZ.v lane)) oldgm);
+  rewrite (tensor_pts_to_cell shgm (idx1 (SZ.v lane)) oldgm)
+       as (tensor_pts_to_cell shgm (up (cidx1 lane)) oldgm);
+  tensor_write_cell shgm (cidx1 lane) !gm;
+  fold (cell_full_n shgm (SZ.v lane));
+
+  unfold (cell_full_n shgl (SZ.v lane));
+  with oldgl. assert (tensor_pts_to_cell shgl (idx1 (SZ.v lane)) oldgl);
+  rewrite (tensor_pts_to_cell shgl (idx1 (SZ.v lane)) oldgl)
+       as (tensor_pts_to_cell shgl (up (cidx1 lane)) oldgl);
+  tensor_write_cell shgl (cidx1 lane) !gl;
+  fold (cell_full_n shgl (SZ.v lane));
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_combine_partials
+  (#et : Type0) {| scalar et |} {| floating et |}
+  (nw bm : szp)
+  (#lgm #lgl : layout1 bm) {| ctlayout lgm |} {| ctlayout lgl |}
+  (shM shL shscale : array2 et (l2_row_major nw bm))
+  (shgm : array1 et lgm) (shgl : array1 et lgl)
+  (w : szlt nw) (lane : szlt warp_size)
+  (#fM #fL : perm)
+  (#eM #eL : chest2 et (SZ.v nw) (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  preserves
+    (shM |-> Frac fM eM) ** (shL |-> Frac fL eL)
+  requires
+    if_ (combine_active bm w lane)
+      (combine_cells nw bm shscale shgm shgl lane)
+  ensures
+    if_ (combine_active bm w lane)
+      (combine_cells nw bm shscale shgm shgl lane)
+{
+  let active = combine_active bm w lane;
+  if active {
+    if_elim_true (combine_cells nw bm shscale shgm shgl lane);
+    unfold (combine_cells nw bm shscale shgm shgl lane);
+    sdpa_flash_combine_partials_active nw bm shM shL shscale shgm shgl
+      (clamp_lt bm lane);
+    fold (combine_cells nw bm shscale shgm shgl lane);
+    if_intro_true (combine_cells nw bm shscale shgm shgl lane);
+  } else {
+    if_elim_false (combine_cells nw bm shscale shgm shgl lane);
+    if_intro_false (combine_cells nw bm shscale shgm shgl lane);
+  }
+}
+
+let clamp_nat_lt (n : pos) (x : nat) : natlt n =
+  if x < n then x else 0
+
+let out_qh
+  (hq sq : pos) (kvh : nat) (group : pos) (r : nat) : natlt hq
+= clamp_nat_lt hq (kvh * group + r / sq)
+
+let out_qpos (sq : pos) (r : nat) : natlt sq =
+  r % sq
+
+let out_cell
+  (#et : Type0) (b hq sq d : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et lout)
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r : nat) (dd : natlt (SZ.v d)) : slprop
+= exists* (v : et).
+    tensor_pts_to_cell gout
+      (idx4 bi
+        (out_qh (SZ.v hq) (SZ.v sq) kvh group r)
+        (out_qpos (SZ.v sq) r)
+        dd)
+      v
+
+let out_store_cells
+  (#et : Type0) (b hq sq bm d rows : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et lout)
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r0 : sz) (lane : szlt warp_size) : slprop
+= forall+ (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)).
+    when__ (SZ.v r0 + ij._1 < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout bi kvh group (SZ.v r0 + ij._1) ij._2)
+
+inline_for_extraction noextract
+fn sdpa_flash_o_store_cell_active
+  (#et_acc #et_ab : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw bm d rows b hq sq : szp)
+  (#lscale : layout2 nw bm) (#lgl : layout1 bm)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lscale |} {| ctlayout lgl |} {| ctlayout lout |}
+  (shscale : array2 et_acc lscale)
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * SZ.v bm) d))
+  (shgl : array1 et_acc lgl)
+  (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
+  (bi : szlt b) (kvh : sz) (group : szp)
+  (i : szlt bm) (dd : szlt d) (r : szlt rows)
+  (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
+  (#fscale #fO #fgl : perm)
+  (#escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (#eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (#egl : chest1 et_acc (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm * SZ.v d)))
+  preserves
+    (shscale |-> Frac fscale escale) **
+    (shO |-> Frac fO eO) **
+    (shgl |-> Frac fgl egl)
+  requires
+    out_cell b hq sq d gout (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd)
+  ensures
+    out_cell b hq sq d gout (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd)
+{
+  let mut acc : et_acc = zero;
+  let mut ww : sz = 0sz;
+  while (!ww <^ nw)
+    invariant
+      live acc ** live ww **
+      (shscale |-> Frac fscale escale) **
+      (shO |-> Frac fO eO) **
+      (shgl |-> Frac fgl egl) **
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd) **
+      pure (SZ.v !ww <= SZ.v nw)
+    decreases (nw - !ww)
+  {
+    let vww = !ww;
+    let iw : szlt nw = vww;
+    tile_idx_lem (SZ.v bm) (SZ.v iw) (SZ.v i) (SZ.v nw * SZ.v bm);
+    let orow : szlt (SZ.v nw * SZ.v bm) = bm *^ iw +^ i;
+    let sv = tensor_read shscale (cidx2 iw i);
+    let ov = tensor_read shO (cidx2 orow dd);
+    acc := !acc `add` (sv `mul` ov);
+    ww := !ww +^ 1sz;
+  };
+  let lv = tensor_read shgl (cidx1 i);
+  let inv : et_acc =
+    if (lv `gt` (zero #et_acc #_)) {
+      (one #et_acc #_) `div` lv
+    } else {
+      zero #et_acc #_
+    };
+  let qh0 = kvh *^ group +^ (r /^ sq);
+  let qh1 : szlt hq = clamp_lt hq qh0;
+  let qpos : szlt sq = r %^ sq;
+  assert pure (
+    SZ.v qh1 ==
+      out_qh (SZ.v hq) (SZ.v sq) (SZ.v kvh) (SZ.v group) (SZ.v r));
+  assert pure (SZ.v qpos == out_qpos (SZ.v sq) (SZ.v r));
+  unfold (out_cell b hq sq d gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd));
+  with old. assert (
+    tensor_pts_to_cell gout
+      (idx4 (SZ.v bi)
+        (out_qh (SZ.v hq) (SZ.v sq) (SZ.v kvh) (SZ.v group) (SZ.v r))
+        (out_qpos (SZ.v sq) (SZ.v r))
+        (SZ.v dd))
+      old);
+  rewrite
+    (tensor_pts_to_cell gout
+      (idx4 (SZ.v bi)
+        (out_qh (SZ.v hq) (SZ.v sq) (SZ.v kvh) (SZ.v group) (SZ.v r))
+        (out_qpos (SZ.v sq) (SZ.v r))
+        (SZ.v dd))
+      old)
+  as (tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) old);
+  tensor_write_cell gout (cidx4 bi qh1 qpos dd) (FC.fcast (!acc `mul` inv));
+  with newv. assert (
+    tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) newv);
+  rewrite
+    (tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) newv)
+  as
+    (tensor_pts_to_cell gout
+      (idx4 (SZ.v bi)
+        (out_qh (SZ.v hq) (SZ.v sq) (SZ.v kvh) (SZ.v group) (SZ.v r))
+        (out_qpos (SZ.v sq) (SZ.v r))
+        (SZ.v dd))
+      newv);
+  fold (out_cell b hq sq d gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd));
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_o_store_cell_maybe
+  (#et_acc #et_ab : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw bm d rows b hq sq : szp)
+  (#lscale : layout2 nw bm) (#lgl : layout1 bm)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lscale |} {| ctlayout lgl |} {| ctlayout lout |}
+  (shscale : array2 et_acc lscale)
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * SZ.v bm) d))
+  (shgl : array1 et_acc lgl)
+  (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
+  (bi : szlt b) (kvh : sz) (group : szp)
+  (i : szlt bm) (dd : szlt d) (r0 : sz)
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
+  (#fscale #fO #fgl : perm)
+  (#escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (#eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (#egl : chest1 et_acc (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm * SZ.v d)))
+  preserves
+    (shscale |-> Frac fscale escale) **
+    (shO |-> Frac fO eO) **
+    (shgl |-> Frac fgl egl)
+  requires
+    when__ (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd))
+  ensures
+    when__ (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd))
+{
+  let r = r0 +^ i;
+  let valid = r <^ rows;
+  if valid {
+    when__elim_true (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+    let rr : szlt rows = clamp_lt rows r;
+    rewrite
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd))
+    as
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rr) (SZ.v dd));
+    sdpa_flash_o_store_cell_active nw bm d rows b hq sq
+      shscale shO shgl gout bi kvh group i dd rr;
+    rewrite
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rr) (SZ.v dd))
+    as
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+    when__intro_true (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+  } else {
+    assert pure ((SZ.v r0 + SZ.v i < SZ.v rows) == false);
+    when__elim_false (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+    when__intro_false (SZ.v r0 + SZ.v i < SZ.v rows) (fun _ ->
+      out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+  }
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_o_store_active
+  (#et_acc #et_ab : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw bm d rows b hq sq : szp)
+  (#lscale : layout2 nw bm) (#lgl : layout1 bm)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lscale |} {| ctlayout lgl |} {| ctlayout lout |}
+  (shscale : array2 et_acc lscale)
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * SZ.v bm) d))
+  (shgl : array1 et_acc lgl)
+  (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
+  (bi : szlt b) (kvh : sz) (group : szp)
+  (r0 : sz) (lane : szlt warp_size)
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
+  (#fscale #fO #fgl : perm)
+  (#escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (#eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (#egl : chest1 et_acc (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d + BW.warp_size)))
+  preserves
+    (shscale |-> Frac fscale escale) **
+    (shO |-> Frac fO eO) **
+    (shgl |-> Frac fgl egl)
+  requires out_store_cells b hq sq bm d rows gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane
+  ensures  out_store_cells b hq sq bm d rows gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane
+{
+  let ncells : sz = bm *^ d;
+  let mut idx : sz = lane;
+  let mut iter : sz = 0sz;
+  while (!idx <^ ncells)
+    invariant
+      live idx ** live iter **
+      (shscale |-> Frac fscale escale) **
+      (shO |-> Frac fO eO) **
+      (shgl |-> Frac fgl egl) **
+      out_store_cells b hq sq bm d rows gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane **
+      pure (SZ.v !idx % BW.warp_size == SZ.v lane) **
+      pure (SZ.v !idx < SZ.v bm * SZ.v d + BW.warp_size) **
+      pure (SZ.v !iter <= SZ.v !idx)
+    decreases (SZ.v ncells - SZ.v !iter)
+  {
+    let flat = !idx;
+    let i : szlt bm = flat /^ d;
+    let dd : szlt d = flat %^ d;
+    FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
+    unfold (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+    forevery_extract'
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+    sdpa_flash_o_store_cell_maybe nw bm d rows b hq sq
+      shscale shO shgl gout bi kvh group i dd r0;
+    elim_forall
+      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ->
+        when__ (SZ.v r0 + ij._1 < SZ.v rows) (fun _ ->
+          out_cell b hq sq d gout
+            (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
+    Trade.elim_trade _ _;
+    fold (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 BW.warp_size;
+    let next = !idx +^ 32sz;
+    assert pure (SZ.v !idx < SZ.v next);
+    idx := next;
+    iter := !iter +^ 1sz;
+  };
+  ()
+}
+
+inline_for_extraction noextract
+fn sdpa_flash_o_store
+  (#et_acc #et_ab : Type0)
+  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw bm d rows b hq sq : szp)
+  (#lscale : layout2 nw bm) (#lgl : layout1 bm)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lscale |} {| ctlayout lgl |} {| ctlayout lout |}
+  (shscale : array2 et_acc lscale)
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * SZ.v bm) d))
+  (shgl : array1 et_acc lgl)
+  (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
+  (bi : szlt b) (kvh : sz) (group : szp)
+  (r0 : sz) (w : szlt nw) (lane : szlt warp_size)
+  (#_ : squash (SZ.fits (SZ.v r0 + SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
+  (#fscale #fO #fgl : perm)
+  (#escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (#eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (#egl : chest1 et_acc (SZ.v bm))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v bm * SZ.v d + BW.warp_size)))
+  preserves
+    (shscale |-> Frac fscale escale) **
+    (shO |-> Frac fO eO) **
+    (shgl |-> Frac fgl egl)
+  requires if_ (w = 0sz)
+    (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane)
+  ensures  if_ (w = 0sz)
+    (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane)
+{
+  let active = w = 0sz;
+  if active {
+    if_elim_true (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+    sdpa_flash_o_store_active nw bm d rows b hq sq
+      shscale shO shgl gout bi kvh group r0 lane;
+    if_intro_true (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+  } else {
+    if_elim_false (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+    if_intro_false (out_store_cells b hq sq bm d rows gout
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane);
+  }
+}
