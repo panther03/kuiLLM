@@ -1,4 +1,4 @@
-module Kuiops.Elementwise
+module Kuiops.ElementwiseOps
 
 #lang-pulse
 open Kuiper
