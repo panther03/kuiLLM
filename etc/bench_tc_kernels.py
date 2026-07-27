@@ -3,13 +3,11 @@
 TensorCore2D matmul, tc_flash_attn) as drop-in replacements for the stock
 kernels they target in the infer_golden.py trace:
 
-  * matmul -> cuBLAS fp16 tensor-core GEMM (F.linear, bias-free cases only)
+  * matmul -> cuBLAS bf16 tensor-core GEMM (F.linear, bias-free cases only)
   * sdpa   -> cuDNN flash_fprop SDPA (F.scaled_dot_product_attention)
 
-The matmul path dispatches Kuiper's verified TensorCore2D
-f16_f16_128x128x32_16x16x16_4x4 kernel (see tc2d_linear.cu). Since TensorCore2D
-is a plain matmul (no bias) and has no bf16xbf16->bf16 instantiation, the linear
-cases run in fp16 and the bias-carrying qkv_proj projection is skipped.
+The matmul path dispatches Kuiper's verified TensorCore2D.To
+bf16_f32_bf16_128x128x32_16x16x16_2x4 kernel (see tc2d_linear.cu).
 
 For every case it reports the max relative-Frobenius divergence vs the stock
 kernel and the mean per-call latency of each. Shapes are Qwen2.5-0.5B at the
@@ -32,7 +30,7 @@ from torch.utils.cpp_extension import load
 
 DEV = "cuda"
 DT = torch.bfloat16
-LINEAR_DT = torch.float16  # Kuiper TensorCore2D matmul is fp16 (no bf16xbf16->bf16 yet)
+LINEAR_DT = torch.bfloat16
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 # Kuiper headers: prefer the project's installed copy (make install-kuiper-*),
@@ -62,6 +60,7 @@ def build():
         # init); undo the torch defaults that would disable it.
         extra_cuda_cflags=["-U__CUDA_NO_HALF_OPERATORS__",
                            "-U__CUDA_NO_HALF_CONVERSIONS__",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_HALF2_OPERATORS__"],
         verbose=False,
     )
@@ -87,12 +86,12 @@ def time_call(fn, iters=50, warmup=10):
 
 
 def bench_linear(mod):
-    print("=== matmul: C = A @ W^T   vs F.linear (fp16)   "
-          "[Kuiper TensorCore2D, bias-free matmul only] ===")
+    print("=== matmul: C = A @ W^T   vs F.linear (bf16)   "
+          "[Kuiper TensorCore2D.To] ===")
     g = torch.Generator(device=DEV).manual_seed(0)
     # (name, M, K, N) covering every bias-free GEMM in the decode step (batch
-    # 256). qkv_proj is excluded: it needs a bias, and TensorCore2D is a plain
-    # matmul, not a GEMM.
+    # 256). qkv_proj is excluded because its vector bias would require
+    # broadcasting, while TensorCore2D.To expects a full (M, N) C matrix.
     cases = [
         ("o_proj",          BATCH, HID, HID),
         ("gate_proj",       BATCH, HID, INTER),
@@ -214,7 +213,7 @@ def main():
     print("Building etc/ tensor-core kernels...", file=sys.stderr)
     mod = build()
     print(f"device: {torch.cuda.get_device_name(0)}   "
-          f"dtype: matmul fp16 / sdpa bf16   batch: {BATCH}\n")
+          f"dtype: matmul bf16 / sdpa bf16   batch: {BATCH}\n")
     ok = bench_linear(mod)
     print()
     ok &= bench_gemm(mod)
