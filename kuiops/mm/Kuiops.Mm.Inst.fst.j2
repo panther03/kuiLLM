@@ -5,18 +5,29 @@ module {{ module }}
 // Generated from kuiops/mm/Kuiops.Mm.Inst.fst.j2
 
 open Kuiper
+open Kuiops.Gemm
 
-// TODO: just use TensorCore2D.To with comb2_to. Even though it's not allowed by the separation logic, pass C matrix as C and D aliased. It is fine in the actual implementation.
-// Blocktiling2D as fallback (logic for that is in the python) for unsupported dtypes.
+module MS = Kuiper.Spec.GEMM
 
-{% if impl == "tc2d"%} 
-open Klas.GEMM.TensorCore2D.Inst
-// bind (rows cols shared) and forward in the spec's native (rows shared cols)
+{% if impl == "tc2d" %}
+// D = A@B via TensorCore2D.To. C is only read through `comb2_to`, which ignores
+// it, so the wrapper passes the output buffer as both C and D: harmless at run
+// time even though the separation logic sees two distinct tensors.
+// Bind (rows cols shared) and forward in the spec's native (rows shared cols)
 // order so the extracted signature matches the (M, N, K) wrapper (and bt2d).
-let {{name}} (rows cols shared: szp) = spec {{ in_et }} {{ out_et }} {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz rows shared cols
+let {{ name }} (rows cols shared : szp) =
+    tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
+        (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
+        rows shared cols
 {% elif impl == "bt2d" and in_et == out_et %}
-open Klas.GEMM.BlockTiling2D.Inst
-let {{name}} (rows cols shared: szp) = spec {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{ in_et }} one zero #rows #cols #shared
+// Fallback for element types the tensor cores cannot take. BlockTiling2D is
+// batched; an [m, n] row-major buffer *is* a [1, m, n] batched row-major one,
+// so this runs it at batch = 1 over the very same pointers.
+let {{ name }} (rows cols shared : szp) =
+    bt2d_async #({{ in_et }}) (MS.comb2 #({{ in_et }}))
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz
+        1sz rows cols shared
 {% else %}
 UNSUPPORTED MM IMPL
 {% endif %}

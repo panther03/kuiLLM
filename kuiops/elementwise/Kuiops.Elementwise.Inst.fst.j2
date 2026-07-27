@@ -8,21 +8,22 @@ open Kuiper
 open Kuiper.Tensor.Layout.Alg { l1_forward }
 open Kuiper.Float.Casts
 open Kuiper.Kernel.Map
+open Kuiops.Elementwise
 open Kuiops.ElementwiseOps
 
 {% if kind == "map" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
-    map_gpu #({{ et }}) ({{ fun }}) lena #(l1_forward lena)
+    map_async #({{ et }}) ({{ fun }}) lena #(l1_forward lena)
 {% elif kind == "map2" %}
 let {{ name }} (lenab: szp {lenab <= max_blocks * max_threads /\ lenab > 0}) =
-    map_gpu2 #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #_ #(l1_forward lenab) #_
+    map2_async #({{ et }}) ({{ fun }}) lenab #(l1_forward lenab) #_ #(l1_forward lenab) #_
 {% elif kind == "map_nip" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
-    map_gpu_to #({{ et }}) #({{ ot }}) ({{ fun }}) lena
+    map_to_async #({{ et }}) #({{ ot }}) ({{ fun }}) lena
         #(l1_forward lena) #_ #(l1_forward lena) #_
 {% elif kind == "map3" %}
 let {{ name }} (lena: szp {lena <= max_blocks * max_threads /\ lena > 0}) =
-    map_gpu3_to #({{ eta }}) #({{ etb }}) #({{ etc }}) #({{ eto }}) ({{ fun }}) lena
+    map3_to_async #({{ eta }}) #({{ etb }}) #({{ etc }}) #({{ eto }}) ({{ fun }}) lena
         #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_ #(l1_forward lena) #_
 {% else %}
 UNSUPPORTED ELEMENTWISE KIND

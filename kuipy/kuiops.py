@@ -29,6 +29,11 @@ class _Family:
     wrapper_template = None
     tune_key = ""
     tune_params = ()
+    # False for families whose kernel internally launches several GPU kernels and
+    # synchronizes to observe the intermediate results: those cannot take a
+    # caller-supplied stream, so they must not be recorded into a CUDA graph.
+    # They stay callable directly (e.g. from the unit tests).
+    graph_safe = True
 
     def __init__(self, all_tune_params):
         self.tune_params = all_tune_params.get(self.tune_key, self.tune_params)
@@ -395,17 +400,49 @@ def _tc2d_tile(dtype, M, N, K):
     return None
 
 
-class MmImpl(_Family):
+_MAX_BLOCKS = 2097152
+
+
+def _gemm_blocks_ok(batch, M, N, tile):
+    """The (batched) BlockTiling2D grid is batch * (M/bm) * (N/bn) blocks."""
+    return batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
+
+
+class _GemmFamily(_Family):
+    """Shared tile/impl selection for mm and addmm.
+
+    TensorCore2D.To keeps the accumulator type separate from the C/D type, so a
+    bf16 x bf16 product accumulates in f32 and is written back as bf16 -- no
+    output cast is needed. f32 operands have no valid tensor-core fragment type,
+    so they fall back to (the now batched) BlockTiling2D at batch = 1."""
+
+    tune_params = {"impl": "tc2d"}
+
+    def _select(self, dtype, M, N, K):
+        impl = self.tune_params["impl"]
+        if dtype not in (torch.bfloat16, torch.float16):
+            impl = "bt2d"
+        if impl == "tc2d":
+            tile = _tc2d_tile(dtype, M, N, K)
+            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+                return impl, tile, torch.float32
+        else:
+            tile = _bt2d_tile(dtype, M, N, K)
+            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+                return impl, tile, dtype
+        return None
+
+
+class MmImpl(_GemmFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
     tune_key = "MM"
-    tune_params = {"impl": "tc2d"}
 
     def supported(self, func, args, kwargs):
         # supposedly mm supports an alpha parameter, we don't
         if len(args) != 2 or (kwargs.get("alpha", 1) != 1):
             return None
-        A,B = args
+        A, B = args
         if not ((A.is_cuda and B.is_cuda) and
         # technically unecessary as this op does not support broadcast
             (A.dim() == 2 and B.dim() == 2) and
@@ -417,63 +454,49 @@ class MmImpl(_Family):
             return None
         M, K, N = int(M), int(K), int(N)
 
-        impl = self.tune_params["impl"]
-        # tensorcores don't support f32 A, B matrices. fall back to BT2D.
-        if (A.dtype not in (torch.bfloat16, torch.float16)):
-            impl = "bt2d"
-        
-        if impl == "tc2d": 
-            tile_params = _tc2d_tile(A.dtype,M,N,K)
-            in_dtype = A.dtype
-            # bfloat16 out not supported by TC2D
-            out_dtype = torch.float32 if in_dtype == torch.bfloat16 else in_dtype
+        sel = self._select(A.dtype, M, N, K)
+        if sel is None:
+            return None
+        impl, tile_params, acc_dtype = sel
+        return (impl, tile_params, A.dtype, acc_dtype, [A, B])
 
-            if tile_params is not None:
-                return (impl, tile_params, in_dtype, out_dtype, [A, B])
-        elif impl == "bt2d":
-            tile_params = _bt2d_tile(A.dtype, M, N, K)
-            if tile_params is not None:
-                return (impl, tile_params, A.dtype, A.dtype, [A, B])
-
-        return None
-        
     def run(self, spec, args, kwargs):
-        impl, tile_params, in_dtype, out_dtype, call = spec
-        in_dtype_fst = torch_dtype_to_fstar(in_dtype)
-        out_dtype_fst = torch_dtype_to_fstar(out_dtype)
+        impl, tile_params, dtype, acc_dtype, call = spec
+        et = torch_dtype_to_fstar(dtype)
+        acc_et = torch_dtype_to_fstar(acc_dtype)
 
-        tile_params_str = "_".join(f"{k}{v}" for k,v in tile_params.items())
+        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
 
-        module = f"Kuiops.Mm.{impl.title()}.{in_dtype_fst.title()}.{out_dtype_fst.title()}.P_{tile_params_str}"
+        module = f"Kuiops.Mm.{impl.title()}.{et.title()}.{acc_et.title()}.P_{tile_params_str}"
         # keeping it short for this one...
         name = "mm_jit"
         fst_ctx = dict(
             module=module,
             name=name,
-            in_et=in_dtype_fst,
-            out_et=out_dtype_fst,
+            in_et=et,
+            acc_et=acc_et,
+            out_et=et,
             impl=impl,
             **tile_params
         )
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
             name=name,
-            cpp_in_et=torch_dtype_to_ctype(in_dtype),
-            cpp_out_et=torch_dtype_to_ctype(out_dtype),
-            out_scalar=torch_dtype_to_aten_scalar(out_dtype),
+            impl=impl,
+            cpp_in_et=torch_dtype_to_ctype(dtype),
+            cpp_out_et=torch_dtype_to_ctype(dtype),
+            out_scalar=torch_dtype_to_aten_scalar(dtype),
         )
-        res = self._mod(module, fst_ctx, wrapper_ctx).run(*call)
-        # TODO: remove. We should never have a call to a cast operator like this.
-        # Problem is the kuiper kernels don't all support in dtype = out dtype (e.g. bf16 tc2d gemm).
-        if out_dtype != in_dtype:
-            res = res.to(in_dtype)
-        return res
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+
 
 # ---------------------------------------------------------------------------
 # Batched matmul (bmm)
 # ---------------------------------------------------------------------------
 
 class BmmImpl(_Family):
+    """BlockTiling2D is batched, so one launch covers every page."""
+
     fst_template = "bmm/Kuiops.Bmm.Inst.fst.j2"
     wrapper_template = "bmm/wrapper_bmm.cu.j2"
     tune_key = "BMM"
@@ -490,20 +513,21 @@ class BmmImpl(_Family):
         Bn2, K2, N = (int(x) for x in B.shape)
         if Bn != Bn2 or K != K2:
             return None
-        # bmmcomb_gpu_exact: rows*cols <= max_blocks*max_threads, plus the three
-        # batch products must fit in a u32 index.
-        if M * N > _MAX_NUMEL:
-            return None
+        # the three batch products must fit in a u32 index.
         if max(Bn * M * K, Bn * K * N, Bn * M * N) >= 2 ** 32:
             return None
-        return (A.dtype, [A, B])
+        tile_params = _bt2d_tile(A.dtype, M, N, K)
+        if tile_params is None or not _gemm_blocks_ok(Bn, M, N, tile_params):
+            return None
+        return (tile_params, A.dtype, [A, B])
 
     def run(self, spec, args, kwargs):
-        dtype, call = spec
+        tile_params, dtype, call = spec
         et = torch_dtype_to_fstar(dtype)
-        module = f"Kuiops.Bmm.{et.title()}"
+        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
+        module = f"Kuiops.Bmm.{et.title()}.P_{tile_params_str}"
         name = "bmm_jit"
-        fst_ctx = dict(module=module, name=name, et=et)
+        fst_ctx = dict(module=module, name=name, et=et, **tile_params)
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
             name=name,
@@ -512,23 +536,19 @@ class BmmImpl(_Family):
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
 
 
-_MAX_BLOCKS = 2097152
-
 # ---------------------------------------------------------------------------
-# addmm (GEMM with alpha/beta via BlockTiling2D)
+# addmm (GEMM with alpha/beta)
 # ---------------------------------------------------------------------------
 
-class AddmmImpl(_Family):
+class AddmmImpl(_GemmFamily):
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
     tune_key = "ADDMM"
-    tune_params = ()
 
     def supported(self, func, args, kwargs):
         if len(args) != 3:
             return None
         Cin, A, B = args
-        # BlockTiling2D needs scalar + has_vec_cpy: f32, f16, bf16 (no f64).
         if not (A.is_cuda and B.is_cuda and Cin.is_cuda and
                 A.dim() == 2 and B.dim() == 2 and Cin.dim() == 2 and
                 A.dtype == B.dtype == Cin.dtype and
@@ -536,31 +556,38 @@ class AddmmImpl(_Family):
             return None
         M, K = (int(x) for x in A.shape)
         K2, N = (int(x) for x in B.shape)
-        if K != K2 or M * N > _MAX_BLOCKS:
+        if K != K2:
             return None
         if tuple(int(x) for x in Cin.shape) != (M, N):
             return None
-        tile_params = _bt2d_tile(A.dtype, M, N, K)
-        if tile_params is None:
+        sel = self._select(A.dtype, M, N, K)
+        if sel is None:
             return None
+        impl, tile_params, acc_dtype = sel
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
             return None
-        return (tile_params, A.dtype, M, N, [Cin, A, B], float(alpha), float(beta))
+        return (impl, tile_params, A.dtype, acc_dtype, [Cin, A, B],
+                float(alpha), float(beta))
 
     def run(self, spec, args, kwargs):
-        tile_params, dtype, M, N, call, alpha, beta = spec
+        impl, tile_params, dtype, acc_dtype, call, alpha, beta = spec
         Cin, A, B = call
         et = torch_dtype_to_fstar(dtype)
+        acc_et = torch_dtype_to_fstar(acc_dtype)
         tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        module = f"Kuiops.Addmm.{et.title()}.P_{tile_params_str}"
+        module = f"Kuiops.Addmm.{impl.title()}.{et.title()}.{acc_et.title()}.P_{tile_params_str}"
         name = "addmm_jit"
-        fst_ctx = dict(module=module, name=name, et=et, **tile_params)
+        fst_ctx = dict(module=module, name=name, in_et=et, acc_et=acc_et,
+                       out_et=et, impl=impl, **tile_params)
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
             name=name,
-            cpp_et=torch_dtype_to_ctype(dtype),
+            impl=impl,
+            cpp_in_et=torch_dtype_to_ctype(dtype),
+            cpp_out_et=torch_dtype_to_ctype(dtype),
+            cpp_acc_et=torch_dtype_to_ctype(acc_dtype),
         )
         return self._mod(module, fst_ctx, wrapper_ctx).run(Cin, A, B, alpha, beta)
 
@@ -575,6 +602,9 @@ class SoftmaxImpl(_Family):
     wrapper_template = "softmax/wrapper_softmax.cu.j2"
     tune_key = "SOFTMAX"
     tune_params = ()
+    # RowSoftmax is a composite kernel: it launches several GPU kernels and syncs
+    # in between to observe their results, so it cannot be graph-captured.
+    graph_safe = False
 
     def supported(self, func, args, kwargs):
         # aten._softmax.default(self, dim, half_to_float)
@@ -604,6 +634,7 @@ class SoftmaxImpl(_Family):
             module=module.replace(".", "_"),
             name=name,
             cpp_et=torch_dtype_to_ctype(dtype),
+            nth=_MAX_THREADS,
         )
         # TODO: move this stuff to C++ for consistency
         A = X.contiguous().reshape(m, n).clone()
@@ -622,6 +653,8 @@ class SdpaImpl(_Family):
     wrapper_template = "sdpa/wrapper_sdpa.cu.j2"
     tune_key = "SDPA"
     tune_params = ()
+    # Composite (it runs a row softmax internally), so it syncs: not graph-safe.
+    graph_safe = False
 
     def supported(self, func, args, kwargs):
         # _scaled_dot_product_efficient_attention(query, key, value, attn_bias,

@@ -16,7 +16,6 @@
 torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     at::cuda::CUDAGuard g(A.device());
-    kuiops::use_current_stream();
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
 
@@ -30,7 +29,8 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
         reinterpret_cast<{{ cpp_et }}*>(Ac.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Bc.data_ptr()),
         reinterpret_cast<{{ cpp_et }}*>(Out.data_ptr()),
-        (uint32_t)Out.numel());
+        (uint32_t)Out.numel(),
+        kuiops::current_stream());
 
     return Out;
 }

@@ -52,8 +52,9 @@ def test_bmm(dtype):
     _need_cuda()
     impl = kuiops.BmmImpl({})
     torch.manual_seed(0)
-    A = torch.randn(5, 17, 9, device="cuda", dtype=dtype)
-    B = torch.randn(5, 9, 13, device="cuda", dtype=dtype)
+    # BlockTiling2D (now the batched GEMM) needs tile-divisible dims.
+    A = torch.randn(5, 64, 32, device="cuda", dtype=dtype)
+    B = torch.randn(5, 32, 64, device="cuda", dtype=dtype)
     out = _run(impl, aten.bmm.default, (A, B))
     ref = torch.bmm(A, B)
     assert out.shape == ref.shape
@@ -64,13 +65,17 @@ def test_bmm_unsupported():
     _need_cuda()
     impl = kuiops.BmmImpl({})
     # mismatched batch dim
-    A = torch.randn(2, 4, 4, device="cuda")
-    B = torch.randn(3, 4, 4, device="cuda")
+    A = torch.randn(2, 32, 32, device="cuda")
+    B = torch.randn(3, 32, 32, device="cuda")
     assert impl.supported(aten.bmm.default, (A, B), {}) is None
     # 2D inputs are not bmm
-    A2 = torch.randn(4, 4, device="cuda")
-    B2 = torch.randn(4, 4, device="cuda")
+    A2 = torch.randn(32, 32, device="cuda")
+    B2 = torch.randn(32, 32, device="cuda")
     assert impl.supported(aten.bmm.default, (A2, B2), {}) is None
+    # dims that no BlockTiling2D tiling divides
+    A3 = torch.randn(5, 17, 9, device="cuda")
+    B3 = torch.randn(5, 9, 13, device="cuda")
+    assert impl.supported(aten.bmm.default, (A3, B3), {}) is None
 
 
 # ---------------------------------------------------------------------------

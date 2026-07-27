@@ -3,7 +3,32 @@ module {{ module }}
 
 // JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
 // Generated from kuiops/addmm/Kuiops.Addmm.Inst.fst.j2
+//
+// addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B), i.e. the GEMM combiner
+// `lincomb alpha beta`.
 
 open Kuiper
+open Kuiops.Gemm
 
-// TODO: just use TensorCore2D.To with lincomb_to. Blocktiling2D as fallback (logic for that is in the python) for unsupported dtypes.
+module MS = Kuiper.Spec.GEMM
+
+{% if impl == "tc2d" %}
+// TensorCore2D.To writes the result out of place, so the wrapper passes the
+// (already copied) C buffer as both C and D: the kernel reads C's old value
+// through `lincomb_to` and writes the combination back to the same cells.
+// (technically a violation of the separation logic spec, since C and D are not supposed to be aliased. In reality, it is fine. TODO)
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
+    tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
+        (MS.rlincomb (to_real alpha) (to_real beta))
+        rows shared cols
+{% elif impl == "bt2d" and in_et == out_et %}
+// BlockTiling2D updates C in place, at batch = 1 (see Kuiops.Mm.Inst).
+let {{ name }} (alpha beta : {{ in_et }}) (rows cols shared : szp) =
+    bt2d_async #({{ in_et }}) (MS.lincomb #({{ in_et }}) alpha beta)
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz
+        1sz rows cols shared
+{% else %}
+UNSUPPORTED ADDMM IMPL
+{% endif %}

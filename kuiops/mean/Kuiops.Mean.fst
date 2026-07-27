@@ -8,6 +8,7 @@ module Kuiops.Mean
    and the [div_approx] rule lifts the pre-map's approximation. *)
 
 #lang-pulse
+open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.EMatrix
 open Kuiper.Seq.Common
@@ -31,22 +32,23 @@ fn mean_gpu
   (#sa : chest2 et (SZ.v m) (SZ.v n))
   (ra : chest2 real (SZ.v m) (SZ.v n))
   (#sout : erased (chest1 et (SZ.v m)))
-  preserves
-    cpu **
-    on gpu_loc (a |-> sa)
+  (s : stream_t)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
   requires
-    on gpu_loc (output |-> sout) **
+    on gpu_loc (a |-> sa) ** on gpu_loc (output |-> sout) **
     pure (sa %~ ra)
   ensures
-    exists* (sout' : chest1 et (SZ.v m)).
-      on gpu_loc (output |-> sout') **
-      pure (forall (i : nat). i < SZ.v m ==>
-            (acc1 sout' i) %~ (mean_row_real ra divisor_r i))
+    pledge0 (epoch_done s e)
+      (on gpu_loc (exists* (sout' : chest1 et (SZ.v m)).
+          (a |-> sa) ** (output |-> sout') **
+          pure (forall (i : nat). i < SZ.v m ==>
+                (acc1 sout' i) %~ (mean_row_real ra divisor_r i))))
 {
-  KR.row_reduce #et
-    (fun (x : et) -> div x divisor)
-    (fun (z : real) -> z /. divisor_r)
-    m n max_threads a output ra;
+  launch (KR.row_reduce_kd #et
+            (fun (x : et) -> div x divisor)
+            (fun (z : real) -> z /. divisor_r)
+            m n max_threads a output sa ra sout) s;
 }
 
 (* Instantiation helper: bake the reduced length `len` (> 0) into the element
@@ -65,19 +67,20 @@ fn mean_inst
   (#sa : chest2 et (SZ.v m) (SZ.v n))
   (ra : chest2 real (SZ.v m) (SZ.v n))
   (#sout : erased (chest1 et (SZ.v m)))
-  preserves
-    cpu **
-    on gpu_loc (a |-> sa)
+  (s : stream_t)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
   requires
-    on gpu_loc (output |-> sout) **
+    on gpu_loc (a |-> sa) ** on gpu_loc (output |-> sout) **
     pure (sa %~ ra)
   ensures
-    exists* (sout' : chest1 et (SZ.v m)).
-      on gpu_loc (output |-> sout') **
-      pure (forall (i : nat). i < SZ.v m ==>
-            (acc1 sout' i) %~ (mean_row_real ra (R.of_int (Int64.v len)) i))
+    pledge0 (epoch_done s e)
+      (on gpu_loc (exists* (sout' : chest1 et (SZ.v m)).
+          (a |-> sa) ** (output |-> sout') **
+          pure (forall (i : nat). i < SZ.v m ==>
+                (acc1 sout' i) %~ (mean_row_real ra (R.of_int (Int64.v len)) i))))
 {
   let divisor : et = Kuiper.Floating.Base.of_int len;
   of_int_approx #et len;
-  mean_gpu #et m n divisor (R.of_int (Int64.v len)) a output ra;
+  mean_gpu #et m n divisor (R.of_int (Int64.v len)) a output ra s;
 }

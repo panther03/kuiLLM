@@ -20,11 +20,13 @@ module {{ module }}
 // JIT-GENERATED instantiation of the verified Kuiper gather kernel. DO NOT EDIT.
 // Generated from kuiops/gather/Kuiops.Gather.Inst.fst.j2
 
+open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Shape
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Kernel.Gather
+open Kuiops.Gather
 
 module SZ = Kuiper.SizeT
 
@@ -47,12 +49,17 @@ fn {{ name }}
     (n : sz { SZ.v n == sizeof ({{ shp('i') }}) /\ n <= max_blocks * max_threads /\ n > 0 })
     (eInp : chest ({{ shp('o') }}) ({{ et }}))
     (eIdx : chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})))
+    (s : stream_t)
     (#fInp #fIdx : perm)
-  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx eIdx)
-  requires on gpu_loc (live gOut)
+    (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx eIdx) **
+           on gpu_loc (live gOut)
   ensures
-    on gpu_loc (gOut |-> gather_chest ({{ shp('i') }}) ({{ shp('o') }}) eInp {{ dim }} eIdx)
+    pledge0 (epoch_done s e)
+      (on gpu_loc ((gInp |-> Frac fInp eInp) ** (gIdx |-> Frac fIdx eIdx) **
+                   (gOut |-> gather_chest ({{ shp('i') }}) ({{ shp('o') }}) eInp {{ dim }} eIdx)))
 {
-  gather_gpu ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
-    gInp gIdx gOut n eInp eIdx
+  gather_async ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
+    gInp gIdx gOut n eInp eIdx s
 }

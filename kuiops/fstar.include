@@ -3,6 +3,7 @@ bmm
 cat
 elementwise
 gather
+gemm
 index
 isin
 mean
