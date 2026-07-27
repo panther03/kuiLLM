@@ -45,6 +45,11 @@ JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
 JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
 
+# Parallelism for the one-time `make verify-kuiops` pass that seeds the
+# kuiops .checked cache before any kernel is built.
+SEED_JOBS = int(os.environ.get("KUIPY_JIT_SEED_JOBS", "0")) or min(
+    16, (os.cpu_count() or 4))
+
 # Build-pipeline profiling: KUIPY_JIT_PROFILE=1 prints a per-stage breakdown of
 # the F*/karamel/nvcc pipeline at exit; set it to a path to also dump a JSON
 # trace there. See kuipy/jitprofile.py.

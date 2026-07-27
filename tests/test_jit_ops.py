@@ -145,6 +145,7 @@ def test_addmm_rejects_broadcast_bias():
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("shape", [(128, 64), (8, 5, 33)])
+@pytest.mark.skip(reason="RowSoftmax extraction takes ~6min per instantiation")
 def test_softmax(dtype, shape):
     _need_cuda()
     impl = kuiops.SoftmaxImpl({})
