@@ -15,16 +15,16 @@ _built = False
 # and have all these dependencies cached ahead of time (the original intent of
 # _ensure_built()).
 
-# F* checks/extracts every new instantiation against `--already_cached
-# *,-<module>,-Kuiops`, which forces it to re-typecheck and re-extract the
-# *whole* Kuiops namespace (the shared support .fst{i} files, not just the
-# one-line instantiation), writing results into the shared
-# .kuipy_cache/checked and .kuipy_cache/pre directories. Two different
-# kernels built concurrently (e.g. by parallel pytest workers) therefore race
-# on those shared support-module files. Serialize the F*/karamel stage
-# globally with a cross-process lock; nvcc/ninja compilation of the
-# resulting per-kernel .cu (the part that's actually safe to parallelize)
-# happens outside this lock, in compile.py.
+# The Kuiops support modules are seeded once per process by
+# _ensure_kuiops_checked() and then treated as `--already_cached` by every
+# per-instantiation build, so a build only ever *reads* the shared
+# .kuipy_cache/checked files and writes per-module outputs (its own .checked,
+# .krml, .cu/.h). Two kernels can therefore be extracted concurrently without
+# racing, and this lock only guards the one-time seeding pass -- which does
+# write the shared files. (Excluding `-Kuiops` from --already_cached instead
+# makes F* rewrite those shared files on every single build, which forced the
+# whole F*/karamel stage to be globally serialized; it is measurably no
+# faster and produces byte-identical .krml.)
 _FSTAR_LOCK = C.KUIPY_CACHE / "fstar.lock"
 
 def _run(cmd, what, kernel=None):
@@ -127,13 +127,15 @@ def extract_cu(module: str, fst_text: str):
     checked = C.KUIPY_CHECKED_DIR / f"{module}.fst.checked"
     krml = C.KUIPY_JIT_PRE / f"{underscored}.krml"
 
+    # Per-module lock: two processes racing to build the *same* kernel would
+    # corrupt its shared .krml/.cu, but distinct kernels are independent and
+    # extract fully in parallel.
     with P.stage("fstar-lock-wait", module):
-        _lock = FileLock(str(_FSTAR_LOCK))
+        _lock = FileLock(str(C.KUIPY_CACHE / f"extract-{underscored}.lock"))
         _lock.acquire()
     try:
         # Re-check after acquiring the lock: another process may have built
-        # this exact kernel (or, more commonly, just refreshed the shared
-        # Kuiops .checked files) while we were waiting.
+        # this exact kernel while we were waiting.
         if cu_path.exists() and h_path.exists() and not C.JIT_FLUSH_CACHE:
             if not decl_path.exists():
                 _make_decl_header(h_path, decl_path)
@@ -143,11 +145,15 @@ def extract_cu(module: str, fst_text: str):
         # No .fsti: the single `let` must be exported (it is the host entry
         # point), and an interface would require its own .checked to exist first.
 
-        # TODO: shouldnt have to reverify kuiops stuff, but the cache is not working right now
-        already = f"*,-{module},-Kuiops"
+        # Only this instantiation is uncached: the Kuiops support modules were
+        # seeded by _ensure_kuiops_checked() and everything else ships prebuilt
+        # with Kuiper.
+        already = f"*,-{module}"
         admit = [] if C.JIT_FULL_VERIFY else ["--admit_smt_queries", "true"]
 
-        # 1) check (produces <module>.fst.checked)
+        # 1) check (produces <module>.fst.checked). Required even though the
+        # extract pass typechecks too: cross-module inlining refuses to run
+        # against a module that has no .checked file on disk.
         _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
               "--already_cached", already,
               "-c", str(fst_path), "-o", str(checked)],
