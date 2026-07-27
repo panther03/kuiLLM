@@ -45,6 +45,10 @@ JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
 JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
 
+# Build-pipeline profiling: KUIPY_JIT_PROFILE=1 prints a per-stage breakdown of
+# the F*/karamel/nvcc pipeline at exit; set it to a path to also dump a JSON
+# trace there. See kuipy/jitprofile.py.
+
 # --------------------------------------------------------------------------
 # F* flags (mirrors `make echo-fstar`)
 # --------------------------------------------------------------------------

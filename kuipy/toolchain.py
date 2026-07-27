@@ -6,6 +6,7 @@ from pathlib import Path
 from filelock import FileLock
 
 from . import config as C
+from . import jitprofile as P
 
 _built = False
 
@@ -26,9 +27,10 @@ _built = False
 # happens outside this lock, in compile.py.
 _FSTAR_LOCK = C.KUIPY_CACHE / "fstar.lock"
 
-def _run(cmd, what):
+def _run(cmd, what, kernel=None):
     C.log(f"({what})", " ".join(str(c) for c in cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    with P.stage(what, kernel):
+        proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
             f"kuipy-jit {what} failed (exit {proc.returncode}):\n"
@@ -41,10 +43,15 @@ def _ensure_built():
     global _built
     if _built:
         return
-    _run(["make", "-C", str(C._REPO_ROOT), "verify-kuiops"], "repo build")
+    _run(["make", "-C", str(C._REPO_ROOT), "verify-kuiops"], "repo-build")
     C.ensure_dirs()
-    with FileLock(str(_FSTAR_LOCK)):
+    with P.stage("fstar-lock-wait"):
+        lock = FileLock(str(_FSTAR_LOCK))
+        lock.acquire()
+    try:
         _ensure_kuiops_checked()
+    finally:
+        lock.release()
     _built = True
 
 
@@ -79,7 +86,7 @@ def _ensure_kuiops_checked():
         _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
               "--already_cached", "*",
               "-c", str(src), "-o", str(checked)],
-             f"kuiops-warm {src.name}")
+             "kuiops-warm", src.name)
 
 def extract_cu(module: str, fst_text: str):
     """Verify+extract ``module`` (whose source is ``fst_text``) to a .cu/.h pair.
@@ -120,7 +127,10 @@ def extract_cu(module: str, fst_text: str):
     checked = C.KUIPY_CHECKED_DIR / f"{module}.fst.checked"
     krml = C.KUIPY_JIT_PRE / f"{underscored}.krml"
 
-    with FileLock(str(_FSTAR_LOCK)):
+    with P.stage("fstar-lock-wait", module):
+        _lock = FileLock(str(_FSTAR_LOCK))
+        _lock.acquire()
+    try:
         # Re-check after acquiring the lock: another process may have built
         # this exact kernel (or, more commonly, just refreshed the shared
         # Kuiops .checked files) while we were waiting.
@@ -141,7 +151,7 @@ def extract_cu(module: str, fst_text: str):
         _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
               "--already_cached", already,
               "-c", str(fst_path), "-o", str(checked)],
-             "check")
+             "fstar-check", module)
 
         # 2) extract to krml
         _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
@@ -149,21 +159,24 @@ def extract_cu(module: str, fst_text: str):
               "--codegen", "krml", "--load_cmxs", str(C.PLUGIN),
               "--extract", f"-*,+{module},+Kuiper,+Klas",
               "-o", str(krml), str(fst_path)],
-             "extract")
+             "fstar-extract", module)
 
         # 3) karamel -> pre/<underscored>.cu + .h
         _run([str(C.KRML_EXE), *C.KRML_FLAGS,
               "-bundle", f"{module}=*",
               "-tmpdir", str(C.KUIPY_JIT_PRE), str(krml)],
-             "karamel")
+             "karamel", module)
 
         pre_cu = C.KUIPY_JIT_PRE / f"{underscored}.cu"
         pre_h = C.KUIPY_JIT_PRE / f"{underscored}.h"
 
         # 4) fixup (sed + indent), matching verify.mk
-        _fixup(pre_cu, cu_path)
-        _fixup(pre_h, h_path)
-        _make_decl_header(h_path, decl_path)
+        with P.stage("fixup", module):
+            _fixup(pre_cu, cu_path)
+            _fixup(pre_h, h_path)
+            _make_decl_header(h_path, decl_path)
+    finally:
+        _lock.release()
     return cu_path, h_path, decl_path
 
 def _make_decl_header(h_path: Path, decl_path: Path):

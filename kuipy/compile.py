@@ -26,6 +26,7 @@ from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import config as C
+from . import jitprofile as P
 from . import toolchain
 
 _TEMPLATES = C._REPO_ROOT / "kuiops"
@@ -144,12 +145,17 @@ def build_kernel(module: str,
         # otherwise corrupt the shared .kuipy_cache/cu and build directories.
         C.ensure_dirs()
         lock_path = C.KUIPY_JIT_BUILD / f"{ext_name}.lock"
-        with FileLock(str(lock_path)):
+        with P.stage("build-lock-wait", ext_name):
+            lock = FileLock(str(lock_path))
+            lock.acquire()
+        try:
             mod = _loaded.get(ext_name)
             if mod is not None:
                 return mod
             return _build_kernel(module, ext_name, fst_template, fst_ctx,
                                  wrapper_template, wrapper_ctx)
+        finally:
+            lock.release()
     except Exception as e:
         _failed[ext_name] = e
         raise
@@ -163,12 +169,14 @@ def _extract(module, ext_name, fst_template, fst_ctx, wrapper_template, wrapper_
     the batch-capture path so the extraction logic lives in one place.
     """
     C.ensure_dirs()
-    fst_text = _env.get_template(fst_template).render(**fst_ctx)
+    with P.stage("render", ext_name):
+        fst_text = _env.get_template(fst_template).render(**fst_ctx)
     cu_path, h_path, decl_path = toolchain.extract_cu(module, fst_text)
     # The extracted host symbol is `<module-with-dots-as-underscores>_<letname>`.
     sym = f"{ext_name}_{fst_ctx['name']}"
-    wrapper_text = _render_wrapper(wrapper_template, wrapper_ctx,
-                                   sym, decl_path.name, batch)
+    with P.stage("render", ext_name):
+        wrapper_text = _render_wrapper(wrapper_template, wrapper_ctx,
+                                       sym, decl_path.name, batch)
     return cu_path, wrapper_text
 
 
@@ -206,15 +214,16 @@ def _build_kernel(module, ext_name,
     build_dir = C.KUIPY_JIT_BUILD / ext_name
     build_dir.mkdir(parents=True, exist_ok=True)
     C.log(f"building {ext_name} -> {build_dir}")
-    mod = load(
-        name=ext_name,
-        sources=[str(wrapper_path), str(cu_path)],
-        extra_include_paths=[str(C.KUIPY_JIT_CU), str(C.KUIPER_INCLUDE), str(C._REPO_ROOT / "include")],
-        extra_cflags=["-O2", "-std=c++17"],
-        extra_cuda_cflags=_nvcc_flags(),
-        build_directory=str(build_dir),
-        verbose=(C.JIT_VERBOSITY > 0),
-    )
+    with P.stage("cpp-extension-load", ext_name):
+        mod = load(
+            name=ext_name,
+            sources=[str(wrapper_path), str(cu_path)],
+            extra_include_paths=[str(C.KUIPY_JIT_CU), str(C.KUIPER_INCLUDE), str(C._REPO_ROOT / "include")],
+            extra_cflags=["-O2", "-std=c++17"],
+            extra_cuda_cflags=_nvcc_flags(),
+            build_directory=str(build_dir),
+            verbose=(C.JIT_VERBOSITY > 0),
+        )
     _loaded[ext_name] = mod
     return mod
 
@@ -250,7 +259,7 @@ def finalize_capture():
     build_dir.mkdir(parents=True, exist_ok=True)
     C.log(f"batch-building {len(recs)} kernels -> {build_dir}")
     lock_path = C.KUIPY_JIT_BUILD / f"{ext_name}.lock"
-    with FileLock(str(lock_path)):
+    with FileLock(str(lock_path)), P.stage("cpp-extension-load-batch", ext_name):
         mod = load(
             name=ext_name,
             sources=[str(combined_path)] + [str(r.cu_path) for r in recs],
