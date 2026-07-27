@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Self-hosted: the suite needs a CUDA GPU and a host CUDA 12.x toolkit
+    # (nvcc), which kuipy invokes through torch.utils.cpp_extension.
+    runs-on: self-hosted
+    timeout-minutes: 180
+    defaults:
+      run:
+        # Login shell so the micromamba environment is active in every step.
+        shell: bash -leo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up micromamba environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+          environment-name: kuillm
+          cache-environment: true
+
+      - name: Report toolchain
+        run: |
+          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())"
+          nvcc --version
+          nvidia-smi
+
+      - name: Install latest Kuiper nightly
+        run: make install-kuiper-nightly
+
+      - name: Run test suite
+        # Override NPROCS on a dispatch run if the GPU can't hold one CUDA
+        # context per worker.
+        run: make test NPROCS="$(nproc)"
+
+      - name: Upload JIT build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kuipy-cache
+          path: |
+            .kuipy_cache/src
+            .kuipy_cache/cu
+            .kuipy_cache/build/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7

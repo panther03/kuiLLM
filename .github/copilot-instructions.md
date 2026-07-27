@@ -12,6 +12,10 @@ extracts, compiles, and dispatches them.
 Always use the project virtualenv interpreter — there is no system install:
 `./.venv/bin/python` (Makefile targets just call `python3`,
 so run them with the venv active or use the venv python directly).
+`environment.yml` (used by CI, see `.github/workflows/ci.yml`) declares the same
+dependency set for a micromamba/conda setup:
+`micromamba create -f environment.yml && micromamba activate kuillm`. It does not
+provide CUDA — nvcc 12.x must come from the host.
 
 - **Run one Kuiper install target before anything else**:
   `make install-kuiper-release` installs the latest stable binary package,
