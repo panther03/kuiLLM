@@ -25,7 +25,8 @@ open Kuiper.Tensor.Layout.Alg
 module MS = Kuiper.Spec.GEMM
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
-module KT = Kuiper.Kernel.GEMM.TensorCore2D.To
+module KT = Kuiper.Kernel.GEMM.TensorCore2D
+module KTT = Kuiper.Kernel.GEMM.TensorCore2D.To
 module KB = Kuiper.Kernel.GEMM.BlockTiling2D
 
 (* The batched row-major layout is affine in (page, row, col) with offset 0,
@@ -160,8 +161,7 @@ let lincomb_to_approx2
   = MS.lincomb_to_approx2 #et_acc #et_cd alpha beta
 
 (* TensorCore2D "to" GEMM: D = comb(C, A@B), with the accumulator type distinct
-   from the C/D type. [comb] is [MS.comb2_to] for mm and
-   [MS.lincomb_to alpha beta] for addmm. *)
+   from the C/D type. *)
 #push-options "--split_queries always --z3rlimit 40"
 inline_for_extraction noextract
 fn tc2d_to_async
@@ -259,7 +259,7 @@ fn tc2d_to_async
 
   #set-options "--fuel 0 --ifuel 0 --z3refresh" {
   launch (
-    KT.mk_kernel comb comb_r
+    KTT.mk_kernel comb comb_r
       gA #eA gB #eB
       gC #_ #eC gD #eC
       bm bn bk tm tn tk wm wn
@@ -267,6 +267,107 @@ fn tc2d_to_async
       #fA #fB #fC
       nblk nthr
       #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
+      (to_real_matrix eA) (to_real_matrix eB) (to_real_matrix eC) #_ #_ ()
+  ) s};
+}
+#pop-options
+
+#push-options "--split_queries always --z3rlimit 40"
+inline_for_extraction noextract
+fn tc2d_async
+  (et_ab et_c : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
+  {| scalar et_c, real_like et_c |}
+  (bm bn bk : szp)
+  (#_ : squash (chunk et_ab /?+ bk))
+  (#_ : squash (chunk et_ab /?+ bn))
+  (tm : szp{tm /?+ bm})
+  (tn : szp{tn /?+ bn})
+  (tk : szp{tk /?+ bk})
+  (wm : szp{wm * tm /?+ bm})
+  (wn : szp{wn * tn /?+ bn})
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bm * bk)))
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bk * bn)))
+  (#_ : squash (SZ.fits (wm * wn)))
+  (#_ : squash (SZ.fits (wm * tm)))
+  (#_ : squash (SZ.fits (wn * tn)))
+  (#_ : squash (valid_frag_et_dims et_ab FragA tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_ab FragB tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_c FragAcc tm tn tk))
+  (#_ : squash (valid_frag_et_comb et_ab et_c))
+  (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
+  (rows shared cols : szp)
+  (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+  (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
+  (gC : array2 et_c (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gC })
+  (s : stream_t)
+  (#_ : squash (aligned 16 (core gA)))
+  (#_ : squash (aligned 16 (core gB)))
+  (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
+  (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
+  (#eC : chest2 et_c (SZ.v rows) (SZ.v cols))
+  (#fA #fB : perm)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires
+    pure ((rows/bm) * (cols/bn) <= max_blocks) **
+    pure (SZ.fits (rows * cols)) **
+    on gpu_loc (gA |-> Frac fA eA) **
+    on gpu_loc (gB |-> Frac fB eB) **
+    on gpu_loc (gC |-> eC)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+        (exists* eC'. (gC |-> eC') **
+          pure (eC' %~ MS.matmul (to_real_matrix eA) (to_real_matrix eB)))))
+{
+  tensor_pts_to_ref_located gA;
+  tensor_pts_to_ref_located gB;
+  tensor_pts_to_ref_located gC;
+
+  dassert (bm %^ tm = 0sz);
+  dassert (bn %^ tn = 0sz);
+  dassert (bk %^ tk = 0sz);
+
+  dguard (rows   %^ bm = 0sz);
+  dguard (shared %^ bk = 0sz);
+  dguard (cols   %^ bn = 0sz);
+
+  lemma_divides_chain (wm * tm) bm rows;
+  lemma_divides_chain (wn * tn) bn cols;
+
+  let nblk = rows/^bm *^ (cols/^bn);
+  let nthr = bm/^(wm*^tm) *^ (bn/^(wn*^tn)) *^ warp_size;
+
+  assert pure ((rows/bm) * (cols/bn) == nblk);
+  assert pure ((rows/bm) * (cols/bn) <= max_blocks);
+  dassert (nblk <=^ SZ.uint_to_t 2097152);
+  assert pure (nblk <= max_blocks);
+
+  dassert ((bm *^ bk) %^ (chunk et_ab *^ nthr) = 0sz);
+  dassert ((bk *^ bn) %^ (chunk et_ab *^ nthr) = 0sz);
+
+  lemma_divides_trans (chunk et_ab) bk shared;
+  assert pure (chunk et_ab /?+ shared);
+  lemma_aligned_strided_row_major_l2_row_major
+    #(SZ.v rows) #(SZ.v shared) (chunk et_ab);
+
+  lemma_divides_trans (chunk et_ab) bn cols;
+  assert pure (chunk et_ab /?+ cols);
+  lemma_aligned_strided_row_major_l2_row_major
+    #(SZ.v shared) #(SZ.v cols) (chunk et_ab);
+
+  #set-options "--fuel 0 --ifuel 0 --z3refresh" {
+  launch (
+    KT.mk_kernel
+      gA #eA gB #eB gC #_ #eC
+      bm bn bk tm tn tk wm wn
+      #_ #_ #_ #_ #_ #_ #_ #_
+      #fA #fB
+      nblk nthr
+      #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
       (to_real_matrix eA) (to_real_matrix eB) (to_real_matrix eC) #_ #_ ()
   ) s};
 }

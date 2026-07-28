@@ -44,6 +44,59 @@ def _assert_close(out, ref, dtype):
 
 
 # ---------------------------------------------------------------------------
+# mm
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("in_dtype,out_dtype", [
+    (torch.float16, torch.float16),
+    (torch.float16, torch.float32),
+    (torch.bfloat16, torch.float32),
+])
+def test_mm_tensorcore2d(in_dtype, out_dtype):
+    _need_cuda()
+    impl = kuiops.MmImpl({})
+    torch.manual_seed(0)
+    A = torch.randn(64, 64, device="cuda", dtype=in_dtype)
+    B = torch.randn(64, 64, device="cuda", dtype=in_dtype)
+    kwargs = {"out_dtype": out_dtype}
+    spec = impl.supported(aten.mm.default, (A, B), kwargs)
+    assert spec is not None and spec[0] == "tc2d"
+    out = impl.run(spec, (A, B), kwargs)
+    ref = torch.mm(A.float(), B.float()).to(out_dtype)
+    assert out.dtype == out_dtype
+    _assert_close(out, ref, out_dtype)
+
+
+def test_mm_tensorcore2d_to_fallback():
+    _need_cuda()
+    impl = kuiops.MmImpl({})
+    torch.manual_seed(0)
+    A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    spec = impl.supported(aten.mm.default, (A, B), {})
+    assert spec is not None and spec[0] == "tc2d_to"
+    out = impl.run(spec, (A, B), {})
+    ref = torch.mm(A, B)
+    assert out.dtype == torch.bfloat16
+    _assert_close(out, ref, torch.bfloat16)
+
+
+def test_mm_tensorcore2d_dtype_selection():
+    _need_cuda()
+    impl = kuiops.MmImpl({})
+    A16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
+    B16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
+    assert impl.supported(aten.mm.default, (A16, B16), {})[0] == "tc2d"
+    A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    default_spec = impl.supported(aten.mm.default, (A, B), {})
+    assert default_spec is not None and default_spec[0] == "tc2d_to"
+    assert impl.supported(
+        aten.mm.default, (A, B), {"out_dtype": torch.bfloat16}
+    )[0] == "tc2d_to"
+
+
+# ---------------------------------------------------------------------------
 # bmm
 # ---------------------------------------------------------------------------
 
@@ -111,7 +164,10 @@ def test_addmm(dtype, alpha, beta):
     B = torch.randn(K, N, device="cuda", dtype=dtype)
     bias = torch.randn(M, N, device="cuda", dtype=dtype)  # 2D bias/C matrix
     kw = dict(alpha=alpha, beta=beta)
-    out = _run(impl, aten.addmm.default, (bias, A, B), kw)
+    spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
+    expected_impl = "bt2d" if dtype == torch.float32 else "tc2d_to"
+    assert spec is not None and spec[0] == expected_impl
+    out = impl.run(spec, (bias, A, B), kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)

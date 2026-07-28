@@ -10,11 +10,11 @@ open Kuiops.Gemm
 module MS = Kuiper.Spec.GEMM
 
 {% if impl == "tc2d" %}
-// D = A@B via TensorCore2D.To. C is only read through `comb2_to`, which ignores
-// it, so the wrapper passes the output buffer as both C and D: harmless at run
-// time even though the separation logic sees two distinct tensors.
-// Bind (rows cols shared) and forward in the spec's native (rows shared cols)
-// order so the extracted signature matches the (M, N, K) wrapper (and bt2d).
+let {{ name }} (rows cols shared : szp) =
+    tc2d_async ({{ in_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
+        rows shared cols
+{% elif impl == "tc2d_to" %}
 let {{ name }} (rows cols shared : szp) =
     tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz

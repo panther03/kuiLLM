@@ -1,5 +1,5 @@
-// PyTorch glue exposing the two tensor-core reference kernels as a single
-// extension: `linear` (F.linear drop-in) and `sdpa`
+// PyTorch glue exposing the tensor-core reference kernels as a single
+// extension: `gemm_manual` (the hand-written TensorCore2D GEMM) and `sdpa`
 // (F.scaled_dot_product_attention drop-in). Inputs are made contiguous, outputs
 // are allocated in bf16. SDPA uses the current CUDA stream; the extracted Kuiper
 // GEMM manages and synchronizes its own stream.
@@ -17,12 +17,15 @@ static inline __nv_bfloat16* bf16_ptr_mut(torch::Tensor& t) {
     return reinterpret_cast<__nv_bfloat16*>(t.data_ptr());
 }
 
-// C = A @ B, a plain tensor-core matmul (no bias, no transpose) backed by the
-// Kuiper TensorCore2D.To kernel. A:(M,K) B:(K,N) C:(M,N), all bf16 row-major. To
-// reproduce torch.nn.functional.linear(A, W) the caller passes B = W^T (K,N).
-torch::Tensor matmul(torch::Tensor A, torch::Tensor B) {
+// C = alpha*(A @ B) + beta*C_in, the hand-written tensor-core GEMM epilogue
+// (fp32 accumulate, bf16 in/out) from tc2d_linear_manual.cu. A:(M,K) B:(K,N)
+// row-major; the kernel works in place, so C_in is copied into the output
+// (broadcast rules are the caller's responsibility -- C_in must be (M,N)).
+torch::Tensor gemm_manual(torch::Tensor A, torch::Tensor B,
+                          c10::optional<torch::Tensor> C_in,
+                          double alpha, double beta) {
     TORCH_CHECK(A.dtype() == torch::kBFloat16 && B.dtype() == torch::kBFloat16,
-                "tc2d matmul expects bf16 A/B");
+                "tc2d manual gemm expects bf16 A/B");
     TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A/B must be 2D");
     TORCH_CHECK(A.size(1) == B.size(0), "A.size(1) must equal B.size(0)");
 
@@ -32,36 +35,7 @@ torch::Tensor matmul(torch::Tensor A, torch::Tensor B) {
     const int64_t K = Ac.size(1);
     const int64_t N = Bc.size(1);
     TORCH_CHECK(M % 128 == 0 && N % 128 == 0 && K % 32 == 0,
-                "tc2d matmul requires M%128==0, N%128==0, K%32==0");
-
-    auto C = torch::empty({M, N}, Ac.options());
-
-    at::cuda::CUDAGuard g(A.device());
-    tc2d_matmul_launch(bf16_ptr(Ac), bf16_ptr(Bc), bf16_ptr_mut(C),
-                       (int)M, (int)N, (int)K);
-    C10_CUDA_CHECK(cudaGetLastError());
-    return C;
-}
-
-// C = alpha*(A @ B) + beta*C_in, the full tensor-core GEMM epilogue (fp32
-// accumulate, bf16 in/out). A:(M,K) B:(K,N) row-major; when beta != 0 the
-// per-element additive term is taken from `C_in` (broadcast rules are the
-// caller's responsibility -- C_in must be (M,N)).
-torch::Tensor gemm(torch::Tensor A, torch::Tensor B,
-                   c10::optional<torch::Tensor> C_in,
-                   double alpha, double beta) {
-    TORCH_CHECK(A.dtype() == torch::kBFloat16 && B.dtype() == torch::kBFloat16,
-                "tc2d gemm expects bf16 A/B");
-    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A/B must be 2D");
-    TORCH_CHECK(A.size(1) == B.size(0), "A.size(1) must equal B.size(0)");
-
-    auto Ac = A.contiguous();
-    auto Bc = B.contiguous();
-    const int64_t M = Ac.size(0);
-    const int64_t K = Ac.size(1);
-    const int64_t N = Bc.size(1);
-    TORCH_CHECK(M % 128 == 0 && N % 128 == 0 && K % 32 == 0,
-                "tc2d gemm requires M%128==0, N%128==0, K%32==0");
+                "tc2d manual gemm requires M%128==0, N%128==0, K%32==0");
 
     torch::Tensor C;
     if (beta != 0.0) {
@@ -70,16 +44,16 @@ torch::Tensor gemm(torch::Tensor A, torch::Tensor B,
         TORCH_CHECK(C_in->dtype() == torch::kBFloat16, "C must be bf16");
         TORCH_CHECK(C_in->dim() == 2 && C_in->size(0) == M && C_in->size(1) == N,
                     "C must be (M, N)");
-        C = C_in->contiguous();
+        C = C_in->contiguous().clone();
+    } else {
+        C = torch::empty({M, N}, Ac.options());
     }
-    auto D = torch::empty({M, N}, Ac.options());
 
     at::cuda::CUDAGuard g(A.device());
-    tc2d_gemm_launch(bf16_ptr(Ac), bf16_ptr(Bc),
-                     beta != 0.0 ? bf16_ptr(C) : nullptr, bf16_ptr_mut(D),
-                     (int)M, (int)N, (int)K, (float)alpha, (float)beta);
+    tc2d_manual_gemm_launch(bf16_ptr(Ac), bf16_ptr(Bc), bf16_ptr_mut(C),
+                            (int)M, (int)N, (int)K, (float)alpha, (float)beta);
     C10_CUDA_CHECK(cudaGetLastError());
-    return D;
+    return C;
 }
 
 // FlashAttention forward. q:(B,Hq,Sq,D) k/v:(B,Hkv,Sk,D); optional 4D additive
@@ -127,9 +101,8 @@ torch::Tensor sdpa(torch::Tensor q, torch::Tensor k, torch::Tensor v,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul", &matmul, "bf16 Kuiper TensorCore2D.To matmul (CUDA)",
-          py::arg("A"), py::arg("B"));
-    m.def("gemm", &gemm, "bf16 in/out, fp32-accumulate tensor-core GEMM "
+    m.def("gemm_manual", &gemm_manual,
+          "hand-written bf16 in/out, fp32-accumulate tensor-core GEMM "
           "D = alpha*(A@B) + beta*C (CUDA)",
           py::arg("A"), py::arg("B"), py::arg("C") = c10::nullopt,
           py::arg("alpha") = 1.0, py::arg("beta") = 0.0);

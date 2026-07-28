@@ -1,16 +1,17 @@
-// Kuiper TensorCore2D GEMM used as the linear/matmul reference in
-// bench_tc_kernels.py. The body is derived from the fp16xfp16
+// Hand-written Kuiper TensorCore2D GEMM, benchmarked against the JIT-dispatched
+// kuiops GEMM in bench_tc_kernels.py. The body is derived from the
 // `128x128x32_16x16x16_8x4` instantiation extracted from the Kuiper
-// distribution ($KUIPER_HOME/dist/Klas_GEMM_TensorCore2D.{cu,h}); the
+// distribution ($KUIPER_HOME/dist/Klas_GEMM_TensorCore2D.{cu,h}), retyped to
+// bf16 in/out to match the rest of the benchmark; the
 // shared-memory staging and the tensor-core inner loop are unchanged in spirit
 // (single-buffered vec_memcpy loads, 32-deep k-tiles, no software pipelining).
 //
 // Two changes are layered on as a sketch of a planned Kuiper update:
-//   * the accumulator type is decoupled from the fp16 inputs/outputs (`acc_t`)
+//   * the accumulator type is decoupled from the bf16 inputs/outputs (`acc_t`)
 //     and widened to fp32, so the reduction no longer rounds every partial sum
-//     to half; and
+//     to bf16; and
 //   * the trailing store is replaced by a real GEMM epilogue,
-//     D = alpha*(A@B) + beta*C, evaluated in acc_t and converted down to fp16.
+//     D = alpha*(A@B) + beta*C, evaluated in acc_t and converted down to bf16.
 //
 // Widening the accumulator forces one tiling parameter to move: with the
 // original 8x4 fragments-per-warp / 64-thread layout, 32 fp32 accumulator
@@ -19,13 +20,13 @@
 // (2x4) output tile -- ~64 accumulator registers, no spill. Block/k tiling and
 // the shared layout are otherwise identical.
 //
-//   A : (M, K) half    B : (K, N) half    C : (M, N) half   (row-major)
+//   A : (M, K) bf16    B : (K, N) bf16    C : (M, N) bf16   (row-major)
 // The caller passes B already laid out as (K, N) (the transposed F.linear
 // weight); when beta != 0 the current contents of C are the additive term.
 #include <kuiper.h>
 #include "tc_kernels.h"
 
-// Accumulator type, decoupled from the fp16 in/out matrices.
+// Accumulator type, decoupled from the bf16 in/out matrices.
 using acc_t = float;
 
 namespace {
@@ -35,21 +36,22 @@ constexpr uint32_t WARPS_M = 4, WARPS_N = 2;       // 8 warps over the block til
 constexpr uint32_t MW = FM / WARPS_M;              // = 2  fragment rows / warp
 constexpr uint32_t NW = FN / WARPS_N;              // = 4  fragment cols / warp
 constexpr uint32_t THREADS = WARPS_M * WARPS_N * 32;   // = 256
-constexpr uint32_t LOAD_STEP = THREADS * 8;        // halfs staged per load pass
+constexpr uint32_t LOAD_STEP = THREADS * 8;        // elements staged per load pass
 }
 
 __global__
 /**
-  hoisted when extracting g_gemm_f16_f16_128x128x32_16x16x16_8x4
+  hoisted when extracting g_gemm_bf16_bf16_128x128x32_16x16x16_8x4
 */
 static void
-__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
+__hoisted_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4_0(uint32_t shared,
                                                    uint32_t cols,
-                                                   half *gA, half *gB, half *gC,
+                                                   __nv_bfloat16 *gA, __nv_bfloat16 *gB,
+                                                   __nv_bfloat16 *gC,
                                                    float alpha, float beta)
 {
-    half *sA = (half *) KPR_SHMEM_AT(0U);
-    half *sB = (half *) KPR_SHMEM_AT(8192U);
+    __nv_bfloat16 *sA = (__nv_bfloat16 *) KPR_SHMEM_AT(0U);
+    __nv_bfloat16 *sB = (__nv_bfloat16 *) KPR_SHMEM_AT(8192U);
     // Dedicated fp32 epilogue scratch: a separately-allocated, float-typed shared
     // buffer (not an aliasing reinterpret of sA) so it is expressible in Kuiper,
     // where each shared buffer is typed and allocated at launch. Holds one 16x16
@@ -66,11 +68,11 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
 
     auto & aFrags =
         KPR_INIT_ARR(kpr_fragment
-                     (wmma::matrix_a, 16U, 16U, 16U, half, wmma::row_major),
+                     (wmma::matrix_a, 16U, 16U, 16U, __nv_bfloat16, wmma::row_major),
                      MW);
     auto & bFrags =
         KPR_INIT_ARR(kpr_fragment
-                     (wmma::matrix_b, 16U, 16U, 16U, half, wmma::row_major),
+                     (wmma::matrix_b, 16U, 16U, 16U, __nv_bfloat16, wmma::row_major),
                      NW);
     auto & accFrags =
         KPR_INIT_ARR(kpr_fragment(wmma::accumulator, 16U, 16U, 16U, acc_t),
@@ -80,9 +82,9 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
 
     for (uint32_t bkIdx = 0U; bkIdx < num_k_tiles; bkIdx++) {
         __syncthreads();
-        half *tileA = gA;
+        __nv_bfloat16 *tileA = gA;
         for (uint32_t i2 = 0U; i2 < BM * BK; i2 += LOAD_STEP) {
-            half local[8U];
+            __nv_bfloat16 local[8U];
             uint32_t row = (i2 + threadIdx.x * 8U) / BK;
             uint32_t col = (i2 + threadIdx.x * 8U) % BK;
             vec_memcpy(local,
@@ -91,9 +93,9 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
             for (uint32_t k = 0U; k < 8U; k++)
                 sA[row * BK + col + k] = local[k];
         }
-        half *tileB = gB;
+        __nv_bfloat16 *tileB = gB;
         for (uint32_t i = 0U; i < BK * BN; i += LOAD_STEP) {
-            half local[8U];
+            __nv_bfloat16 local[8U];
             uint32_t row = (i + threadIdx.x * 8U) / BN;
             uint32_t col = (i + threadIdx.x * 8U) % BN;
             vec_memcpy(local,
@@ -124,9 +126,9 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
     }
 
     // GEMM epilogue (bolt-on): D = alpha*acc + beta*C, evaluated in acc_t and
-    // converted to fp16. Each acc_t (fp32) fragment is spilled to the dedicated
+    // converted to bf16. Each acc_t (fp32) fragment is spilled to the dedicated
     // fp32 scratch sAcc via store_matrix_sync -- a *defined* row-major layout -- so
-    // we never assume the fp32 and fp16 accumulator fragments share an (unspecified)
+    // we never assume the fp32 and bf16 accumulator fragments share an (unspecified)
     // element layout. Each lane then reads back 8 contiguous columns of one row,
     // applies alpha/beta, and writes them to global as a single 128-bit vector.
     //
@@ -150,17 +152,17 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
             __syncthreads();
             uint32_t row = mrow * BM + warp_row * (MW * 16U) + mi * 16U + lrow;
             uint32_t col = mcol * BN + warp_col * (NW * 16U) + nj * 16U + c0;
-            half *g = gC + row * cols + col;
+            __nv_bfloat16 *g = gC + row * cols + col;
             float *s = sAcc + warp * 256U + lrow * 16U + c0;
-            __align__(16) half out[8U];
+            __align__(16) __nv_bfloat16 out[8U];
             if (beta != 0.0f) {
-                __align__(16) half cin[8U];
+                __align__(16) __nv_bfloat16 cin[8U];
                 vec_memcpy(cin, g);
                 for (uint32_t k = 0U; k < 8U; k++)
-                    out[k] = __float2half(alpha * s[k] + beta * __half2float(cin[k]));
+                    out[k] = __float2bfloat16(alpha * s[k] + beta * __bfloat162float(cin[k]));
             } else {
                 for (uint32_t k = 0U; k < 8U; k++)
-                    out[k] = __float2half(alpha * s[k]);
+                    out[k] = __float2bfloat16(alpha * s[k]);
             }
             vec_memcpy(g, out);
         }
@@ -168,12 +170,12 @@ __hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0(uint32_t shared,
 }
 
 void
-Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(uint32_t rows,
+Klas_GEMM_TensorCore2D_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4(uint32_t rows,
                                                               uint32_t shared,
                                                               uint32_t cols,
-                                                              half *gA,
-                                                              half *gB,
-                                                              half *gC,
+                                                              __nv_bfloat16 *gA,
+                                                              __nv_bfloat16 *gB,
+                                                              __nv_bfloat16 *gC,
                                                               float alpha,
                                                               float beta)
 {
@@ -182,27 +184,25 @@ Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(uint32_t rows,
     KPR_GUARD(cols % 128U == 0U);
     uint32_t nblk = rows / 128U * (cols / 128U);
     KPR_ASSERT(nblk <= 2097152U);
+    cudaStream_t s = KPR_FRESH_STREAM();
     KPR_SHMEM_FITS(24576U);
     MUST(cudaFuncSetAttribute
-         (__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0,
+         (__hoisted_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4_0,
           cudaFuncAttributeMaxDynamicSharedMemorySize, 24576U));
-    KPR_KCALL(__hoisted_g_gemm_f16_f16_128x128x32_16x16x16_8x4_0, nblk, THREADS,
-              24576U, shared, cols, gA, gB, gC, alpha, beta);
-    MUST(cudaDeviceSynchronize());
+    KPR_KCALL(__hoisted_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4_0, nblk, THREADS,
+              24576U, s, shared, cols, gA, gB, gC, alpha, beta);
+    MUST(cudaStreamSynchronize(s));
+    MUST(cudaStreamDestroy(s));
 }
 
 // C = alpha*(A @ B) + beta*C, fp32-accumulate tensor-core GEMM. When beta != 0
 // the current contents of C are read back as the additive term (in-place GEMM).
-void tc2d_gemm_launch(const half* A, const half* B, half* C,
-                      int M, int N, int K, float alpha, float beta) {
+void tc2d_manual_gemm_launch(const __nv_bfloat16* A, const __nv_bfloat16* B,
+                             __nv_bfloat16* C, int M, int N, int K,
+                             float alpha, float beta) {
     if (M == 0 || N == 0 || K == 0) return;
-    Klas_GEMM_TensorCore2D_g_gemm_f16_f16_128x128x32_16x16x16_8x4(
+    Klas_GEMM_TensorCore2D_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4(
         (uint32_t)M, (uint32_t)K, (uint32_t)N,
-        const_cast<half*>(A), const_cast<half*>(B), C, alpha, beta);
-}
-
-// Plain matmul C = A @ B (alpha=1, beta=0): the bias-free F.linear drop-in.
-void tc2d_matmul_launch(const half* A, const half* B, half* C,
-                        int M, int N, int K) {
-    tc2d_gemm_launch(A, B, C, M, N, K, 1.0f, 0.0f);
+        const_cast<__nv_bfloat16*>(A), const_cast<__nv_bfloat16*>(B), C,
+        alpha, beta);
 }

@@ -20,9 +20,8 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
         (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-{% if impl == "tc2d" %}
-        // C and D alias: `comb2_to` never reads C, so the kernel just writes
-        // the product into the output buffer.
+{% if impl == "tc2d_to" %}
+        // `comb2_to` ignores C, so C and D can share the output buffer.
         reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),
 {% endif %}
         reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),

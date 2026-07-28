@@ -332,6 +332,11 @@ class ElementwiseImpl(_Family):
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
 _WARP = 32
+_TC2D_OUTPUT_DTYPES = {
+    torch.float16: (torch.float16, torch.float32),
+    torch.bfloat16: (torch.float32,),
+}
+_TC2D_TO_INPUT_DTYPES = (torch.float16, torch.bfloat16)
 
 def _bt2d_tile(dtype, M, N, K):
     """BlockTiling2D tile params for ``dtype``. Returns (bm,bn,bk,tm,tn) or None.
@@ -369,9 +374,15 @@ def _bt2d_tile(dtype, M, N, K):
 
 
 def _tc2d_tile(dtype, M, N, K):
-    """TensorCore2D (bf16->f32, chunk=8, tm=tn=tk=16). Returns tile dict or None."""
+    """TensorCore2D tile params for 16-bit operands. Returns a tile dict or None."""
     chunk = 16 // (dtype.itemsize)
     tm = tn = tk = 16
+
+    # quick and dirty patch to return pre-tuned parameters by default
+    good = dict(bm=128,bn=128,bk=32,tm=16,tn=16,tk=16,wm=8,wn=4)
+    if ((M % (good["bm"]) == 0) and (N % (good["bn"]) == 0) and (K % (good["bk"]) == 0) and
+        (good["bn"] % chunk == 0) and (good["bk"] % chunk == 0)):
+        return good
     for bm in (128, 64):
         if M % bm or bm % tm:
             continue
@@ -381,7 +392,7 @@ def _tc2d_tile(dtype, M, N, K):
             for bk in (64, 32, 16):
                 if K % bk or bk % chunk or bk % tk:
                     continue
-                if 2 * bm * bk + 2 * bk * bn > _SHMEM_BYTES:
+                if 2 * (bm * bk + bk * bn) > _SHMEM_BYTES:
                     continue
                 for wm in (16, 8, 4, 2):
                     if (bm % (tm * wm)) or (bm % (wm * tm)):
@@ -409,27 +420,23 @@ def _gemm_blocks_ok(batch, M, N, tile):
 
 
 class _GemmFamily(_Family):
-    """Shared tile/impl selection for mm and addmm.
-
-    TensorCore2D.To keeps the accumulator type separate from the C/D type, so a
-    bf16 x bf16 product accumulates in f32 and is written back as bf16 -- no
-    output cast is needed. f32 operands have no valid tensor-core fragment type,
-    so they fall back to (the now batched) BlockTiling2D at batch = 1."""
+    """Shared TensorCore2D.To and BlockTiling2D selection."""
 
     tune_params = {"impl": "tc2d"}
 
-    def _select(self, dtype, M, N, K):
-        impl = self.tune_params["impl"]
-        if dtype not in (torch.bfloat16, torch.float16):
-            impl = "bt2d"
-        if impl == "tc2d":
-            tile = _tc2d_tile(dtype, M, N, K)
-            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-                return impl, tile, torch.float32
-        else:
-            tile = _bt2d_tile(dtype, M, N, K)
-            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-                return impl, tile, dtype
+    def _select_tc2d_to(self, dtype, M, N, K):
+        if (self.tune_params["impl"] != "tc2d"
+                or dtype not in _TC2D_TO_INPUT_DTYPES):
+            return None
+        tile = _tc2d_tile(dtype, M, N, K)
+        if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+            return "tc2d_to", tile, torch.float32
+        return None
+
+    def _select_bt2d(self, dtype, M, N, K):
+        tile = _bt2d_tile(dtype, M, N, K)
+        if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+            return "bt2d", tile
         return None
 
 
@@ -454,20 +461,33 @@ class MmImpl(_GemmFamily):
             return None
         M, K, N = int(M), int(K), int(N)
 
-        sel = self._select(A.dtype, M, N, K)
+        out_dtype = kwargs.get("out_dtype", A.dtype)
+        sel = None
+        if (self.tune_params["impl"] == "tc2d"
+                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
+            tile = _tc2d_tile(A.dtype, M, N, K)
+            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+                sel = ("tc2d", tile, out_dtype)
+        if sel is None and out_dtype in _FLOAT_DTYPES:
+            sel = self._select_tc2d_to(A.dtype, M, N, K)
+        if sel is None and out_dtype == A.dtype:
+            bt2d = self._select_bt2d(A.dtype, M, N, K)
+            if bt2d is not None:
+                sel = (*bt2d, A.dtype)
         if sel is None:
             return None
         impl, tile_params, acc_dtype = sel
-        return (impl, tile_params, A.dtype, acc_dtype, [A, B])
+        return (impl, tile_params, A.dtype, acc_dtype, out_dtype, [A, B])
 
     def run(self, spec, args, kwargs):
-        impl, tile_params, dtype, acc_dtype, call = spec
+        impl, tile_params, dtype, acc_dtype, out_dtype, call = spec
         et = torch_dtype_to_fstar(dtype)
         acc_et = torch_dtype_to_fstar(acc_dtype)
+        out_et = torch_dtype_to_fstar(out_dtype)
 
         tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
 
-        module = f"Kuiops.Mm.{impl.title()}.{et.title()}.{acc_et.title()}.P_{tile_params_str}"
+        module = f"Kuiops.Mm.{impl.title()}.{et.title()}.{out_et.title()}.P_{tile_params_str}"
         # keeping it short for this one...
         name = "mm_jit"
         fst_ctx = dict(
@@ -475,7 +495,7 @@ class MmImpl(_GemmFamily):
             name=name,
             in_et=et,
             acc_et=acc_et,
-            out_et=et,
+            out_et=out_et,
             impl=impl,
             **tile_params
         )
@@ -484,8 +504,8 @@ class MmImpl(_GemmFamily):
             name=name,
             impl=impl,
             cpp_in_et=torch_dtype_to_ctype(dtype),
-            cpp_out_et=torch_dtype_to_ctype(dtype),
-            out_scalar=torch_dtype_to_aten_scalar(dtype),
+            cpp_out_et=torch_dtype_to_ctype(out_dtype),
+            out_scalar=torch_dtype_to_aten_scalar(out_dtype),
         )
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
 
@@ -560,7 +580,11 @@ class AddmmImpl(_GemmFamily):
             return None
         if tuple(int(x) for x in Cin.shape) != (M, N):
             return None
-        sel = self._select(A.dtype, M, N, K)
+        sel = self._select_tc2d_to(A.dtype, M, N, K)
+        if sel is None:
+            bt2d = self._select_bt2d(A.dtype, M, N, K)
+            if bt2d is not None:
+                sel = (*bt2d, A.dtype)
         if sel is None:
             return None
         impl, tile_params, acc_dtype = sel

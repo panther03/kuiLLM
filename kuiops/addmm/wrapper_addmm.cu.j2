@@ -25,9 +25,8 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
         (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-{% if impl == "tc2d" %}
-        // C and D alias: the kernel reads C's old value and writes the
-        // combination back into the same cells.
+{% if impl == "tc2d_to" %}
+        // C and D alias; the kernel reads C before writing the result to D.
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
 {% endif %}
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
