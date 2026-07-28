@@ -67,15 +67,17 @@ def test_mm_tensorcore2d(in_dtype, out_dtype):
     _assert_close(out, ref, out_dtype)
 
 
-def test_mm_tensorcore2d_to_fallback():
+@pytest.mark.parametrize("implementation", ["tc2d", "tc2d_to"])
+def test_mm_bf16_output(implementation):
     _need_cuda()
     impl = kuiops.MmImpl({})
     torch.manual_seed(0)
     A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    spec = impl.supported(aten.mm.default, (A, B), {})
-    assert spec is not None and spec[0] == "tc2d_to"
-    out = impl.run(spec, (A, B), {})
+    kwargs = {} if implementation == "tc2d" else {"impl": implementation}
+    spec = impl.supported(aten.mm.default, (A, B), kwargs)
+    assert spec is not None and spec[0] == implementation
+    out = impl.run(spec, (A, B), kwargs)
     ref = torch.mm(A, B)
     assert out.dtype == torch.bfloat16
     _assert_close(out, ref, torch.bfloat16)
@@ -90,10 +92,16 @@ def test_mm_tensorcore2d_dtype_selection():
     A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     default_spec = impl.supported(aten.mm.default, (A, B), {})
-    assert default_spec is not None and default_spec[0] == "tc2d_to"
+    assert default_spec is not None and default_spec[0] == "tc2d"
     assert impl.supported(
         aten.mm.default, (A, B), {"out_dtype": torch.bfloat16}
+    )[0] == "tc2d"
+    assert impl.supported(
+        aten.mm.default, (A, B), {"impl": "tc2d_to"}
     )[0] == "tc2d_to"
+    assert impl.supported(
+        aten.mm.default, (A, B), {"impl": "tc2d"}
+    )[0] == "tc2d"
 
 
 # ---------------------------------------------------------------------------

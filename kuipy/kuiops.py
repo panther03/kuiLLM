@@ -424,8 +424,8 @@ class _GemmFamily(_Family):
 
     tune_params = {"impl": "tc2d"}
 
-    def _select_tc2d_to(self, dtype, M, N, K):
-        if (self.tune_params["impl"] != "tc2d"
+    def _select_tc2d_to(self, dtype, M, N, K, force=False):
+        if ((not force and self.tune_params["impl"] != "tc2d")
                 or dtype not in _TC2D_TO_INPUT_DTYPES):
             return None
         tile = _tc2d_tile(dtype, M, N, K)
@@ -462,15 +462,33 @@ class MmImpl(_GemmFamily):
         M, K, N = int(M), int(K), int(N)
 
         out_dtype = kwargs.get("out_dtype", A.dtype)
+        requested_impl = kwargs.get("impl")
+        if requested_impl not in (None, "tc2d", "tc2d_to"):
+            return None
         sel = None
-        if (self.tune_params["impl"] == "tc2d"
-                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
+        tensor_cores_enabled = (
+            self.tune_params["impl"] == "tc2d" or requested_impl is not None
+        )
+        if (tensor_cores_enabled
+                and requested_impl != "tc2d_to"
+                and A.dtype in _TC2D_TO_INPUT_DTYPES
+                and out_dtype in _FLOAT_DTYPES):
             tile = _tc2d_tile(A.dtype, M, N, K)
             if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-                sel = ("tc2d", tile, out_dtype)
-        if sel is None and out_dtype in _FLOAT_DTYPES:
-            sel = self._select_tc2d_to(A.dtype, M, N, K)
-        if sel is None and out_dtype == A.dtype:
+                acc_dtype = (
+                    out_dtype
+                    if out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())
+                    else torch.float32
+                )
+                sel = ("tc2d", tile, acc_dtype)
+        if (sel is None
+                and tensor_cores_enabled
+                and requested_impl != "tc2d"
+                and out_dtype in _FLOAT_DTYPES):
+            sel = self._select_tc2d_to(
+                A.dtype, M, N, K, force=requested_impl == "tc2d_to"
+            )
+        if sel is None and requested_impl is None and out_dtype == A.dtype:
             bt2d = self._select_bt2d(A.dtype, M, N, K)
             if bt2d is not None:
                 sel = (*bt2d, A.dtype)
@@ -505,7 +523,14 @@ class MmImpl(_GemmFamily):
             impl=impl,
             cpp_in_et=torch_dtype_to_ctype(dtype),
             cpp_out_et=torch_dtype_to_ctype(out_dtype),
+            cpp_kernel_et=torch_dtype_to_ctype(
+                acc_dtype if impl == "tc2d" else out_dtype
+            ),
+            kernel_scalar=torch_dtype_to_aten_scalar(
+                acc_dtype if impl == "tc2d" else out_dtype
+            ),
             out_scalar=torch_dtype_to_aten_scalar(out_dtype),
+            cast_output=impl == "tc2d" and acc_dtype != out_dtype,
         )
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
 

@@ -367,8 +367,25 @@ fn tc2d_async
       #_ #_ #_ #_ #_ #_ #_ #_
       #fA #fB
       nblk nthr
-      #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
-      (to_real_matrix eA) (to_real_matrix eB) (to_real_matrix eC) #_ #_ ()
+      (to_real_matrix eA) (to_real_matrix eB) (to_real_matrix eC)
+      (fun (x:real) -> x) (fun (x:real) -> x) (MS.comb2 #real)
+      (fun (x:et_ab) -> x) (fun (x:et_ab) -> x) (MS.comb2 #et_c)
+      ()
   ) s};
+  rewrite_pledge
+    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+      (exists* (eC' : chest2 et_c (SZ.v rows) (SZ.v cols)). (gC |-> eC') **
+        pure (eC' %~ MS.gmmcomb (fun (x:real) -> x) (fun (x:real) -> x)
+          (MS.comb2 #real) (to_real_matrix eC)
+          (to_real_matrix eA) (to_real_matrix eB)))))
+    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+      (exists* (eC' : chest2 et_c (SZ.v rows) (SZ.v cols)). (gC |-> eC') **
+        pure (eC' %~ MS.matmul (to_real_matrix eA) (to_real_matrix eB)))))
+    #emp_inames fn _ {
+    MS.gmmcomb_id (MS.comb2 #real)
+      (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB);
+    MS.matmul_is_gemm
+      (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)
+  };
 }
 #pop-options

@@ -131,13 +131,17 @@ def report(name, M, K, N, err, t_ours, t_ref, extra=""):
     return err < 5e-2
 
 
-def bench_mm(dtype, out_dtype):
+def bench_mm(dtype, out_dtype, implementation=None):
     """aten.mm through kuiops.MmImpl vs F.linear."""
+    implementation_label = implementation or "default"
     print(f"=== mm: C = A @ W^T   vs F.linear   "
-          f"[kuipy MmImpl, in {dtype} -> out {out_dtype}] ===")
+          f"[kuipy MmImpl {implementation_label}, "
+          f"in {dtype} -> out {out_dtype}] ===")
     impl = kuiops.MmImpl({})
     g = torch.Generator(device=DEV).manual_seed(0)
     kwargs = {"out_dtype": out_dtype}
+    if implementation is not None:
+        kwargs["impl"] = implementation
     ok = True
     for name, M, K, N in LINEAR_CASES:
         A = torch.randn(M, K, device=DEV, dtype=dtype, generator=g) * 0.1
@@ -266,7 +270,9 @@ def main():
     mod = build()
     print(f"device: {torch.cuda.get_device_name(0)}   "
           f"dtype: matmul bf16 / sdpa bf16   batch: {BATCH}\n")
-    ok = bench_mm(torch.bfloat16, torch.bfloat16)
+    ok = bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
+    print()
+    ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d_to")
     print()
     ok &= bench_mm(torch.float16, torch.float16)
     print()
