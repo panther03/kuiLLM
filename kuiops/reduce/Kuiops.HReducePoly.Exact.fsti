@@ -1,13 +1,7 @@
 module Kuiops.HReducePoly.Exact
 
-(* Exact reduction polymorphic in the (associative) reduction operator.
-
-   Exact analogue of [Kuiper.Kernel.HReduce.reduce]: instead of summing with the
-   scalar [add] up to a real-valued approximation, it folds an arbitrary
-   [reduce : et -> et -> et] required only to be associative, and returns the
-   *exact* left-to-right reduction of the (pre-mapped) input. Suitable for
-   operators such as [any], [all], [max], ... The input must be non-empty with at
-   least as many elements as threads ([nth <= lena]) so no identity is needed. *)
+(* Exact reduction over the innermost dimension of a tensor. Each outer
+   (batch) index is reduced by one CUDA block. *)
 
 #lang-pulse
 
@@ -17,32 +11,55 @@ open Kuiper.Tensor
 open Kuiper.Seq.Common
 module SZ = Kuiper.SizeT
 
-(* Non-empty left-to-right reduction ([foldl1]) of a sequence. *)
-let rfold1 (#et:Type0) (f : et -> et -> et) (s : seq et { Seq.length s > 0 })
-  : GTot et
-  = seq_fold_left f (s @! 0) (Seq.slice s 1 (Seq.length s))
+val snoc_shape (#r : nat) (d : shape r) (n : nat) : GTot (shape (r + 1))
 
-// TODO: should only need a fraction of a
-// TODO: support different accumulator type (need to supply another function to convert initial element)
-// This can be useful in the case of tracking both a sum and a max, for instance.
+val abs_snoc (#r : nat) (#d : shape r) (#n : nat)
+  (i : abs d) (j : natlt n) : GTot (abs (snoc_shape d n))
+
+val inner_seq (#et_i : Type0) (#r : nat) (#d : shape r) (#n : nat)
+  (v : chest (snoc_shape d n) et_i) (i : abs d) : GTot (lseq et_i n)
+
+let rfold1 (#et : Type0) (f : et -> et -> et)
+  (s : seq et { Seq.length s > 0 }) : GTot et =
+  seq_fold_left f (s @! 0) (Seq.slice s 1 (Seq.length s))
+
+let reduced
+  (#et_i #et #et_o : Type0)
+  (#r : nat) (#d : shape r) (#n : pos)
+  (f : et -> et -> et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (v : chest (snoc_shape d n) et_i)
+  (i : abs d)
+  : GTot et_o =
+  post_map (rfold1 f (lseq_map pre_map (inner_seq v i)))
+
 inline_for_extraction noextract
-type reduce_ty (et : Type0) {| sized et |} =
-  fn (f : (et -> et -> et) { is_associative f })
-     (pre_map : et -> et)
-     (nth : szp { nth <= max_threads })
-     (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-     (#l : layout1 lena) {| ctlayout l |}
-     (a : array1 et l { is_global a })
-     (#va : chest1 et lena)
+// `sized` needed because we allocate a shared memory array dynamically with element type `et`
+type reduce_ty (et_i et et_o : Type0) {| sized et |} =
+  fn (#r : erased nat)
+     (#d : shape r)
+     (cd : cshape d)
+     (f : (et -> et -> et) { is_associative f })
+     (pre_map : et_i -> et)
+     (post_map : et -> et_o)
+     (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+     (cols : szp)
+     (nth : szp {
+       nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+     (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+     (#lout : tlayout d) {| ctlayout lout |}
+     (a : tensor et_i lin { is_global a })
+     (out : tensor et_o lout { is_global out })
+     (#va : chest (snoc_shape d cols) et_i)
+     (#vout : chest d et_o)
   preserves
     cpu **
     on gpu_loc (a |-> va)
   requires
-    emp
-  returns
-    res : et
+    on gpu_loc (out |-> vout)
   ensures
-    pure (res == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+    on gpu_loc (out |-> mk d (fun i -> reduced f pre_map post_map va i))
 
 inline_for_extraction noextract
-val reduce (#et:Type0) {| sized et |} : reduce_ty et
+val reduce (#et_i #et #et_o : Type0) {| sized et |} : reduce_ty et_i et et_o
