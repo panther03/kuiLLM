@@ -824,6 +824,7 @@ fn kf
   (**)    (block (SZ.v cols) (SZ.v nth)
   (**)      (lseq_map pre_map (inner_seq va (unflatten d (SZ.v bid)))) i));
   (**)rfold1_singleton f (Seq.index parts (SZ.v tid));
+  (**)Seq.lemma_index_slice parts (SZ.v tid) (SZ.v tid + 1) 0;
   (**)assert pure (Seq.equal (Seq.slice parts (SZ.v tid) (SZ.v tid + 1))
   (**)                       (Seq.create 1 (Seq.index parts (SZ.v tid))));
 
