@@ -5,6 +5,7 @@ module Kuiops.HReducePoly.Exact
 
 #lang-pulse
 
+open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Functions { is_associative }
 open Kuiper.Tensor
@@ -51,15 +52,52 @@ type reduce_ty (et_i et et_o : Type0) {| sized et |} =
      (#lout : tlayout d) {| ctlayout lout |}
      (a : tensor et_i lin { is_global a })
      (out : tensor et_o lout { is_global out })
+     (s : stream_t)
      (#va : chest (snoc_shape d cols) et_i)
      (#vout : chest d et_o)
+     (#e : epoch_t)
   preserves
-    cpu **
-    on gpu_loc (a |-> va)
+    cpu ** stream_live s ** epoch_live s e
   requires
-    on gpu_loc (out |-> vout)
+    on gpu_loc (a |-> va) ** on gpu_loc (out |-> vout)
   ensures
-    on gpu_loc (out |-> mk d (fun i -> reduced f pre_map post_map va i))
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (a |-> va) **
+        (out |-> mk d (fun i -> reduced f pre_map post_map va i))))
 
 inline_for_extraction noextract
 val reduce (#et_i #et #et_o : Type0) {| sized et |} : reduce_ty et_i et et_o
+
+inline_for_extraction noextract
+fn reduce_indexed
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#r : erased nat)
+  (#d : shape r)
+  (cd : cshape d)
+  (f : (et -> et -> et) { is_associative f })
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp {
+    nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (input : tensor et_i lin { is_global input })
+  (output : tensor et_o lout { is_global output })
+  (s : stream_t)
+  (#vin : chest (snoc_shape d cols) et_i)
+  (#vout : chest d et_o)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (input |-> vin) **
+        (output |-> mk d (fun i ->
+          reduced f pre_map post_map vin i))))

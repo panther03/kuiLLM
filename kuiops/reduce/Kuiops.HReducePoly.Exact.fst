@@ -5,13 +5,14 @@ module Kuiops.HReducePoly.Exact
 
 #lang-pulse
 
+open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Barrier.RPM
 open Kuiper.Math
 open Kuiper.Functions
 open Kuiper.Tensor
 open Kuiper.Seq.Common
-open Kuiper.Tensor.Layout.Alg { l1_forward }
+open Kuiper.Tensor.Layout.Alg
 open Kuiper.Bijection { ( =~ ) }
 open Pulse.Lib.GhostReference { read as gread, write as gwrite, alloc as galloc }
 
@@ -259,6 +260,9 @@ fn fold_block
   (pre_map : et_i -> et)
   (cols : szp)
   (nth : szp { SZ.v nth <= SZ.v cols /\ SZ.fits (SZ.v cols + SZ.v nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
   (#l : tlayout (snoc_shape d cols)) {| ctlayout l |}
   (a : tensor et_i l)
   (batch : conc d)
@@ -294,8 +298,8 @@ fn fold_block
   (**)assert pure (SZ.v hi == bnd (SZ.v cols) (SZ.v nth) (SZ.v tid + 1));
   (**)assert pure (SZ.v lo < SZ.v hi /\ SZ.v hi <= SZ.v cols);
 
-  let x0 = tensor_read a (conc_snoc cd batch (lo <: szlt cols));
-  (**)up_conc_snoc cd batch (lo <: szlt cols);
+  let x0 = tensor_read a (index batch (lo <: szlt cols));
+  (**)index_up batch (lo <: szlt cols);
   (**)Seq.init_ghost_index (SZ.v cols)
   (**)  (fun (j:nat{j < SZ.v cols}) -> Kuiper.Chest.acc va (abs_snoc (up batch) j));
   let mut acc : et = pre_map x0;
@@ -317,8 +321,8 @@ fn fold_block
   {
     assert pure (SZ.v !idx < SZ.v cols);
     let vidx = !idx;
-    let xv = tensor_read a (conc_snoc cd batch (vidx <: szlt cols));
-    (**)up_conc_snoc cd batch (vidx <: szlt cols);
+    let xv = tensor_read a (index batch (vidx <: szlt cols));
+    (**)index_up batch (vidx <: szlt cols);
     (**)Seq.init_ghost_index (SZ.v cols)
     (**)  (fun (j:nat{j < SZ.v cols}) -> Kuiper.Chest.acc va (abs_snoc (up batch) j));
     let v = pre_map xv;
@@ -768,6 +772,9 @@ fn kf
   (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
   (cols : szp)
   (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
   (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
   (#lout : tlayout d) {| ctlayout lout |}
   (a : tensor et_i lin)
@@ -807,7 +814,7 @@ fn kf
   let parts : erased (lseq et nth) =
     partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d (SZ.v bid));
 
-  let psum : et = fold_block cd f pre_map cols nth a batch tid;
+  let psum : et = fold_block cd f pre_map cols nth index index_up a batch tid;
   assert pure (up batch == unflatten d (SZ.v bid));
   tensor_write_cell sa (cidx1 tid) psum;
 
@@ -1137,6 +1144,9 @@ let kernel
   (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
   (cols : szp)
   (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
   (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
   (#lout : tlayout d) {| ctlayout lout |}
   (a : tensor et_i lin { is_global a })
@@ -1162,7 +1172,8 @@ let kernel
         (from_array _ shmem._1)
         (partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d bid))));
 
-    f = kf cd f pre_map post_map rows cols nth a output va vout;
+    f = kf cd f pre_map post_map rows cols nth index index_up
+      a output va vout;
 
     block_pre  = (fun bid ->
       a |-> Frac (1 /. rows) va **
@@ -1206,17 +1217,58 @@ fn reduce
   (#lout : tlayout d) {| ctlayout lout |}
   (a : tensor et_i lin { is_global a })
   (output : tensor et_o lout { is_global output })
+  (s : stream_t)
   (#va : chest (snoc_shape d cols) et_i)
   (#vout : chest d et_o)
+  (#e : epoch_t)
   norewrite
   preserves
-    cpu **
-    on gpu_loc (a |-> va)
+    cpu ** stream_live s ** epoch_live s e
   requires
-    on gpu_loc (output |-> vout)
+    on gpu_loc (a |-> va) ** on gpu_loc (output |-> vout)
   ensures
-    on gpu_loc (output |-> mk d (fun i -> reduced f pre_map post_map va i))
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (a |-> va) **
+        (output |-> mk d (fun i -> reduced f pre_map post_map va i))))
 {
-  launch_sync (kernel cd f pre_map post_map rows cols nth a output);
-  ()
+  launch (kernel cd f pre_map post_map rows cols nth
+    (conc_snoc cd) (up_conc_snoc cd) a output) s;
+}
+
+inline_for_extraction noextract
+fn reduce_indexed
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#r : erased nat)
+  (#d : shape r)
+  (cd : cshape d)
+  (f : (et -> et -> et) { is_associative f })
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp {
+    nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (input : tensor et_i lin { is_global input })
+  (output : tensor et_o lout { is_global output })
+  (s : stream_t)
+  (#vin : chest (snoc_shape d cols) et_i)
+  (#vout : chest d et_o)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (input |-> vin) **
+        (output |-> mk d (fun i ->
+          reduced f pre_map post_map vin i))))
+{
+  launch (kernel cd f pre_map post_map rows cols nth
+    index index_up input output) s;
 }
