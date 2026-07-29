@@ -157,20 +157,20 @@ def bench_mm(dtype, out_dtype, implementation=None):
     return ok
 
 
-def bench_addmm():
+def bench_addmm(dtype):
     """Full epilogue D = alpha*(A@B) + beta*C (beta != 0) through kuiops.AddmmImpl,
     which the bias-free mm path never hits. Validated against a fp32 reference."""
     print("=== addmm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference "
-          "(perf vs bf16 torch.addmm)   [kuipy AddmmImpl] ===")
+          f"(perf vs {dtype} torch.addmm)   [kuipy AddmmImpl] ===")
     impl = kuiops.AddmmImpl({})
     g = torch.Generator(device=DEV).manual_seed(2)
     alpha, beta = 0.75, 1.5
     kw = dict(alpha=alpha, beta=beta)
     ok = True
     for name, M, K, N in GEMM_CASES:
-        A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
-        B = torch.randn(K, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
-        C = torch.randn(M, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        A = torch.randn(M, K, device=DEV, dtype=dtype, generator=g) * 0.1
+        B = torch.randn(K, N, device=DEV, dtype=dtype, generator=g) * 0.1
+        C = torch.randn(M, N, device=DEV, dtype=dtype, generator=g) * 0.1
         ref = alpha * (A.float() @ B.float()) + beta * C.float()
         got = kui_run(impl, aten.addmm.default, (C, A, B), kw)
         err = rel_fro(got, ref)
@@ -276,7 +276,9 @@ def main():
     print()
     ok &= bench_mm(torch.float16, torch.float16)
     print()
-    ok &= bench_addmm()
+    ok &= bench_addmm(torch.bfloat16)
+    print()
+    ok &= bench_addmm(torch.float16)
     print()
     ok &= bench_gemm_manual(mod)
     print()

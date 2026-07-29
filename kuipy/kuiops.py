@@ -594,9 +594,10 @@ class AddmmImpl(_GemmFamily):
         if len(args) != 3:
             return None
         Cin, A, B = args
+        out_dtype = kwargs.get("out_dtype", A.dtype)
         if not (A.is_cuda and B.is_cuda and Cin.is_cuda and
                 A.dim() == 2 and B.dim() == 2 and Cin.dim() == 2 and
-                A.dtype == B.dtype == Cin.dtype and
+                A.dtype == B.dtype and Cin.dtype == out_dtype and
                 A.dtype in (torch.float16, torch.float32, torch.bfloat16)):
             return None
         M, K = (int(x) for x in A.shape)
@@ -605,9 +606,16 @@ class AddmmImpl(_GemmFamily):
             return None
         if tuple(int(x) for x in Cin.shape) != (M, N):
             return None
-        sel = self._select_tc2d_to(A.dtype, M, N, K)
+        sel = None
+        if (self.tune_params["impl"] == "tc2d"
+                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
+            tile = _tc2d_tile(A.dtype, M, N, K)
+            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
+                sel = ("tc2d", tile, out_dtype)
+        if sel is None and out_dtype == A.dtype:
+            sel = self._select_tc2d_to(A.dtype, M, N, K)
         if sel is None:
-            bt2d = self._select_bt2d(A.dtype, M, N, K)
+            bt2d = self._select_bt2d(A.dtype, M, N, K) if out_dtype == A.dtype else None
             if bt2d is not None:
                 sel = (*bt2d, A.dtype)
         if sel is None:
@@ -629,13 +637,14 @@ class AddmmImpl(_GemmFamily):
         module = f"Kuiops.Addmm.{impl.title()}.{et.title()}.{acc_et.title()}.P_{tile_params_str}"
         name = "addmm_jit"
         fst_ctx = dict(module=module, name=name, in_et=et, acc_et=acc_et,
-                       out_et=et, impl=impl, **tile_params)
+                       out_et=torch_dtype_to_fstar(call[0].dtype),
+                       impl=impl, **tile_params)
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
             name=name,
             impl=impl,
             cpp_in_et=torch_dtype_to_ctype(dtype),
-            cpp_out_et=torch_dtype_to_ctype(dtype),
+            cpp_out_et=torch_dtype_to_ctype(call[0].dtype),
             cpp_acc_et=torch_dtype_to_ctype(acc_dtype),
         )
         return self._mod(module, fst_ctx, wrapper_ctx).run(Cin, A, B, alpha, beta)

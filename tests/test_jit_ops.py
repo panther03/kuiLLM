@@ -181,6 +181,24 @@ def test_addmm(dtype, alpha, beta):
     _assert_close(out, ref, dtype)
 
 
+@pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
+def test_addmm_tensorcore2d(alpha, beta):
+    _need_cuda()
+    impl = kuiops.AddmmImpl({})
+    torch.manual_seed(0)
+    M, K, N = 64, 64, 64
+    A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    B = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn(M, N, device="cuda", dtype=torch.float32)
+    kw = dict(alpha=alpha, beta=beta, out_dtype=torch.float32)
+    spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
+    assert spec is not None and spec[0] == "tc2d"
+    out = impl.run(spec, (bias, A, B), kw)
+    ref = alpha * (A.float() @ B.float()) + beta * bias
+    assert out.dtype == torch.float32
+    _assert_close(out, ref, torch.float32)
+
+
 def test_addmm_rejects_f64():
     _need_cuda()
     impl = kuiops.AddmmImpl({})

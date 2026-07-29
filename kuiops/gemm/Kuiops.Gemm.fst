@@ -298,6 +298,8 @@ fn tc2d_async
   (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
   (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
   (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
+  (comb : et_c -> et_c -> et_c)
+  (comb_r : binop real { approx2 comb comb_r })
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
   (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
@@ -321,7 +323,8 @@ fn tc2d_async
     pledge0 (epoch_done s e)
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
         (exists* eC'. (gC |-> eC') **
-          pure (eC' %~ MS.matmul (to_real_matrix eA) (to_real_matrix eB)))))
+          pure (eC' %~ MS.gmmcomb (fun (x:real) -> x) (fun (x:real) -> x) comb_r
+            (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
 {
   tensor_pts_to_ref_located gA;
   tensor_pts_to_ref_located gB;
@@ -368,24 +371,9 @@ fn tc2d_async
       #fA #fB
       nblk nthr
       (to_real_matrix eA) (to_real_matrix eB) (to_real_matrix eC)
-      (fun (x:real) -> x) (fun (x:real) -> x) (MS.comb2 #real)
-      (fun (x:et_ab) -> x) (fun (x:et_ab) -> x) (MS.comb2 #et_c)
+      (fun (x:real) -> x) (fun (x:real) -> x) comb_r
+      (fun (x:et_ab) -> x) (fun (x:et_ab) -> x) comb
       ()
   ) s};
-  rewrite_pledge
-    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-      (exists* (eC' : chest2 et_c (SZ.v rows) (SZ.v cols)). (gC |-> eC') **
-        pure (eC' %~ MS.gmmcomb (fun (x:real) -> x) (fun (x:real) -> x)
-          (MS.comb2 #real) (to_real_matrix eC)
-          (to_real_matrix eA) (to_real_matrix eB)))))
-    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-      (exists* (eC' : chest2 et_c (SZ.v rows) (SZ.v cols)). (gC |-> eC') **
-        pure (eC' %~ MS.matmul (to_real_matrix eA) (to_real_matrix eB)))))
-    #emp_inames fn _ {
-    MS.gmmcomb_id (MS.comb2 #real)
-      (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB);
-    MS.matmul_is_gemm
-      (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)
-  };
 }
 #pop-options
