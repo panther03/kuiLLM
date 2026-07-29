@@ -20,11 +20,13 @@ jobs:
         # Login shell so the micromamba environment is active in every step.
         shell: bash -leo pipefail {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up micromamba environment
-        uses: mamba-org/setup-micromamba@v2
+        uses: mamba-org/setup-micromamba@v3
         with:
+          download-micromamba: false
+          micromamba-binary-path: ~/micromamba-bin/micromamba
           environment-file: environment.yml
           environment-name: kuillm
           cache-environment: true
@@ -45,7 +47,7 @@ jobs:
 
       - name: Upload JIT build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: kuipy-cache
           path: |
