@@ -1,20 +1,7 @@
 module Kuiops.HReducePoly.Exact
 
-(* Exact reduction that is polymorphic in the (associative) reduction operator.
-
-   This is an exact analogue of [Kuiper.Kernel.HReduce.reduce]: rather than
-   summing with the scalar [add] up to a real-valued approximation, it folds an
-   arbitrary [reduce : et -> et -> et] that is required only to be associative.
-   The result is the *exact* left-to-right reduction of the (pre-mapped) input,
-   so it can implement operators such as [any], [all], [max], ...
-
-   Because a general associative operator has no inverse (unlike real [+.]), the
-   input is partitioned into *contiguous* per-thread blocks rather than the
-   strided blocks used by [HReduce]: combining adjacent contiguous ranges in
-   thread order preserves the sequence order and hence needs associativity only.
-   To avoid needing an identity element, the input must be non-empty and there
-   must be no more threads than elements ([nth <= lena]), so every block is
-   non-empty. *)
+(* Exact reduction over the innermost dimension of a tensor. Each outer
+   (batch) index is reduced by one CUDA block. *)
 
 #lang-pulse
 
@@ -38,6 +25,41 @@ let abs_bij (#len : nat) : (abs (len @| INil) =~ natlt len) =
     ff = (fun (i, ()) -> i);
     gg = (fun i -> (i, ()));
   }
+
+let rec snoc_shape (#r : nat) (d : shape r) (n : nat) : GTot (shape (r + 1)) =
+  match d with
+  | INil -> n @| INil
+  | ICons h t -> h @| snoc_shape t n
+
+let rec abs_snoc (#r : nat) (#d : shape r) (#n : nat)
+  (i : abs d) (j : natlt n) : GTot (abs (snoc_shape d n)) =
+  match d with
+  | INil -> (j, ())
+  | ICons h t ->
+    let ih, it = i <: natlt h & abs t in
+    (ih, abs_snoc it j)
+
+inline_for_extraction noextract
+let rec conc_snoc (#r : erased nat) (#d : shape r) (#n : erased nat)
+  (cd : cshape d) (i : conc d) (j : szlt n) : conc (snoc_shape d n) =
+  match cd with
+  | CNil -> (j, ())
+  | CCons ch ct ->
+    let ih, it = i <: szlt (SZ.v ch) & conc _ in
+    (ih, conc_snoc ct it j)
+
+let rec up_conc_snoc (#r : nat) (#d : shape r) (#n : nat)
+  (cd : cshape d) (i : conc d) (j : szlt n)
+  : Lemma (up (conc_snoc cd i j) == abs_snoc (up i) (SZ.v j))
+  = match cd with
+    | CNil -> ()
+    | CCons ch ct ->
+      let _, it = i <: szlt (SZ.v ch) & conc _ in
+      up_conc_snoc ct it j
+
+let inner_seq (#et_i : Type0) (#r : nat) (#d : shape r) (#n : nat)
+  (v : chest (snoc_shape d n) et_i) (i : abs d) : GTot (lseq et_i n) =
+  Seq.init_ghost n (fun j -> acc v (abs_snoc i j))
 
 (* ------------------------------------------------------------------ *)
 (* Pure specification: non-empty left-to-right reduction ([foldl1]).   *)
@@ -229,29 +251,33 @@ let smin (a b : sz) : sz = if SZ.(a <=^ b) then a else b
 
 inline_for_extraction noextract
 fn fold_block
-  (#et:Type0) {| sized et |}
+  (#et_i #et:Type0)
+  (#rank : erased nat)
+  (#d : shape rank)
+  (cd : cshape d)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (lena : sz)
-  (nth : szp { SZ.v nth <= SZ.v lena /\ SZ.fits (SZ.v lena + SZ.v nth) })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l)
+  (pre_map : et_i -> et)
+  (cols : szp)
+  (nth : szp { SZ.v nth <= SZ.v cols /\ SZ.fits (SZ.v cols + SZ.v nth) })
+  (#l : tlayout (snoc_shape d cols)) {| ctlayout l |}
+  (a : tensor et_i l)
+  (batch : conc d)
   (tid : szlt nth)
-  (#va : chest1 et lena)
+  (#va : chest (snoc_shape d cols) et_i)
   (#fr : perm)
   preserves
     gpu ** a |-> Frac fr va
   returns
     res : et
   ensures
-    pure (res == rfold1 f (block (SZ.v lena) (SZ.v nth)
-      (lseq_map pre_map (chest1_to_seq va)) (SZ.v tid)))
+    pure (res == rfold1 f (block (SZ.v cols) (SZ.v nth)
+      (lseq_map pre_map (inner_seq va (up batch))) (SZ.v tid)))
 {
-  let q : sz = SZ.(lena /^ nth);
-  let r : sz = SZ.(lena %^ nth);
-  (**)assert pure (SZ.v q == SZ.v lena / SZ.v nth);
-  (**)assert pure (SZ.v r == SZ.v lena % SZ.v nth);
-  (**)ML.euclidean_division_definition (SZ.v lena) (SZ.v nth);
+  let q : sz = SZ.(cols /^ nth);
+  let r : sz = SZ.(cols %^ nth);
+  (**)assert pure (SZ.v q == SZ.v cols / SZ.v nth);
+  (**)assert pure (SZ.v r == SZ.v cols % SZ.v nth);
+  (**)ML.euclidean_division_definition (SZ.v cols) (SZ.v nth);
   (**)ML.lemma_mult_le_right (SZ.v q) (SZ.v tid) (SZ.v nth);
   (**)ML.lemma_mult_le_right (SZ.v q) (SZ.v tid + 1) (SZ.v nth);
 
@@ -262,20 +288,23 @@ fn fold_block
   let lo : sz = SZ.(tid  *^ q +^ mt);
   let hi : sz = SZ.(tid1 *^ q +^ mt1);
 
-  (**)bnd_mono  (SZ.v lena) (SZ.v nth) (SZ.v tid);
-  (**)bnd_le    (SZ.v lena) (SZ.v nth) (SZ.v tid + 1);
-  (**)assert pure (SZ.v lo == bnd (SZ.v lena) (SZ.v nth) (SZ.v tid));
-  (**)assert pure (SZ.v hi == bnd (SZ.v lena) (SZ.v nth) (SZ.v tid + 1));
-  (**)assert pure (SZ.v lo < SZ.v hi /\ SZ.v hi <= SZ.v lena);
+  (**)bnd_mono  (SZ.v cols) (SZ.v nth) (SZ.v tid);
+  (**)bnd_le    (SZ.v cols) (SZ.v nth) (SZ.v tid + 1);
+  (**)assert pure (SZ.v lo == bnd (SZ.v cols) (SZ.v nth) (SZ.v tid));
+  (**)assert pure (SZ.v hi == bnd (SZ.v cols) (SZ.v nth) (SZ.v tid + 1));
+  (**)assert pure (SZ.v lo < SZ.v hi /\ SZ.v hi <= SZ.v cols);
 
-  let x0 = tensor_read a (cidx1 lo);
+  let x0 = tensor_read a (conc_snoc cd batch (lo <: szlt cols));
+  (**)up_conc_snoc cd batch (lo <: szlt cols);
+  (**)Seq.init_ghost_index (SZ.v cols)
+  (**)  (fun (j:nat{j < SZ.v cols}) -> Kuiper.Chest.acc va (abs_snoc (up batch) j));
   let mut acc : et = pre_map x0;
   let mut idx : sz = SZ.(lo +^ 1sz);
 
   (**)assert pure (Seq.equal
-  (**)  (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v lo + 1))
-  (**)  (Seq.create 1 (Seq.index (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo))));
-  (**)rfold1_singleton f (Seq.index (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo));
+  (**)  (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v lo + 1))
+  (**)  (Seq.create 1 (Seq.index (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo))));
+  (**)rfold1_singleton f (Seq.index (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo));
 
   while (SZ.(!idx <^ hi))
     invariant
@@ -283,26 +312,31 @@ fn fold_block
       live acc ** live idx **
       pure (SZ.v lo < SZ.v !idx /\ SZ.v !idx <= SZ.v hi /\
             !acc == rfold1 f
-              (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v !idx)))
+              (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v !idx)))
     decreases (SZ.v hi - SZ.v !idx)
   {
-    let xv = tensor_read a (cidx1 !idx);
+    assert pure (SZ.v !idx < SZ.v cols);
+    let vidx = !idx;
+    let xv = tensor_read a (conc_snoc cd batch (vidx <: szlt cols));
+    (**)up_conc_snoc cd batch (vidx <: szlt cols);
+    (**)Seq.init_ghost_index (SZ.v cols)
+    (**)  (fun (j:nat{j < SZ.v cols}) -> Kuiper.Chest.acc va (abs_snoc (up batch) j));
     let v = pre_map xv;
-    (**)assert pure (v == Seq.index (lseq_map pre_map (chest1_to_seq va)) (SZ.v !idx));
+    (**)assert pure (v == Seq.index (lseq_map pre_map (inner_seq va (up batch))) (SZ.v !idx));
     (**)assert pure (Seq.equal
-    (**)  (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v !idx + 1))
-    (**)  (Seq.snoc (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v !idx)) v));
+    (**)  (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v !idx + 1))
+    (**)  (Seq.snoc (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v !idx)) v));
     (**)rfold1_snoc f
-    (**)  (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v !idx)) v;
+    (**)  (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v !idx)) v;
     acc := f !acc v;
     idx := SZ.(!idx +^ 1sz);
   };
 
   (**)assert pure (SZ.v !idx == SZ.v hi);
   (**)assert pure (Seq.equal
-  (**)  (Seq.slice (lseq_map pre_map (chest1_to_seq va)) (SZ.v lo) (SZ.v hi))
-  (**)  (block (SZ.v lena) (SZ.v nth)
-  (**)    (lseq_map pre_map (chest1_to_seq va)) (SZ.v tid)));
+  (**)  (Seq.slice (lseq_map pre_map (inner_seq va (up batch))) (SZ.v lo) (SZ.v hi))
+  (**)  (block (SZ.v cols) (SZ.v nth)
+  (**)    (lseq_map pre_map (inner_seq va (up batch))) (SZ.v tid)));
   !acc
 }
 #pop-options
@@ -625,23 +659,30 @@ fn iteration
 (* Kernel spec plumbing.                                               *)
 (* ------------------------------------------------------------------ *)
 
-(* Per-thread partial results: thread [tid]'s reduction of its block. *)
 let partials
-  (#et:Type0) (f : et -> et -> et) (pre_map : et -> et)
-  (lena nth : pos { nth <= lena })
-  (va : chest1 et lena)
+  (#et_i #et : Type0)
+  (#rank : nat) (#d : shape rank)
+  (f : et -> et -> et)
+  (pre_map : et_i -> et)
+  (cols nth : pos { nth <= cols })
+  (va : chest (snoc_shape d cols) et_i)
+  (batch : abs d)
   : GTot (lseq et nth)
   = Seq.init_ghost nth (fun (tid:nat{tid<nth}) ->
-      rfold1 f (block lena nth (lseq_map pre_map (chest1_to_seq va)) tid))
+      rfold1 f (block cols nth (lseq_map pre_map (inner_seq va batch)) tid))
 
-(* Reducing the per-thread partials equals reducing the whole (mapped) input. *)
 let partials_reduces
-  (#et:Type0) (f : et -> et -> et) (pre_map : et -> et)
-  (lena nth : pos { nth <= lena }) (va : chest1 et lena)
+  (#et_i #et : Type0)
+  (#rank : nat) (#d : shape rank)
+  (f : et -> et -> et)
+  (pre_map : et_i -> et)
+  (cols nth : pos { nth <= cols })
+  (va : chest (snoc_shape d cols) et_i)
+  (batch : abs d)
   : Lemma (requires is_associative f)
-          (ensures rfold1 f (partials f pre_map lena nth va)
-                   == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
-  = blocks_fold f lena nth (lseq_map pre_map (chest1_to_seq va))
+          (ensures rfold1 f (partials f pre_map cols nth va batch)
+                   == rfold1 f (lseq_map pre_map (inner_seq va batch)))
+  = blocks_fold f cols nth (lseq_map pre_map (inner_seq va batch))
 
 (* Number of barrier calls in the reduction loop (identical to HReduce). *)
 let hreduce_barrier_count (nth : pos) : GTot nat = log2 (2 * nth - 1)
@@ -664,93 +705,112 @@ private let log2_hreduce (nth:pos) (it:nat)
 
 unfold
 let kpre
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : nat) (#d : shape rank)
   (f : et -> et -> et)
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena)
-  (a : array1 et l)
-  (va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols))
+  (#lout : tlayout d)
+  (a : tensor et_i lin)
+  (output : tensor et_o lout)
+  (va : chest (snoc_shape d cols) et_i)
+  (vout : chest d et_o)
   (shmem : c_shmems [SHArray et nth])
-  (bid : natlt 1)
+  (bid : natlt rows)
   (tid : natlt nth)
   : slprop
-  = a |-> Frac (1 /. nth) va **
-    if_ (op_Equality #nat tid 0) (live out) **
+  = a |-> Frac ((1 /. rows) /. nth) va **
+    if_ (op_Equality #nat tid 0)
+      (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)) **
     exists* (v : et).
       tensor_pts_to_cell (from_array (l1_forward nth) shmem._1) (tid, ()) v
 
 unfold
 let kpost
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : nat) (#d : shape rank)
   (f : et -> et -> et)
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena)
-  (a : array1 et l)
-  (va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols))
+  (#lout : tlayout d)
+  (a : tensor et_i lin)
+  (output : tensor et_o lout)
+  (va : chest (snoc_shape d cols) et_i)
+  (vout : chest d et_o)
   (shmem : c_shmems [SHArray et nth])
-  (bid : natlt 1)
+  (bid : natlt rows)
   (tid : natlt nth)
   : slprop
-  = a |-> Frac (1 /. nth) va **
+  = a |-> Frac ((1 /. rows) /. nth) va **
     if_ (op_Equality #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
-      exists* (v : et).
-        out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+      Cell output (unflatten d bid) |->
+        reduced f pre_map post_map va (unflatten d bid)
     )
 
-#push-options "--z3rlimit 40"
+#push-options "--z3rlimit 60"
 inline_for_extraction noextract
 fn kf
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : erased nat) (#d : shape rank)
+  (cd : cshape d)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l)
-  (va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (a : tensor et_i lin)
+  (output : tensor et_o lout)
+  (va : chest (snoc_shape d cols) et_i)
+  (vout : chest d et_o)
   (shmem : c_shmems [SHArray et nth])
-  (bid : szlt 1sz)
+  (bid : szlt rows)
   (tid : szlt nth)
   ()
   requires
     gpu **
-    kpre f pre_map nth lena a va out shmem bid tid **
+    kpre f pre_map post_map rows cols nth a output va vout shmem bid tid **
     thread_id nth tid **
-    block_id 1 bid **
+    block_id rows bid **
     mbarrier_tok nth (barrier_matrix f nth
       (from_array (l1_forward nth) shmem._1)
-      (partials f pre_map (SZ.v lena) (SZ.v nth) va)) **
+      (partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d (SZ.v bid)))) **
     B.barrier_state 0
   ensures
     gpu **
-    kpost f pre_map nth lena a va out shmem bid tid **
+    kpost f pre_map post_map rows cols nth a output va vout shmem bid tid **
     thread_id nth tid **
-    block_id 1 bid **
+    block_id rows bid **
     mbarrier_tok nth (barrier_matrix f nth
       (from_array (l1_forward nth) shmem._1)
-      (partials f pre_map (SZ.v lena) (SZ.v nth) va)) **
+      (partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d (SZ.v bid)))) **
     B.barrier_state (hreduce_barrier_count nth)
 {
+  unfold kpre f pre_map post_map rows cols nth a output va vout shmem bid tid;
   let (gsa, _) = shmem;
 
   let sa = from_array (l1_forward nth) gsa;
   rewrite each from_array (l1_forward nth) gsa as sa;
 
-  let parts : erased (lseq et nth) = partials f pre_map (SZ.v lena) (SZ.v nth) va;
+  let batch = cunflatten cd bid;
+  let parts : erased (lseq et nth) =
+    partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d (SZ.v bid));
 
-  (* Compute partial reduction and write to shmem *)
-  let psum : et = fold_block f pre_map lena nth a tid;
+  let psum : et = fold_block cd f pre_map cols nth a batch tid;
+  assert pure (up batch == unflatten d (SZ.v bid));
   tensor_write_cell sa (cidx1 tid) psum;
 
-  (* Now do tree reduction on shmem *)
   let mut n : szlt 32 = 0sz;
 
   forevery_singleton_intro'
@@ -761,9 +821,10 @@ fn kf
 
   (**)Seq.init_ghost_index (SZ.v nth)
   (**)  (fun (i:nat{i < SZ.v nth}) -> rfold1 f
-  (**)    (block (SZ.v lena) (SZ.v nth)
-  (**)      (lseq_map pre_map (chest1_to_seq va)) i));
+  (**)    (block (SZ.v cols) (SZ.v nth)
+  (**)      (lseq_map pre_map (inner_seq va (unflatten d (SZ.v bid)))) i));
   (**)rfold1_singleton f (Seq.index parts (SZ.v tid));
+  (**)Seq.lemma_index_slice parts (SZ.v tid) (SZ.v tid + 1) 0;
   (**)assert pure (Seq.equal (Seq.slice parts (SZ.v tid) (SZ.v tid + 1))
   (**)                       (Seq.create 1 (Seq.index parts (SZ.v tid))));
 
@@ -794,15 +855,26 @@ fn kf
   log2_hreduce (v nth) it;
   rewrite (B.barrier_state it) as (B.barrier_state (hreduce_barrier_count nth));
 
-  (* Thread zero owns the result at the end, and writes it out. *)
   if (tid = 0sz) {
     if_elim_true' (op_Equality #nat tid 0) (array1_pts_to_slice_red f sa 0 nth parts);
-    if_elim_true' (op_Equality #nat tid 0) (live out);
+    if_elim_true' (op_Equality #nat tid 0)
+      (Cell output (unflatten d (SZ.v bid)) |-> acc vout (unflatten d (SZ.v bid)));
     unfold array1_pts_to_slice_red f sa 0 nth parts;
     unfold array1_pts_to_slice_red_inner f sa 0 nth parts;
-    (**)partials_reduces f pre_map (SZ.v lena) (SZ.v nth) va;
+    (**)partials_reduces f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d (SZ.v bid));
     (**)assert pure (Seq.equal (Seq.slice parts 0 (SZ.v nth)) parts);
-    gpu_write out (array1_read_from_slice sa 0sz);
+    let red = array1_read_from_slice sa 0sz;
+    rewrite
+      Cell output (unflatten d (SZ.v bid)) |-> acc vout (unflatten d (SZ.v bid))
+    as
+      Cell output (up batch) |-> acc vout (unflatten d (SZ.v bid));
+    tensor_write_cell output batch (post_map red);
+    assert pure (post_map red == reduced f pre_map post_map va (unflatten d (SZ.v bid)));
+    rewrite
+      Cell output (up batch) |-> post_map red
+    as
+      Cell output (unflatten d (SZ.v bid)) |->
+        reduced f pre_map post_map va (unflatten d (SZ.v bid));
     with ss. assert array1_pts_to_slice sa 0 nth ss;
     unfold array1_pts_to_slice sa;
     let css : erased (chest1 et nth) = hide (seq_to_chest1 (reveal ss));
@@ -822,16 +894,17 @@ fn kf
     rewrite each sa as from_array (l1_forward nth) shmem._1;
     if_intro_true' (op_Equality #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
-      exists* (v : et).
-        out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+      Cell output (unflatten d (SZ.v bid)) |->
+        reduced f pre_map post_map va (unflatten d (SZ.v bid))
     )
   } else {
     if_elim_false' (op_Equality #nat tid 0) (array1_pts_to_slice_red f sa 0 nth parts);
-    if_elim_false' (op_Equality #nat tid 0) (live out);
+    if_elim_false' (op_Equality #nat tid 0)
+      (Cell output (unflatten d (SZ.v bid)) |-> acc vout (unflatten d (SZ.v bid)));
     if_intro_false' (op_Equality #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
-      exists* (v : et).
-        out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+      Cell output (unflatten d (SZ.v bid)) |->
+        reduced f pre_map post_map va (unflatten d (SZ.v bid))
     );
     ();
   };
@@ -840,24 +913,31 @@ fn kf
 
 ghost
 fn block_setup
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : nat) (#d : shape rank)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena)
-  (a : array1 et l)
-  (#va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols))
+  (#lout : tlayout d)
+  (a : tensor et_i lin)
+  (#va : chest (snoc_shape d cols) et_i)
+  (output : tensor et_o lout)
+  (#vout : chest d et_o)
   (shmem : c_shmems [SHArray et nth])
-  (bid : natlt 1)
+  (bid : natlt rows)
   ()
   norewrite
   requires
     live_c_shmems shmem **
-    (a |-> va ** live out)
+    (a |-> Frac (1 /. rows) va **
+     Cell output (unflatten d bid) |-> acc vout (unflatten d bid))
   ensures
-    (forall+ (i : natlt nth). kpre f pre_map nth lena a va out shmem bid i) **
+    (forall+ (i : natlt nth).
+      kpre f pre_map post_map rows cols nth a output va vout shmem bid i) **
     emp
 {
   unfold_live_c_shmems_cons shmem #_;
@@ -868,33 +948,41 @@ fn block_setup
   with vgsa. assert gsa |-> vgsa;
   gpu_pts_to_ref gsa;
 
-  tensor_share_n a nth;
+  tensor_share_n a (SZ.v nth);
 
-  forevery_if_intro #(natlt nth) 0 (fun _ -> live out);
+  forevery_if_intro #(natlt nth) 0 (fun _ ->
+    Cell output (unflatten d bid) |-> acc vout (unflatten d bid));
   forevery_ext
-    (fun tid -> if_ (op_Equality #(natlt nth) tid 0) (live out))
-    (fun tid -> if_ (op_Equality #nat tid 0) (live out));
+    (fun tid -> if_ (op_Equality #(natlt nth) tid 0)
+      (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)))
+    (fun tid -> if_ (op_Equality #nat tid 0)
+      (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)));
 
-  forevery_zip (fun _ -> a |-> Frac (1 /. nth) va) _;
+  forevery_zip (fun _ -> a |-> Frac ((1 /. rows) /. nth) va) _;
 
   tensor_abs' (l1_forward nth) gsa;
   tensor_explode (from_array (l1_forward nth) gsa);
   forevery_iso abs_bij _;
 
   forevery_zip #(natlt nth)
-    (fun tid -> a |-> Frac (1 /. nth) va ** if_ (op_Equality #nat tid 0) (live out))
-    _;
+  (fun tid ->
+    a |-> Frac ((1 /. rows) /. nth) va **
+    if_ (op_Equality #nat tid 0)
+      (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)))
+  _;
 
   forevery_map
     #(natlt nth)
     (fun tid ->
-      (a |-> Frac (1 /. nth) va **
-       if_ (op_Equality #nat tid 0) (live out)) **
+      (a |-> Frac ((1 /. rows) /. nth) va **
+       if_ (op_Equality #nat tid 0)
+         (Cell output (unflatten d bid) |-> acc vout (unflatten d bid))) **
       tensor_pts_to_cell (from_array (l1_forward nth) gsa)
         (abs_bij.gg (tid <: natlt nth))
         (acc (from_seq (l1_forward nth) vgsa) (abs_bij.gg (tid <: natlt nth)))
     )
-    (fun (tid : natlt nth) -> kpre f pre_map nth lena a va out shmem bid tid)
+    (fun (tid : natlt nth) ->
+      kpre f pre_map post_map rows cols nth a output va vout shmem bid tid)
     fn tid {
       rewrite each gsa as shmem._1;
       ();
@@ -906,47 +994,54 @@ fn block_setup
 
 ghost
 fn block_teardown
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : nat) (#d : shape rank)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena)
-  (a : array1 et l)
-  (#va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols))
+  (#lout : tlayout d)
+  (a : tensor et_i lin)
+  (#va : chest (snoc_shape d cols) et_i)
+  (output : tensor et_o lout)
+  (#vout : chest d et_o)
   (shmem : c_shmems [SHArray et nth])
-  (bid : natlt 1)
+  (bid : natlt rows)
   ()
   norewrite
   requires
-    (forall+ (i : natlt nth). kpost f pre_map nth lena a va out shmem bid i) **
+    (forall+ (i : natlt nth).
+      kpost f pre_map post_map rows cols nth a output va vout shmem bid i) **
     emp
   ensures
     live_c_shmems shmem **
-    (a |-> va ** (exists* (v : et).
-      out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))))
+    (a |-> Frac (1 /. rows) va **
+     Cell output (unflatten d bid) |->
+       reduced f pre_map post_map va (unflatten d bid))
 {
   forevery_unzip _ _;
 
-  tensor_gather_n a nth;
+  tensor_gather_n a (SZ.v nth);
 
   forevery_ext #(natlt nth)
     (fun tid ->
       if_ (op_Equality #nat tid 0) (
         live (from_array (l1_forward nth) shmem._1) **
-        exists* (v : et).
-          out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))))
+        Cell output (unflatten d bid) |->
+          reduced f pre_map post_map va (unflatten d bid)))
     (fun tid ->
       if_ (op_Equality #(natlt nth) tid 0) (
         live (from_array (l1_forward nth) shmem._1) **
-        exists* (v : et).
-          out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))));
+        Cell output (unflatten d bid) |->
+          reduced f pre_map post_map va (unflatten d bid)));
 
   forevery_if_elim #(natlt nth) 0 (fun tid ->
       live (from_array (l1_forward nth) shmem._1) **
-      exists* (v : et).
-        out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+      Cell output (unflatten d bid) |->
+        reduced f pre_map post_map va (unflatten d bid)
   );
 
   tensor_concr (from_array (l1_forward nth) shmem._1);
@@ -960,92 +1055,135 @@ fn block_teardown
 
 ghost
 fn setup
-  (#et:Type0) {| sized et |}
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l { is_global a })
-  (#va : chest1 et lena)
-  (out : gpu_ref et)
+  (#et_i #et_o : Type0)
+  (#rank : nat) (#d : shape rank)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (a : tensor et_i lin)
+  (#va : chest (snoc_shape d cols) et_i)
+  (output : tensor et_o lout)
+  (#vout : chest d et_o)
   ()
   norewrite
   requires
-    a |-> va ** live out
+    a |-> va ** output |-> vout
   ensures
-    (forall+ (bid : natlt 1). a |-> va ** live out) **
-    emp
+    (forall+ (bid : natlt rows).
+      a |-> Frac (1 /. rows) va **
+      Cell output (unflatten d bid) |-> acc vout (unflatten d bid)) **
+    pure (SZ.fits (tlayout_ulen lout))
 {
-  forevery_singleton_intro #(natlt 1) (fun _bid -> a |-> va ** live out);
+  tensor_pts_to_ref output;
+  tensor_share_n a (SZ.v rows);
+  tensor_explode output;
+  forevery_iso (flatten_bij d)
+    (fun i -> Cell output i |-> acc vout i);
+  forevery_rw_size (sizeof d) (SZ.v rows);
+  forevery_zip
+    (fun (_ : natlt rows) -> a |-> Frac (1 /. rows) va)
+    (fun (bid : natlt rows) ->
+      Cell output (unflatten d bid) |-> acc vout (unflatten d bid));
 }
 
 ghost
 fn teardown
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0)
+  (#rank : nat) (#d : shape rank)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l { is_global a })
-  (#va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (a : tensor et_i lin)
+  (#va : chest (snoc_shape d cols) et_i)
+  (output : tensor et_o lout)
   ()
   norewrite
   requires
-    (forall+ (bid : natlt 1). a |-> va ** exists* (v : et).
-      out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va)))) **
-    emp
+    (forall+ (bid : natlt rows).
+      a |-> Frac (1 /. rows) va **
+      Cell output (unflatten d bid) |->
+        reduced f pre_map post_map va (unflatten d bid)) **
+    pure (SZ.fits (tlayout_ulen lout))
   ensures
-    a |-> va ** (exists* (v : et).
-      out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va))))
+    a |-> va **
+    output |-> mk d (fun i -> reduced f pre_map post_map va i)
 {
-  forevery_singleton_elim #(natlt 1) _;
+  forevery_unzip _ _;
+  tensor_gather_n a (SZ.v rows);
+  forevery_rw_size (SZ.v rows) (sizeof d);
+  forevery_iso_back (flatten_bij d)
+    (fun i -> Cell output i |-> reduced f pre_map post_map va i);
+  let result = mk d (fun i -> reduced f pre_map post_map va i);
+  forevery_map
+    (fun i -> Cell output i |-> reduced f pre_map post_map va i)
+    (fun i -> Cell output i |-> acc result i)
+    fn _ { () };
+  tensor_implode output;
 }
 
 inline_for_extraction noextract
 let kernel
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : erased nat) (#d : shape rank)
+  (cd : cshape d)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l { is_global a })
-  (#va : chest1 et lena)
-  (out : gpu_ref et)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (a : tensor et_i lin { is_global a })
+  (output : tensor et_o lout { is_global output })
+  (#va : chest (snoc_shape d cols) et_i)
+  (#vout : chest d et_o)
   : kernel_desc
-      (a |-> va ** live out)
-      (a |-> va ** exists* (v : et).
-        out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va))))
+      (a |-> va ** output |-> vout)
+      (a |-> va ** output |-> mk d (fun i -> reduced f pre_map post_map va i))
   = {
-    nblk = 1sz;
+    nblk = rows;
     nthr = nth;
 
     shmems_desc = [SHArray et nth];
 
-    barrier_contract = (fun _bid shmem ->
+    barrier_contract = (fun bid shmem ->
       mbarrier_contract (barrier_matrix #et f nth
-        (from_array _ shmem._1) (partials f pre_map (SZ.v lena) (SZ.v nth) va)));
+        (from_array _ shmem._1)
+        (partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d bid))));
     barrier_count    = (fun _bid    -> hreduce_barrier_count nth);
-    barrier_ok       = (fun _bid shmem ->
+    barrier_ok       = (fun bid shmem ->
       mbarrier_transform (barrier_matrix f nth #(l1_forward nth)
-        (from_array _ shmem._1) (partials f pre_map (SZ.v lena) (SZ.v nth) va)));
+        (from_array _ shmem._1)
+        (partials f pre_map (SZ.v cols) (SZ.v nth) va (unflatten d bid))));
 
-    f = kf f pre_map nth lena a va out;
+    f = kf cd f pre_map post_map rows cols nth a output va vout;
 
-    block_pre  = (fun bid -> a |-> va ** live out);
-    block_post = (fun bid -> a |-> va ** exists* (v : et).
-      out |-> v ** pure (v == rfold1 f (lseq_map pre_map (chest1_to_seq va))));
-    setup      = setup    nth lena a #va out;
-    teardown   = teardown f pre_map nth lena a #va out;
+    block_pre  = (fun bid ->
+      a |-> Frac (1 /. rows) va **
+      Cell (output <: tensor et_o lout) (unflatten d bid) |->
+        acc vout (unflatten d bid));
+    block_post = (fun bid ->
+      a |-> Frac (1 /. rows) va **
+      Cell (output <: tensor et_o lout) (unflatten d bid) |->
+        reduced f pre_map post_map va (unflatten d bid));
+    setup      = setup rows cols a #va output #vout;
+    teardown   = teardown f pre_map post_map rows cols a #va output;
 
     block_frame    = (fun _shmem _bid -> emp);
-    block_setup    = block_setup    f pre_map nth lena a #va out;
-    block_teardown = block_teardown f pre_map nth lena a #va out;
+    block_setup    = block_setup
+      f pre_map post_map rows cols nth a #va output #vout;
+    block_teardown = block_teardown
+      f pre_map post_map rows cols nth a #va output #vout;
 
-    kpre =  kpre  f pre_map nth lena a va out;
-    kpost = kpost f pre_map nth lena a va out;
-    frame = emp;
+    kpre = kpre f pre_map post_map rows cols nth a output va vout;
+    kpost = kpost f pre_map post_map rows cols nth a output va vout;
+    frame = pure (SZ.fits (tlayout_ulen lout));
 
     kpre_sendable       = magic();
     kpost_sendable      = magic();
@@ -1055,31 +1193,30 @@ let kernel
 
 inline_for_extraction noextract
 fn reduce
-  (#et:Type0) {| sized et |}
+  (#et_i #et #et_o : Type0) {| sized et |}
+  (#rank : erased nat) (#d : shape rank)
+  (cd : cshape d)
   (f : (et -> et -> et) { is_associative f })
-  (pre_map : et -> et)
-  (nth : szp { nth <= max_threads })
-  (lena : sz { SZ.fits (lena + nth) /\ SZ.v nth <= SZ.v lena })
-  (#l : layout1 lena) {| ctlayout l |}
-  (a : array1 et l { is_global a })
-  (#va : chest1 et lena)
+  (pre_map : et_i -> et)
+  (post_map : et -> et_o)
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (a : tensor et_i lin { is_global a })
+  (output : tensor et_o lout { is_global output })
+  (#va : chest (snoc_shape d cols) et_i)
+  (#vout : chest d et_o)
   norewrite
   preserves
     cpu **
     on gpu_loc (a |-> va)
   requires
-    emp
-  returns
-    res : et
+    on gpu_loc (output |-> vout)
   ensures
-    pure (res == rfold1 f (lseq_map pre_map (chest1_to_seq va)))
+    on gpu_loc (output |-> mk d (fun i -> reduced f pre_map post_map va i))
 {
-  let out = Kuiper.Ref.gpu_alloc0 #et ();
-  launch_sync (kernel f pre_map nth lena a out);
-
-  let mut hout : et = default #et;
-  Kuiper.Ref.gpu_memcpy_device_to_host hout out;
-  Kuiper.Ref.gpu_free out;
-
-  !hout;
+  launch_sync (kernel cd f pre_map post_map rows cols nth a output);
+  ()
 }

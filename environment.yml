@@ -1,0 +1,29 @@
+# Conda/micromamba environment for kuiLLM.
+#
+#   micromamba create -f environment.yml && micromamba activate kuillm
+#
+# CUDA itself (nvcc + driver) is NOT provided here: it must come from the host
+# (12.x, matching the torch cu126 wheels below) since kuipy compiles kernels
+# with the system nvcc via torch.utils.cpp_extension.
+name: kuillm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - make
+  - curl
+  # GNU indent + sed: the karamel output fix-up pass (kuipy/toolchain.py).
+  - indent
+  - sed
+  # Used by torch.utils.cpp_extension to build the JIT kernel .so.
+  - ninja
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch==2.13.0+cu126
+      - transformers
+      - accelerate
+      - pytest
+      - pytest-xdist
+      - jinja2
+      - filelock

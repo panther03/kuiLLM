@@ -4,25 +4,33 @@
 
 #include "{{ header }}"
 
-// addmm(C, A, B, beta, alpha) = beta*C + alpha*(A@B).
+// JIT-GENERATED pybind glue for the verified Kuiper addmm kernel. DO NOT EDIT.
+// Generated from kuiops/addmm/wrapper_addmm.cu.j2
+//
+// addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B). The output is a copy of C
+// (the kernel reads its old value through `lincomb`).
 torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B,
                            double alpha, double beta)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
-    auto Cout = C.clone();
+    auto Cout = kuiops::clone_in(C);
 
     at::cuda::CUDAGuard g(A.device());
-    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
-        (uint32_t)M, (uint32_t)K, (uint32_t)N,
-        static_cast<{{cpp_et}}>((float)alpha),
-        static_cast<{{cpp_et}}>((float)beta),
-        reinterpret_cast<{{cpp_et}}*>(Ac.data_ptr()),
-        reinterpret_cast<{{cpp_et}}*>(Bc.data_ptr()),
-        reinterpret_cast<{{cpp_et}}*>(Cout.data_ptr()));
+        static_cast<{{cpp_acc_et}}>((float)alpha),
+        static_cast<{{cpp_acc_et}}>((float)beta),
+        (uint32_t)M, (uint32_t)N, (uint32_t)K,
+        reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
+        reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
+{% if impl == "tc2d_to" %}
+        // C and D alias; the kernel reads C before writing the result to D.
+        reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
+{% endif %}
+        reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
+        kuiops::current_stream());
 
     return Cout;
 }

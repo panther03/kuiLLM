@@ -57,8 +57,11 @@ profile-golden-triton:
 profile-golden-no-triton:
 	$(NSYS_RANGE) -o data/golden-no-triton.nsys-rep python3 etc/infer_golden_exp.py --nsys --no-triton --manual-cudagraph --batch 256
 
-# control # of fstar worker processes for JIT generation in tests
-NPROCS ?= 4
+# Number of parallel pytest workers (requires pytest-xdist). Each worker drives
+# its own F*/karamel extraction; since a build now only reads the shared
+# .checked cache (see kuipy/toolchain.py) these run fully in parallel, and a
+# cold-cache run is dominated by F* extraction, so this scales well.
+NPROCS ?= 12
 test:
 	KUIPY_JIT_NVCC_FAST=1 python3 -m pytest tests/ -n $(NPROCS)
 

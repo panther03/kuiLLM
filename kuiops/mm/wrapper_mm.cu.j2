@@ -1,25 +1,38 @@
+#include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include "kuiops.h"
 
 #include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper mm kernel. DO NOT EDIT.
+// Generated from kuiops/mm/wrapper_mm.cu.j2
 
 torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
-    auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
+    auto C = torch::empty(
+        {M, N}, A.options().dtype({{kernel_scalar}}));
 
     at::cuda::CUDAGuard g(A.device());
-    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
-        (uint32_t)M, (uint32_t)N, (uint32_t)K, 
+        (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-        reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()));
+{% if impl == "tc2d_to" %}
+        // `comb2_to` ignores C, so C and D can share the output buffer.
+        reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),
+{% endif %}
+        reinterpret_cast<{{cpp_kernel_et}}*>(C.data_ptr()),
+        kuiops::current_stream());
 
+{% if cast_output %}
+    return C.to({{out_scalar}});
+{% else %}
     return C;
+{% endif %}
 }
 
 {% include "_pybind.cu.j2" %}

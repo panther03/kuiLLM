@@ -115,6 +115,11 @@ def _fake(x):
 
 
 def _supported(impl, func, args, kwargs):
+    # Non-graph-safe families sync inside the kernel, which is illegal under CUDA
+    # graph capture; never claim them from the compiled graph (they stay callable
+    # directly, e.g. from the unit tests).
+    if not impl.graph_safe:
+        return False
     try:
         return impl.supported(func, args, kwargs) is not None
     except (TypeError, ValueError, RuntimeError, KeyError):

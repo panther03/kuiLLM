@@ -4,6 +4,9 @@
 
 #include "{{ header }}"
 
+// JIT-GENERATED pybind glue for the verified Kuiper bmm kernel. DO NOT EDIT.
+// Generated from kuiops/bmm/wrapper_bmm.cu.j2
+
 torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     const int64_t Bn = A.size(0), M = A.size(1), K = A.size(2), N = B.size(2);
@@ -12,13 +15,13 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
     auto C = torch::empty({Bn, M, N}, A.options());
 
     at::cuda::CUDAGuard g(A.device());
-    kuiops::use_current_stream();
 
     {{module}}_{{name}} (
-        (uint32_t)Bn, (uint32_t)M, (uint32_t)K, (uint32_t)N,
+        (uint32_t)Bn, (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_et}}*>(Bc.data_ptr()),
-        reinterpret_cast<{{cpp_et}}*>(C.data_ptr()));
+        reinterpret_cast<{{cpp_et}}*>(C.data_ptr()),
+        kuiops::current_stream());
 
     return C;
 }

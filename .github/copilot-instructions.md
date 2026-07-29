@@ -12,6 +12,10 @@ extracts, compiles, and dispatches them.
 Always use the project virtualenv interpreter — there is no system install:
 `./.venv/bin/python` (Makefile targets just call `python3`,
 so run them with the venv active or use the venv python directly).
+`environment.yml` (used by CI, see `.github/workflows/ci.yml`) declares the same
+dependency set for a micromamba/conda setup:
+`micromamba create -f environment.yml && micromamba activate kuillm`. It does not
+provide CUDA — nvcc 12.x must come from the host.
 
 - **Run one Kuiper install target before anything else**:
   `make install-kuiper-release` installs the latest stable binary package,
@@ -78,8 +82,7 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 - **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. There is one exception right now in the form of `mm` which uses a cast at the output because it doesn't handle bf16 x bf16 -> bf16 matmul in Kuiper. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). `supported()` constraints should reflect the kernel's ability to handle broadcasting, and `run()` should not attempt to implement it in Python.
 - **Allocations**: By convention, the Kuiper kernels do not allocate output tensors and instead take the output tensor as argument. In terms of the native_functions.yaml of ATen, If it is OK for an input tensor to be modified and it is in the same alias set as the output, then the Kuiper implementation shall modify that input in place instead of there being a separate argument (this is the case for a unary elementwise operation for instance). The allocation of the output tensor should happen on the CUDA/C++ template side, not in Python. The allocation could also be a copy of some input tensor, for example in the `addmm` operator which copies the C matrix to the output matrix and the Kuiper kernel modifies this in-place. 
 - Remember that in F* and Pulse, you do not need to write `return` to return a value from a function; the last expression is returned automatically.
-- Keep code concise and match existing style; IMPORTANT: AVOID EXCESSIVE COMMENTS. Do new work
-  on a fresh git worktree. Commits include:
+- Keep code concise and match existing style; IMPORTANT: AVOID EXCESSIVE COMMENTS. Ask first if you should use a separate worktree or stay on the main one. Commits include:
   `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
 
 ## Reference docs

@@ -6,17 +6,21 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 
-// Defined as an inline variable in kuiper.h (emitted by the kernel .cu
-// translation unit). Declared here so the wrapper can point Kuiper launches at
-// Torch's current stream.
-extern cudaStream_t kpr_stream;
-
 namespace kuiops {
 
-// Route subsequent Kuiper kernel launches onto Torch's current CUDA stream.
-// Must be called in each wrapper before invoking the kernel entry so the launch
-// is ordered correctly and recorded into reduce-overhead CUDA graphs.
-inline void use_current_stream() { kpr_stream = c10::cuda::getCurrentCUDAStream().stream(); }
+// Torch's current CUDA stream, passed explicitly to every asynchronous Kuiper
+// kernel entry (Kuiper's extracted `stream_t` is a `cudaStream_t`). Launching on
+// it keeps the kernel ordered against the surrounding ATen ops and lets it be
+// recorded into reduce-overhead CUDA graphs.
+inline cudaStream_t current_stream() { return c10::cuda::getCurrentCUDAStream().stream(); }
+
+// For the few kernels that are still launched synchronously (they internally
+// launch several GPU kernels and sync to observe the intermediate results, so
+// they cannot take a caller-supplied stream, and cannot be graph-captured):
+// drain Torch's stream first so the kernel's own stream sees our inputs.
+inline void sync_current_stream() {
+    AT_CUDA_CHECK(cudaStreamSynchronize(c10::cuda::getCurrentCUDAStream().stream()));
+}
 
 inline torch::Tensor clone_in(const torch::Tensor& X) { return X.contiguous().clone(); }
 

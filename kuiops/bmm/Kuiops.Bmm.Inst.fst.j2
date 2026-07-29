@@ -3,8 +3,16 @@ module {{ module }}
 
 // JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
 // Generated from kuiops/bmm/Kuiops.Bmm.Inst.fst.j2
+//
+// Batched matmul via the (now batched) BlockTiling2D kernel: one launch covers
+// all pages. `comb2` discards the output buffer's old value.
 
 open Kuiper
-open Kuiops.Bmm
+open Kuiops.Gemm
 
-// TODO add back bmm
+module MS = Kuiper.Spec.GEMM
+
+let {{ name }} (batch rows cols shared : szp) =
+    bt2d_async #({{ et }}) (MS.comb2 #({{ et }}))
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz
+        batch rows cols shared

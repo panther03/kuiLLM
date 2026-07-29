@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Validate + benchmark the etc/ tensor-core reference kernels (Kuiper
-TensorCore2D matmul, tc_flash_attn) as drop-in replacements for the stock
-kernels they target in the infer_golden.py trace:
+"""Validate + benchmark the Kuiper tensor-core kernels as drop-in replacements
+for the stock kernels they target in the infer_golden.py trace:
 
-  * matmul -> cuBLAS fp16 tensor-core GEMM (F.linear, bias-free cases only)
-  * sdpa   -> cuDNN flash_fprop SDPA (F.scaled_dot_product_attention)
+  * mm / addmm -> cuBLAS bf16 tensor-core GEMM (F.linear, torch.addmm)
+  * sdpa       -> cuDNN flash_fprop SDPA (F.scaled_dot_product_attention)
 
-The matmul path dispatches Kuiper's verified TensorCore2D
-f16_f16_128x128x32_16x16x16_4x4 kernel (see tc2d_linear.cu). Since TensorCore2D
-is a plain matmul (no bias) and has no bf16xbf16->bf16 instantiation, the linear
-cases run in fp16 and the bias-carrying qkv_proj projection is skipped.
+The matmul/GEMM paths go through the real JIT dispatch stack (kuipy.kuiops
+MmImpl / AddmmImpl), i.e. exactly the kernels infer.py would offload to; the
+hand-written etc/tc2d_linear_manual.cu GEMM is benchmarked alongside them as a
+reference point. SDPA still uses the etc/ reference kernel.
 
-For every case it reports the max relative-Frobenius divergence vs the stock
-kernel and the mean per-call latency of each. Shapes are Qwen2.5-0.5B at the
-production batch of 256.
+For every case it reports the relative-Frobenius divergence vs the stock kernel
+and the mean per-call latency of each. Shapes are Qwen2.5-0.5B at the production
+batch of 256.
 
     python3 etc/bench_tc_kernels.py
 """
@@ -30,9 +29,14 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.utils.cpp_extension import load
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from kuipy import kuiops
+
+aten = torch.ops.aten
+
 DEV = "cuda"
 DT = torch.bfloat16
-LINEAR_DT = torch.float16  # Kuiper TensorCore2D matmul is fp16 (no bf16xbf16->bf16 yet)
+LINEAR_DT = torch.bfloat16
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 # Kuiper headers: prefer the project's installed copy (make install-kuiper-*),
@@ -55,16 +59,25 @@ def build():
     return load(
         name="tc_kernels",
         sources=[os.path.join(HERE, "tc_kernels_wrapper.cu"),
-                 os.path.join(HERE, "tc2d_linear.cu"),
+                 os.path.join(HERE, "tc2d_linear_manual.cu"),
                  os.path.join(HERE, "tc_flash_attn.cu")],
         extra_include_paths=[HERE, KUIPER_INC],
         # Kuiper headers rely on implicit int->half conversion (fragment `{0}`
         # init); undo the torch defaults that would disable it.
         extra_cuda_cflags=["-U__CUDA_NO_HALF_OPERATORS__",
                            "-U__CUDA_NO_HALF_CONVERSIONS__",
+                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                            "-U__CUDA_NO_HALF2_OPERATORS__"],
         verbose=False,
     )
+
+
+def kui_run(impl, func, args, kwargs=None):
+    """Dispatch through the JIT stack exactly like KuiperMode does."""
+    kwargs = kwargs or {}
+    spec = impl.supported(func, args, kwargs)
+    assert spec is not None, f"{func} not supported for {args[0].shape} {kwargs}"
+    return impl.run(spec, args, kwargs)
 
 
 def rel_fro(a, b):
@@ -86,66 +99,108 @@ def time_call(fn, iters=50, warmup=10):
     return s.elapsed_time(e) / iters  # ms/call
 
 
-def bench_linear(mod):
-    print("=== matmul: C = A @ W^T   vs F.linear (fp16)   "
-          "[Kuiper TensorCore2D, bias-free matmul only] ===")
+# (name, M, K, N) covering every bias-free GEMM in the decode step (batch 256).
+# qkv_proj is excluded because its vector bias would require broadcasting, while
+# the kernels expect a full (M, N) C matrix.
+LINEAR_CASES = [
+    ("o_proj",          BATCH, HID, HID),
+    ("gate_proj",       BATCH, HID, INTER),
+    ("up_proj",         BATCH, HID, INTER),
+    ("down_proj",       BATCH, INTER, HID),
+    ("lm_head",         BATCH, HID, VOCAB),
+    ("square_4096",     4096,  4096, 4096),
+]
+
+GEMM_CASES = [
+    ("o_proj",      BATCH, HID,  HID),
+    ("down_proj",   BATCH, INTER, HID),
+    ("square_4096", 4096,  4096, 4096),
+]
+
+
+def report(name, M, K, N, err, t_ours, t_ref, extra=""):
+    flag = "ok " if err < 5e-2 else "BAD"
+    flops = 2.0 * M * N * K  # multiply-add per output element
+    gf_ours = flops / (t_ours * 1e-3) / 1e9
+    gf_ref = flops / (t_ref * 1e-3) / 1e9
+    print(f"  [{flag}] {name:<16} M={M:>4} K={K:>5} N={N:>6} "
+          f"| {extra}rel-err {err:.2e} "
+          f"| ours {t_ours*1e3:8.1f}us  ref {t_ref*1e3:8.1f}us"
+          f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%"
+          f"  | ours {gf_ours:8.1f} GFLOP/s  ref {gf_ref:8.1f} GFLOP/s")
+    return err < 5e-2
+
+
+def bench_mm(dtype, out_dtype, implementation=None):
+    """aten.mm through kuiops.MmImpl vs F.linear."""
+    implementation_label = implementation or "default"
+    print(f"=== mm: C = A @ W^T   vs F.linear   "
+          f"[kuipy MmImpl {implementation_label}, "
+          f"in {dtype} -> out {out_dtype}] ===")
+    impl = kuiops.MmImpl({})
     g = torch.Generator(device=DEV).manual_seed(0)
-    # (name, M, K, N) covering every bias-free GEMM in the decode step (batch
-    # 256). qkv_proj is excluded: it needs a bias, and TensorCore2D is a plain
-    # matmul, not a GEMM.
-    cases = [
-        ("o_proj",          BATCH, HID, HID),
-        ("gate_proj",       BATCH, HID, INTER),
-        ("up_proj",         BATCH, HID, INTER),
-        ("down_proj",       BATCH, INTER, HID),
-        ("lm_head",         BATCH, HID, VOCAB),
-        ("square_4096",     4096,  4096, 4096),
-    ]
+    kwargs = {"out_dtype": out_dtype}
+    if implementation is not None:
+        kwargs["impl"] = implementation
     ok = True
-    for name, M, K, N in cases:
-        A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
-        W = torch.randn(N, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
-        Wt = W.t().contiguous()  # (K, N): the matmul RHS, prepared outside timing
+    for name, M, K, N in LINEAR_CASES:
+        A = torch.randn(M, K, device=DEV, dtype=dtype, generator=g) * 0.1
+        W = torch.randn(N, K, device=DEV, dtype=dtype, generator=g) * 0.1
+        Wt = W.t().contiguous()  # (K, N): the mm RHS, prepared outside timing
         ref = F.linear(A, W)
-        got = mod.matmul(A, Wt)
+        got = kui_run(impl, aten.mm.default, (A, Wt), kwargs)
         err = rel_fro(got, ref)
-        t_ours = time_call(lambda: mod.matmul(A, Wt))
+        spec = impl.supported(aten.mm.default, (A, Wt), kwargs)
+        t_ours = time_call(lambda: impl.run(spec, (A, Wt), kwargs))
         t_ref = time_call(lambda: F.linear(A, W))
-        flag = "ok " if err < 5e-2 else "BAD"
-        ok &= err < 5e-2
-        flops = 2.0 * M * N * K  # multiply-add per output element
-        gf_ours = flops / (t_ours * 1e-3) / 1e9
-        gf_ref = flops / (t_ref * 1e-3) / 1e9
-        print(f"  [{flag}] {name:<16} M={M:>4} K={K:>5} N={N:>6} "
-              f"| rel-err {err:.2e} | ours {t_ours*1e3:8.1f}us  ref {t_ref*1e3:8.1f}us"
-              f"  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%"
-              f"  | ours {gf_ours:8.1f} GFLOP/s  ref {gf_ref:8.1f} GFLOP/s")
+        ok &= report(name, M, K, N, err, t_ours, t_ref, extra=f"{spec[0]:<8} | ")
     return ok
 
 
-def bench_gemm(mod):
-    # Exercises the full epilogue D = alpha*(A@B) + beta*C (beta != 0), which the
-    # bias-free matmul path above never hits. Validated against a fp32 reference.
-    print("=== gemm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference ===")
+def bench_addmm():
+    """Full epilogue D = alpha*(A@B) + beta*C (beta != 0) through kuiops.AddmmImpl,
+    which the bias-free mm path never hits. Validated against a fp32 reference."""
+    print("=== addmm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference "
+          "(perf vs bf16 torch.addmm)   [kuipy AddmmImpl] ===")
+    impl = kuiops.AddmmImpl({})
     g = torch.Generator(device=DEV).manual_seed(2)
-    cases = [
-        ("o_proj",      BATCH, HID,  HID),
-        ("down_proj",   BATCH, INTER, HID),
-        ("square_2048", 2048,  2048, 2048),
-    ]
+    alpha, beta = 0.75, 1.5
+    kw = dict(alpha=alpha, beta=beta)
     ok = True
-    for name, M, K, N in cases:
+    for name, M, K, N in GEMM_CASES:
         A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
         B = torch.randn(K, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
         C = torch.randn(M, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
-        alpha, beta = 0.75, 1.5
         ref = alpha * (A.float() @ B.float()) + beta * C.float()
-        got = mod.gemm(A, B, C, alpha, beta)
+        got = kui_run(impl, aten.addmm.default, (C, A, B), kw)
         err = rel_fro(got, ref)
-        flag = "ok " if err < 5e-2 else "BAD"
-        ok &= err < 5e-2
-        print(f"  [{flag}] {name:<12} M={M:>4} K={K:>5} N={N:>6} "
-              f"| alpha={alpha} beta={beta} | rel-err {err:.2e}")
+        spec = impl.supported(aten.addmm.default, (C, A, B), kw)
+        t_ours = time_call(lambda: impl.run(spec, (C, A, B), kw))
+        t_ref = time_call(lambda: torch.addmm(C, A, B, beta=beta, alpha=alpha))
+        ok &= report(name, M, K, N, err, t_ours, t_ref,
+                     extra=f"{spec[0]:<8} | alpha={alpha} beta={beta} | ")
+    return ok
+
+
+def bench_gemm_manual(mod):
+    """The hand-written etc/tc2d_linear_manual.cu GEMM (bf16 in/out, fp32
+    accumulate, in-place epilogue), same cases as bench_addmm."""
+    print("=== manual gemm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference "
+          "(perf vs bf16 torch.addmm)   [etc/tc2d_linear_manual.cu] ===")
+    g = torch.Generator(device=DEV).manual_seed(2)
+    alpha, beta = 0.75, 1.5
+    ok = True
+    for name, M, K, N in GEMM_CASES:
+        A = torch.randn(M, K, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        B = torch.randn(K, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        C = torch.randn(M, N, device=DEV, dtype=LINEAR_DT, generator=g) * 0.1
+        ref = alpha * (A.float() @ B.float()) + beta * C.float()
+        got = mod.gemm_manual(A, B, C, alpha, beta)
+        err = rel_fro(got, ref)
+        t_ours = time_call(lambda: mod.gemm_manual(A, B, C, alpha, beta))
+        t_ref = time_call(lambda: torch.addmm(C, A, B, beta=beta, alpha=alpha))
+        ok &= report(name, M, K, N, err, t_ours, t_ref,
+                     extra=f"alpha={alpha} beta={beta} | ")
     return ok
 
 
@@ -214,10 +269,16 @@ def main():
     print("Building etc/ tensor-core kernels...", file=sys.stderr)
     mod = build()
     print(f"device: {torch.cuda.get_device_name(0)}   "
-          f"dtype: matmul fp16 / sdpa bf16   batch: {BATCH}\n")
-    ok = bench_linear(mod)
+          f"dtype: matmul bf16 / sdpa bf16   batch: {BATCH}\n")
+    ok = bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
     print()
-    ok &= bench_gemm(mod)
+    ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d_to")
+    print()
+    ok &= bench_mm(torch.float16, torch.float16)
+    print()
+    ok &= bench_addmm()
+    print()
+    ok &= bench_gemm_manual(mod)
     print()
     ok &= bench_sdpa(mod, force_decode_kernel=args.force_decode_kernel)
     print("\n" + ("ALL PASSED" if ok else "SOME FAILED (rel-err >= 5e-2)"))

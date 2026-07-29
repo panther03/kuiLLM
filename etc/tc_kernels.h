@@ -15,28 +15,21 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 
-// Mixed-precision tensor-core GEMM (see tc2d_linear.cu): fp16 in/out, fp32
-// accumulate, with a real epilogue D = alpha*(A @ B) + beta*C. Row-major, no
-// transpose, so to reproduce F.linear(x, W) the caller passes B = W^T (K, N).
-// When beta != 0 the current contents of C are read back as the additive term
-// (in-place GEMM).
-//   A : (M, K)  half  row-major
-//   B : (K, N)  half  row-major
-//   C : (M, N)  half  row-major
+// Hand-written mixed-precision tensor-core GEMM (see tc2d_linear_manual.cu):
+// bf16 in/out, fp32 accumulate, with a real epilogue C = alpha*(A @ B) + beta*C
+// applied in place. Row-major, no transpose, so to reproduce F.linear(x, W) the
+// caller passes B = W^T (K, N).
+//   A : (M, K)  bf16  row-major
+//   B : (K, N)  bf16  row-major
+//   C : (M, N)  bf16  row-major, read as the additive term when beta != 0 and
+//                     overwritten with the result
 // Requires M % 128 == 0, N % 128 == 0, K % 32 == 0.
-void tc2d_gemm_launch(
-    const half* A,
-    const half* B,
-    half* C,
+void tc2d_manual_gemm_launch(
+    const __nv_bfloat16* A,
+    const __nv_bfloat16* B,
+    __nv_bfloat16* C,
     int M, int N, int K,
     float alpha, float beta);
-
-// Plain matmul C = A @ B (alpha=1, beta=0), the bias-free F.linear drop-in.
-void tc2d_matmul_launch(
-    const half* A,
-    const half* B,
-    half* C,
-    int M, int N, int K);
 
 // FlashAttention forward matching F.scaled_dot_product_attention (bf16, GQA,
 // optional additive mask, optional causal). Layout is the dense 4D SDPA layout:

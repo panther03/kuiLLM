@@ -20,11 +20,13 @@ module {{ module }}
 // JIT-GENERATED instantiation of the verified Kuiper scatter kernel. DO NOT EDIT.
 // Generated from kuiops/scatter/Kuiops.Scatter.Inst.fst.j2
 
+open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Shape
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Kernel.Scatter
+open Kuiops.Scatter
 
 module SZ = Kuiper.SizeT
 
@@ -43,18 +45,24 @@ fn {{ name }}
     (n : sz { SZ.v n == sizeof ({{ shp('i') }}) /\ n <= max_blocks * max_threads /\ n > 0 })
     (eInp : chest ({{ shp('i') }}) ({{ et }}))
     (eIdx : chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})) { chest_inj ({{ shp('i') }}) ({{ shp('o') }}) {{ dim }} eIdx })
+    (s : stream_t)
     (#fInp #fIdx : perm)
-  preserves cpu ** on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }}))))
-  requires on gpu_loc (live gOut)
+    (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (gInp |-> Frac fInp eInp) **
+           on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})))) **
+           on gpu_loc (live gOut)
   ensures
-    exists* eOut.
-      on gpu_loc (gOut |-> eOut) **
-      pure (vscatter_chest ({{ shp('i') }}) ({{ shp('o') }}) {{ dim }} eInp eIdx eOut)
+    pledge0 (epoch_done s e)
+      (on gpu_loc ((gInp |-> Frac fInp eInp) **
+                   (gIdx |-> Frac fIdx (eIdx <: chest ({{ shp('i') }}) (szlt (({{ shp('o') }}) @! {{ dim }})))) **
+                   (exists* eOut. (gOut |-> eOut) **
+                      pure (vscatter_chest ({{ shp('i') }}) ({{ shp('o') }}) {{ dim }} eInp eIdx eOut))))
 {
   // Index injectivity is a *runtime* property of `eIdx`, carried here as the
   // `chest_inj` refinement on its type. PyTorch leaves scatter with duplicate
   // indices nondeterministic, so at this trusted C boundary it is assumed; the
   // refinement is erased and never reaches the extracted kernel nor its ABI.
-  scatter_gpu ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
-    gInp gIdx gOut n eInp eIdx
+  scatter_async ({{ shp('i') }}) ({{ shp('o') }}) ({{ cs('i') }}) ({{ cs('o') }}) {{ dim }}sz
+    gInp gIdx gOut n eInp eIdx s
 }
