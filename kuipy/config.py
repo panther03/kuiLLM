@@ -27,6 +27,9 @@ KUIPY_JIT_PRE = KUIPY_CACHE / "pre"          # holds the raw karamel output
 KUIPY_JIT_CU = KUIPY_CACHE / "cu"            # holds the fixed-up .cu/.h files
 KUIPY_JIT_BUILD = KUIPY_CACHE / "build"      # holds the torch cpp_extension build dirs (.so)
 KUIPY_JIT_SRC = KUIPY_CACHE / "src"          # instantiated fst files
+TUNE_PARAMS_PATH = Path(
+    os.environ.get("KUIPY_TUNE_PARAMS", _REPO_ROOT / "tune_params.json")
+).resolve()
 
 # --------------------------------------------------------------------------
 # Behaviour
@@ -44,6 +47,12 @@ JIT_FLUSH_CACHE = os.environ.get("KUIPY_JIT_FLUSH_CACHE", "0") == "1"
 JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
 JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
+
+# Bump this whenever a change makes previously selected tuning parameters stale.
+TUNING_SCHEMA_VERSION = 1
+AUTOTUNE = os.environ.get("KUIPY_AUTOTUNE", "0") == "1"
+AUTOTUNE_WARMUP = int(os.environ.get("KUIPY_AUTOTUNE_WARMUP", "3"))
+AUTOTUNE_REPEATS = int(os.environ.get("KUIPY_AUTOTUNE_REPEATS", "10"))
 
 # Parallelism for the one-time `make verify-kuiops` pass that seeds the
 # kuiops .checked cache before any kernel is built.

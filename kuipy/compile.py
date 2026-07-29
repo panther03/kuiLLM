@@ -19,6 +19,7 @@ same shared extension.
 """
 import hashlib
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ _failed = {}
 
 # Active batch capture, or None. ext_name -> _CaptureRec (insertion-ordered).
 _capture = None
+_capture_artifact_lock = None
 
 
 class CaptureDeferred(Exception):
@@ -81,9 +83,51 @@ def is_capturing() -> bool:
 def start_capture():
     """Begin a batch capture: matched kernels are extracted but not compiled,
     and their execution is deferred to stock PyTorch until ``finalize_capture``."""
-    global _capture
+    global _capture, _capture_artifact_lock
+    if C.AUTOTUNE:
+        raise RuntimeError("KUIPY_AUTOTUNE cannot be combined with batch capture")
     if _capture is None:
+        C.KUIPY_CACHE.mkdir(parents=True, exist_ok=True)
+        _capture_artifact_lock = FileLock(
+            str(C.KUIPY_CACHE / "kernel-artifacts.lock")
+        )
+        _capture_artifact_lock.acquire()
         _capture = {}
+
+
+def kernel_artifacts(module):
+    """Return the exact per-instantiation files and directories for ``module``."""
+    ext_name = module.replace(".", "_")
+    files = [
+        C.KUIPY_JIT_SRC / f"{module}.fst",
+        C.KUIPY_CHECKED_DIR / f"{module}.fst.checked",
+        C.KUIPY_JIT_PRE / f"{ext_name}.krml",
+        C.KUIPY_JIT_PRE / f"{ext_name}.cu",
+        C.KUIPY_JIT_PRE / f"{ext_name}.h",
+        C.KUIPY_JIT_CU / f"{ext_name}.cu",
+        C.KUIPY_JIT_CU / f"{ext_name}.h",
+        C.KUIPY_JIT_CU / f"{ext_name}_decl.h",
+        C.KUIPY_JIT_CU / f"{ext_name}_wrapper.cpp",
+    ]
+    return files, [C.KUIPY_JIT_BUILD / ext_name]
+
+
+def delete_kernel(module):
+    """Delete one compiled instantiation without touching shared support caches."""
+    ext_name = module.replace(".", "_")
+    C.ensure_dirs()
+    artifact_lock = FileLock(str(C.KUIPY_CACHE / "kernel-artifacts.lock"))
+    build_lock = FileLock(str(C.KUIPY_JIT_BUILD / f"{ext_name}.lock"))
+    extract_lock = FileLock(str(C.KUIPY_CACHE / f"extract-{ext_name}.lock"))
+    with artifact_lock, build_lock, extract_lock:
+        _loaded.pop(ext_name, None)
+        _failed.pop(ext_name, None)
+        files, directories = kernel_artifacts(module)
+        for path in files:
+            path.unlink(missing_ok=True)
+        for path in directories:
+            if path.exists():
+                shutil.rmtree(path)
 
 
 def _nvcc_flags():
@@ -229,6 +273,16 @@ def _build_kernel(module, ext_name,
 
 
 def finalize_capture():
+    global _capture_artifact_lock
+    try:
+        return _finalize_capture()
+    finally:
+        if _capture_artifact_lock is not None:
+            _capture_artifact_lock.release()
+            _capture_artifact_lock = None
+
+
+def _finalize_capture():
     """Compile every captured kernel into one shared extension and wire each
     module key to it. Returns the loaded module (or None if nothing captured).
 

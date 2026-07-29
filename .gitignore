@@ -28,6 +28,7 @@ env/
 
 # ── kuipy JIT cache ────────────────────
 .kuipy_cache/
+.tune_params.json.lock
 
 # local fstar installation
 inst/

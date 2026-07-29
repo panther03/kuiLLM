@@ -321,6 +321,18 @@ These are runtime configs of the *same* backend, selected via env
 - **`AUTOTUNE`** — Kuiper competes as an autotune choice; Inductor picks the fastest
   per shape. Keeps perf claims honest where Kuiper GEMM may trail cuBLAS.
 
+Kuipy also has a separate native parameter tuner which never selects a non-Kuiper
+implementation. Set `KUIPY_AUTOTUNE=1` to benchmark every legal verified
+parameterization of each autotunable operator. Winners are keyed by operation,
+input shapes/strides/dtypes, output-affecting options, GPU name, and tuning schema,
+then written to the version-controlled `tune_params.json`. Normal runs consume
+that file without benchmarking and use the existing deterministic default on a
+cache miss. `KUIPY_TUNE_PARAMS` overrides the file path.
+
+Native tuning cannot run during CUDA graph capture or `kuipy.batch_capture()`.
+Losing per-instantiation build artifacts are removed after selection unless
+another tuning entry references the same compiled module.
+
 ## 12. Phased plan (independent capability tracks)
 
 - **P0 — scaffold + parity + graph-safety.** `KuiperCombinedScheduling` that claims

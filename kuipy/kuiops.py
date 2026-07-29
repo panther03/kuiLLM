@@ -4,6 +4,7 @@ Python bindings for KuiOps kernels. These classes:
  b) extract the relevant kernel from the template, compile it, and call it.
 """
 from . import compile as _compile
+from . import autotune as _autotune
 from .config import log
 
 import torch
@@ -338,11 +339,12 @@ _TC2D_OUTPUT_DTYPES = {
 }
 _TC2D_TO_INPUT_DTYPES = (torch.float16, torch.bfloat16)
 
-def _bt2d_tile(dtype, M, N, K):
-    """BlockTiling2D tile params for ``dtype``. Returns (bm,bn,bk,tm,tn) or None.
+def _bt2d_tiles(dtype, M, N, K):
+    """Return every legal BlockTiling2D parameterization for this problem.
 
     chunk and the shared-memory byte budget scale with the element size
     (``chunk et = 16/sizeof(et)``)."""
+    tiles = []
     itemsize = dtype.itemsize
     chunk = 16 // itemsize
     for bm in (128, 64, 32):
@@ -368,21 +370,33 @@ def _bt2d_tile(dtype, M, N, K):
                         fill = chunk * threads
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        return dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn)
+                        tiles.append(
+                            dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn)
+                        )
+    return tiles
+
+
+def _bt2d_tile(dtype, M, N, K):
+    tiles = _bt2d_tiles(dtype, M, N, K)
+    if tiles:
+        return tiles[0]
     log(f"no BT2D tile params found for M={M}, N={N}, K={K}")
     return None
 
 
-def _tc2d_tile(dtype, M, N, K):
-    """TensorCore2D tile params for 16-bit operands. Returns a tile dict or None."""
+def _tc2d_tiles(dtype, M, N, K):
+    """Return every legal TensorCore2D parameterization for this problem."""
+    tiles = []
+    seen = set()
     chunk = 16 // (dtype.itemsize)
     tm = tn = tk = 16
 
-    # quick and dirty patch to return pre-tuned parameters by default
-    good = dict(bm=128,bn=128,bk=32,tm=16,tn=16,tk=16,wm=8,wn=4)
+    # Preserve the existing hand-picked default as the first candidate.
+    good = dict(bm=128, bn=128, bk=32, tm=16, tn=16, tk=16, wm=8, wn=4)
     if ((M % (good["bm"]) == 0) and (N % (good["bn"]) == 0) and (K % (good["bk"]) == 0) and
         (good["bn"] % chunk == 0) and (good["bk"] % chunk == 0)):
-        return good
+        tiles.append(good)
+        seen.add(tuple(good.items()))
     for bm in (128, 64):
         if M % bm or bm % tm:
             continue
@@ -406,7 +420,21 @@ def _tc2d_tile(dtype, M, N, K):
                         fill = chunk * warps * _WARP
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        return dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn, tk=tk, wm=wm, wn=wn)
+                        tile = dict(
+                            bm=bm, bn=bn, bk=bk, tm=tm, tn=tn, tk=tk,
+                            wm=wm, wn=wn
+                        )
+                        identity = tuple(tile.items())
+                        if identity not in seen:
+                            tiles.append(tile)
+                            seen.add(identity)
+    return tiles
+
+
+def _tc2d_tile(dtype, M, N, K):
+    tiles = _tc2d_tiles(dtype, M, N, K)
+    if tiles:
+        return tiles[0]
     log(f"no TC2D tile params found for M={M}, N={N}, K={K}")
     return None
 
@@ -439,11 +467,67 @@ class _GemmFamily(_Family):
             return "bt2d", tile
         return None
 
+    @staticmethod
+    def _candidate(spec, params, module):
+        return _autotune.Candidate(params=params, spec=spec, module=module)
+
 
 class MmImpl(_GemmFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
     tune_key = "MM"
+
+    @staticmethod
+    def _module(spec):
+        impl, tile_params, dtype, _, out_dtype, _ = spec
+        et = torch_dtype_to_fstar(dtype)
+        out_et = torch_dtype_to_fstar(out_dtype)
+        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
+        return (
+            f"Kuiops.Mm.{impl.title()}.{et.title()}.{out_et.title()}."
+            f"P_{tile_params_str}"
+        )
+
+    def _candidate_specs(self, A, B, out_dtype, requested_impl):
+        M, K = A.shape
+        _, N = B.shape
+        M, K, N = int(M), int(K), int(N)
+        specs = []
+        tensor_cores_enabled = (
+            self.tune_params["impl"] == "tc2d" or requested_impl is not None
+        )
+        if (tensor_cores_enabled
+                and requested_impl != "tc2d_to"
+                and A.dtype in _TC2D_TO_INPUT_DTYPES
+                and out_dtype in _FLOAT_DTYPES):
+            for tile in _tc2d_tiles(A.dtype, M, N, K):
+                if not _gemm_blocks_ok(1, M, N, tile):
+                    continue
+                acc_dtype = (
+                    out_dtype
+                    if out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())
+                    else torch.float32
+                )
+                specs.append(
+                    ("tc2d", tile, A.dtype, acc_dtype, out_dtype, [A, B])
+                )
+        if (tensor_cores_enabled
+                and requested_impl != "tc2d"
+                and A.dtype in _TC2D_TO_INPUT_DTYPES
+                and out_dtype in _FLOAT_DTYPES):
+            for tile in _tc2d_tiles(A.dtype, M, N, K):
+                if _gemm_blocks_ok(1, M, N, tile):
+                    specs.append(
+                        ("tc2d_to", tile, A.dtype, torch.float32,
+                         out_dtype, [A, B])
+                    )
+        if requested_impl is None and out_dtype == A.dtype:
+            for tile in _bt2d_tiles(A.dtype, M, N, K):
+                if _gemm_blocks_ok(1, M, N, tile):
+                    specs.append(
+                        ("bt2d", tile, A.dtype, A.dtype, out_dtype, [A, B])
+                    )
+        return specs
 
     def supported(self, func, args, kwargs):
         # supposedly mm supports an alpha parameter, we don't
@@ -456,56 +540,49 @@ class MmImpl(_GemmFamily):
             (A.dtype == B.dtype)):
             return None
         M, K = A.shape
-        K2, N = B.shape
+        K2, _ = B.shape
         if K != K2:
             return None
-        M, K, N = int(M), int(K), int(N)
-
         out_dtype = kwargs.get("out_dtype", A.dtype)
         requested_impl = kwargs.get("impl")
         if requested_impl not in (None, "tc2d", "tc2d_to"):
             return None
-        sel = None
-        tensor_cores_enabled = (
-            self.tune_params["impl"] == "tc2d" or requested_impl is not None
-        )
-        if (tensor_cores_enabled
-                and requested_impl != "tc2d_to"
-                and A.dtype in _TC2D_TO_INPUT_DTYPES
-                and out_dtype in _FLOAT_DTYPES):
-            tile = _tc2d_tile(A.dtype, M, N, K)
-            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-                acc_dtype = (
-                    out_dtype
-                    if out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())
-                    else torch.float32
-                )
-                sel = ("tc2d", tile, acc_dtype)
-        if (sel is None
-                and tensor_cores_enabled
-                and requested_impl != "tc2d"
-                and out_dtype in _FLOAT_DTYPES):
-            sel = self._select_tc2d_to(
-                A.dtype, M, N, K, force=requested_impl == "tc2d_to"
-            )
-        if sel is None and requested_impl is None and out_dtype == A.dtype:
-            bt2d = self._select_bt2d(A.dtype, M, N, K)
-            if bt2d is not None:
-                sel = (*bt2d, A.dtype)
-        if sel is None:
-            return None
-        impl, tile_params, acc_dtype = sel
-        return (impl, tile_params, A.dtype, acc_dtype, out_dtype, [A, B])
+        specs = self._candidate_specs(A, B, out_dtype, requested_impl)
+        return specs[0] if specs else None
 
     def run(self, spec, args, kwargs):
+        A, B = args
+        out_dtype = kwargs.get("out_dtype", A.dtype)
+        requested_impl = kwargs.get("impl")
+        specs = self._candidate_specs(A, B, out_dtype, requested_impl)
+        candidates = [
+            self._candidate(
+                candidate,
+                {"impl": candidate[0], **candidate[1]},
+                self._module(candidate),
+            )
+            for candidate in specs
+        ]
+        key = _autotune.make_key(
+            "aten.mm.default",
+            args,
+            {
+                "out_dtype": out_dtype,
+                "requested_impl": requested_impl,
+            },
+        )
+        spec = _autotune.select_candidate(
+            key, candidates, self._run, A.device
+        )
+        return self._run(spec)
+
+    def _run(self, spec):
         impl, tile_params, dtype, acc_dtype, out_dtype, call = spec
         et = torch_dtype_to_fstar(dtype)
         acc_et = torch_dtype_to_fstar(acc_dtype)
         out_et = torch_dtype_to_fstar(out_dtype)
 
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-
-        module = f"Kuiops.Mm.{impl.title()}.{et.title()}.{out_et.title()}.P_{tile_params_str}"
+        module = self._module(spec)
         # keeping it short for this one...
         name = "mm_jit"
         fst_ctx = dict(
@@ -547,6 +624,23 @@ class BmmImpl(_Family):
     tune_key = "BMM"
     tune_params = ()
 
+    @staticmethod
+    def _module(spec):
+        tile_params, dtype, _ = spec
+        et = torch_dtype_to_fstar(dtype)
+        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
+        return f"Kuiops.Bmm.{et.title()}.P_{tile_params_str}"
+
+    @staticmethod
+    def _candidate_specs(A, B):
+        Bn, M, K = (int(x) for x in A.shape)
+        _, _, N = (int(x) for x in B.shape)
+        return [
+            (tile, A.dtype, [A, B])
+            for tile in _bt2d_tiles(A.dtype, M, N, K)
+            if _gemm_blocks_ok(Bn, M, N, tile)
+        ]
+
     def supported(self, func, args, kwargs):
         if len(args) != 2:
             return None
@@ -561,16 +655,30 @@ class BmmImpl(_Family):
         # the three batch products must fit in a u32 index.
         if max(Bn * M * K, Bn * K * N, Bn * M * N) >= 2 ** 32:
             return None
-        tile_params = _bt2d_tile(A.dtype, M, N, K)
-        if tile_params is None or not _gemm_blocks_ok(Bn, M, N, tile_params):
-            return None
-        return (tile_params, A.dtype, [A, B])
+        specs = self._candidate_specs(A, B)
+        return specs[0] if specs else None
 
     def run(self, spec, args, kwargs):
+        A, B = args
+        specs = self._candidate_specs(A, B)
+        candidates = [
+            _autotune.Candidate(
+                params={"impl": "bt2d", **candidate[0]},
+                spec=candidate,
+                module=self._module(candidate),
+            )
+            for candidate in specs
+        ]
+        key = _autotune.make_key("aten.bmm.default", args)
+        spec = _autotune.select_candidate(
+            key, candidates, self._run, A.device
+        )
+        return self._run(spec)
+
+    def _run(self, spec):
         tile_params, dtype, call = spec
         et = torch_dtype_to_fstar(dtype)
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        module = f"Kuiops.Bmm.{et.title()}.P_{tile_params_str}"
+        module = self._module(spec)
         name = "bmm_jit"
         fst_ctx = dict(module=module, name=name, et=et, **tile_params)
         wrapper_ctx = dict(
@@ -590,6 +698,47 @@ class AddmmImpl(_GemmFamily):
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
     tune_key = "ADDMM"
 
+    @staticmethod
+    def _module(spec):
+        impl, tile_params, dtype, acc_dtype, _, _, _ = spec
+        et = torch_dtype_to_fstar(dtype)
+        acc_et = torch_dtype_to_fstar(acc_dtype)
+        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
+        return (
+            f"Kuiops.Addmm.{impl.title()}.{et.title()}.{acc_et.title()}."
+            f"P_{tile_params_str}"
+        )
+
+    def _candidate_specs(self, Cin, A, B, out_dtype, alpha, beta):
+        M, K = (int(x) for x in A.shape)
+        _, N = (int(x) for x in B.shape)
+        specs = []
+        if (self.tune_params["impl"] == "tc2d"
+                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
+            for tile in _tc2d_tiles(A.dtype, M, N, K):
+                if _gemm_blocks_ok(1, M, N, tile):
+                    specs.append(
+                        ("tc2d", tile, A.dtype, out_dtype, [Cin, A, B],
+                         alpha, beta)
+                    )
+        if (self.tune_params["impl"] == "tc2d"
+                and out_dtype == A.dtype
+                and A.dtype in _TC2D_TO_INPUT_DTYPES):
+            for tile in _tc2d_tiles(A.dtype, M, N, K):
+                if _gemm_blocks_ok(1, M, N, tile):
+                    specs.append(
+                        ("tc2d_to", tile, A.dtype, torch.float32,
+                         [Cin, A, B], alpha, beta)
+                    )
+        if out_dtype == A.dtype:
+            for tile in _bt2d_tiles(A.dtype, M, N, K):
+                if _gemm_blocks_ok(1, M, N, tile):
+                    specs.append(
+                        ("bt2d", tile, A.dtype, A.dtype, [Cin, A, B],
+                         alpha, beta)
+                    )
+        return specs
+
     def supported(self, func, args, kwargs):
         if len(args) != 3:
             return None
@@ -606,35 +755,43 @@ class AddmmImpl(_GemmFamily):
             return None
         if tuple(int(x) for x in Cin.shape) != (M, N):
             return None
-        sel = None
-        if (self.tune_params["impl"] == "tc2d"
-                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
-            tile = _tc2d_tile(A.dtype, M, N, K)
-            if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-                sel = ("tc2d", tile, out_dtype)
-        if sel is None and out_dtype == A.dtype:
-            sel = self._select_tc2d_to(A.dtype, M, N, K)
-        if sel is None:
-            bt2d = self._select_bt2d(A.dtype, M, N, K) if out_dtype == A.dtype else None
-            if bt2d is not None:
-                sel = (*bt2d, A.dtype)
-        if sel is None:
-            return None
-        impl, tile_params, acc_dtype = sel
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
             return None
-        return (impl, tile_params, A.dtype, acc_dtype, [Cin, A, B],
-                float(alpha), float(beta))
+        specs = self._candidate_specs(
+            Cin, A, B, out_dtype, float(alpha), float(beta)
+        )
+        return specs[0] if specs else None
 
     def run(self, spec, args, kwargs):
+        Cin, A, B = args
+        out_dtype = kwargs.get("out_dtype", A.dtype)
+        alpha = float(_scalar(kwargs.get("alpha", 1)))
+        beta = float(_scalar(kwargs.get("beta", 1)))
+        specs = self._candidate_specs(Cin, A, B, out_dtype, alpha, beta)
+        candidates = [
+            self._candidate(
+                candidate,
+                {"impl": candidate[0], **candidate[1]},
+                self._module(candidate),
+            )
+            for candidate in specs
+        ]
+        key = _autotune.make_key(
+            "aten.addmm.default", args, {"out_dtype": out_dtype}
+        )
+        spec = _autotune.select_candidate(
+            key, candidates, self._run, A.device
+        )
+        return self._run(spec)
+
+    def _run(self, spec):
         impl, tile_params, dtype, acc_dtype, call, alpha, beta = spec
         Cin, A, B = call
         et = torch_dtype_to_fstar(dtype)
         acc_et = torch_dtype_to_fstar(acc_dtype)
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        module = f"Kuiops.Addmm.{impl.title()}.{et.title()}.{acc_et.title()}.P_{tile_params_str}"
+        module = self._module(spec)
         name = "addmm_jit"
         fst_ctx = dict(module=module, name=name, in_et=et, acc_et=acc_et,
                        out_et=torch_dtype_to_fstar(call[0].dtype),

@@ -79,6 +79,10 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
   an op isn't offloaded. Other env flags in `kuipy/config.py`:
   `KUIPY_JIT_VERBOSITY`, `KUIPY_JIT_VERIFY` (full F* verify vs admit-SMT),
   `KUIPY_JIT_FLUSH_CACHE`, `KUIPY_PRINT_PROFILING`.
+- **Native autotuning**: `KUIPY_AUTOTUNE=1` exhaustively benchmarks legal Kuiper
+  parameterizations and writes shape/device-specific winners to the committed
+  `tune_params.json`; `KUIPY_TUNE_PARAMS` overrides its path. Normal runs only
+  consume the file. Bump `TUNING_SCHEMA_VERSION` after tuning-relevant changes.
 - **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. There is one exception right now in the form of `mm` which uses a cast at the output because it doesn't handle bf16 x bf16 -> bf16 matmul in Kuiper. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). `supported()` constraints should reflect the kernel's ability to handle broadcasting, and `run()` should not attempt to implement it in Python.
 - **Allocations**: By convention, the Kuiper kernels do not allocate output tensors and instead take the output tensor as argument. In terms of the native_functions.yaml of ATen, If it is OK for an input tensor to be modified and it is in the same alias set as the output, then the Kuiper implementation shall modify that input in place instead of there being a separate argument (this is the case for a unary elementwise operation for instance). The allocation of the output tensor should happen on the CUDA/C++ template side, not in Python. The allocation could also be a copy of some input tensor, for example in the `addmm` operator which copies the C matrix to the output matrix and the Kuiper kernel modifies this in-place. 
 - Remember that in F* and Pulse, you do not need to write `return` to return a value from a function; the last expression is returned automatically.
