@@ -254,6 +254,72 @@ def test_softmax_non_last_dim_unsupported():
 
 
 # ---------------------------------------------------------------------------
+# exact integer reductions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("func,dtype,kwargs", [
+    (aten.sum.dim_IntList, torch.int32, {}),
+    (aten.prod.dim_int, torch.int8, {"dtype": torch.int16}),
+    (aten.all.dim, torch.int32, {}),
+    (aten.any.dim, torch.uint8, {}),
+])
+def test_hreduce_poly(func, dtype, kwargs):
+    _need_cuda()
+    impl = kuiops.HReducePolyImpl({})
+    X = torch.tensor(
+        [[[1, 2, 0, 3], [2, 1, 1, 2], [1, 1, 1, 1]],
+         [[3, 1, 2, 1], [0, 2, 1, 3], [2, 2, 1, 1]]],
+        device="cuda", dtype=dtype)
+    args = (X, -1, False)
+    out = _run(impl, func, args, kwargs)
+    ref = func(*args, **kwargs)
+    assert out.dtype == ref.dtype
+    assert out.shape == ref.shape
+    assert torch.equal(out, ref)
+
+
+def test_hreduce_poly_dtype_conversion():
+    _need_cuda()
+    impl = kuiops.HReducePolyImpl({})
+    X = torch.arange(8, device="cuda", dtype=torch.int8).reshape(2, 4)
+    args = (X, [1], False)
+    out = _run(
+        impl, aten.sum.dim_IntList, args, {"dtype": torch.uint16})
+    ref = torch.tensor([6, 22], device="cuda", dtype=torch.uint16)
+    assert torch.equal(out, ref)
+    assert out.dtype == torch.uint16
+
+
+def test_hreduce_poly_support_constraints():
+    _need_cuda()
+    impl = kuiops.HReducePolyImpl({})
+    ints = torch.ones(2, 4, device="cuda", dtype=torch.int32)
+    floats = ints.float()
+    assert impl.supported(
+        aten.sum.dim_IntList, (ints, [0]), {}) is None
+    assert impl.supported(
+        aten.sum.dim_IntList, (ints, [1], True), {}) is None
+    rank3 = ints.reshape(1, 2, 4)
+    assert impl.supported(
+        aten.sum.dim_IntList, (rank3, [2]), {}) is not None
+    rank5 = ints.reshape(1, 1, 1, 2, 4)
+    assert impl.supported(
+        aten.sum.dim_IntList, (rank5, [4]), {}) is None
+    assert impl.supported(
+        aten.sum.dim_IntList, (ints, [-1]), {"dtype": torch.float32}) is None
+    assert impl.supported(
+        aten.sum.dim_IntList, (floats, [-1]), {}) is None
+    assert impl.supported(
+        aten.sum.dim_IntList, (ints.transpose(0, 1), [-1]), {}) is None
+    empty_rows = torch.empty(0, 4, device="cuda", dtype=torch.int32)
+    assert impl.supported(
+        aten.sum.dim_IntList, (empty_rows, [-1]), {}) is None
+    empty_cols = torch.empty(2, 0, device="cuda", dtype=torch.int32)
+    assert impl.supported(
+        aten.sum.dim_IntList, (empty_cols, [-1]), {}) is None
+
+
+# ---------------------------------------------------------------------------
 # sdpa (efficient attention)
 # ---------------------------------------------------------------------------
 

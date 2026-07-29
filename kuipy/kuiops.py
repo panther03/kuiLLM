@@ -105,7 +105,14 @@ def torch_dtype_to_aten_scalar(dt):
         torch.float64: "torch::kFloat64",
         torch.bfloat16: "torch::kBFloat16",
         torch.bool: "torch::kBool",
-        # todo fill in
+        torch.int64: "torch::kInt64",
+        torch.int32: "torch::kInt32",
+        torch.int16: "torch::kInt16",
+        torch.int8: "torch::kInt8",
+        torch.uint64: "torch::kUInt64",
+        torch.uint32: "torch::kUInt32",
+        torch.uint16: "torch::kUInt16",
+        torch.uint8: "torch::kUInt8",
     }[dt]
 
 _FLOAT_DTYPES = [torch.float16, torch.float32, torch.float64, torch.bfloat16]
@@ -114,6 +121,21 @@ _FLOAT_DTYPES = [torch.float16, torch.float32, torch.float64, torch.bfloat16]
 # because we do not have total unconditional operations on them. 
 # What to do about it?
 _SCALAR_DTYPES = _FLOAT_DTYPES + [torch.uint16, torch.uint32, torch.uint64]
+
+_INTEGER_DTYPES = [
+    torch.bool,
+    torch.int8, torch.int16, torch.int32, torch.int64,
+    torch.uint8, torch.uint16, torch.uint32, torch.uint64,
+]
+
+_SIGNED_INTEGER_DTYPES = {
+    torch.int8: 8, torch.int16: 16, torch.int32: 32, torch.int64: 64,
+}
+
+_UNSIGNED_INTEGER_DTYPES = {
+    torch.bool: 8, torch.uint8: 8, torch.uint16: 16,
+    torch.uint32: 32, torch.uint64: 64,
+}
                 
 def cast_constarg(c,dt):
     if dt in _FLOAT_DTYPES:
@@ -951,6 +973,131 @@ class CatImpl(_Family):
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(A, B)
         return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+
+
+class HReducePolyImpl(_Family):
+    fst_template = "reduce/Kuiops.HReducePoly.Inst.fst.j2"
+    wrapper_template = "reduce/wrapper_hreduce_poly.cu.j2"
+    tune_key = "HREDUCE_POLY"
+    tune_params = ()
+
+    _OPS = {
+        aten.sum.dim_IntList: "add",
+        aten.prod.dim_int: "mul",
+        aten.all.dim: "and",
+        aten.any.dim: "or",
+    }
+
+    def supported(self, func, args, kwargs):
+        if func not in self._OPS or len(args) < 1:
+            return None
+        if func is not aten.sum.dim_IntList and len(args) < 2:
+            return None
+        Inp = args[0]
+        dim = args[1] if len(args) > 1 else kwargs.get("dim")
+        if not (isinstance(Inp, torch.Tensor) and Inp.is_cuda
+                and Inp.is_contiguous() and Inp.dtype in _INTEGER_DTYPES):
+            return None
+
+        rank = Inp.dim()
+        if func is aten.sum.dim_IntList:
+            if dim is None or (
+                    isinstance(dim, (list, tuple)) and len(dim) == 0):
+                dims = list(range(rank))
+            elif isinstance(dim, (list, tuple)):
+                dims = [_norm_dim(int(d), rank) for d in dim]
+            else:
+                dims = [_norm_dim(int(dim), rank)]
+        else:
+            dims = [_norm_dim(int(dim), rank)]
+        if rank == 0:
+            if dims not in ([], [0], [-1]):
+                return None
+            dims = []
+        if (len(set(dims)) != len(dims)
+                or any(d < 0 or d >= rank for d in dims)):
+            return None
+        dims = sorted(dims)
+        keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
+        if not (1 <= rank <= 4) or dims != [rank - 1] or keepdim:
+            return None
+
+        shape = [int(d) for d in Inp.shape]
+        if any(d <= 0 for d in shape):
+            return None
+        rows = _numel(shape[:-1])
+        cols = shape[-1]
+        if rows > _MAX_BLOCKS:
+            return None
+        nth = min(cols, 1024)
+        if rows * cols >= 2**32 or cols + nth >= 2**32:
+            return None
+
+        op = self._OPS[func]
+        if op in ("add", "mul"):
+            out_dtype = kwargs.get("dtype")
+            if out_dtype is None:
+                out_dtype = torch.int64
+            if out_dtype not in _INTEGER_DTYPES:
+                return None
+            if out_dtype is torch.bool:
+                op = "or" if op == "add" else "and"
+        else:
+            out_dtype = torch.uint8 if Inp.dtype is torch.uint8 else torch.bool
+
+        return dict(
+            op=op, in_dtype=Inp.dtype, out_dtype=out_dtype,
+            call=[Inp])
+
+    def run(self, spec, args, kwargs):
+        op = spec["op"]
+        in_dtype = spec["in_dtype"]
+        out_dtype = spec["out_dtype"]
+        if op in ("and", "or"):
+            out_bits = 8
+            reduce_op = f"{op}_u8"
+            zero = {
+                torch.bool: "0uy",
+                torch.int8: "0y", torch.int16: "0s",
+                torch.int32: "0l", torch.int64: "0L",
+                torch.uint8: "0uy", torch.uint16: "0us",
+                torch.uint32: "0ul", torch.uint64: "0UL",
+            }[in_dtype]
+            pre_map = f"fun x -> if x = {zero} then 0uy else 1uy"
+        else:
+            out_bits = (_SIGNED_INTEGER_DTYPES | _UNSIGNED_INTEGER_DTYPES)[out_dtype]
+            reduce_op = f"{op}_u{out_bits}"
+            if in_dtype in _SIGNED_INTEGER_DTYPES:
+                in_bits = _SIGNED_INTEGER_DTYPES[in_dtype]
+                cast = f"int{in_bits}_to_uint{out_bits}"
+            else:
+                in_bits = _UNSIGNED_INTEGER_DTYPES[in_dtype]
+                cast = f"uint{in_bits}_to_uint{out_bits}"
+            pre_map = (
+                "fun x -> x" if in_bits == out_bits
+                and in_dtype not in _SIGNED_INTEGER_DTYPES
+                else f"FStar.Int.Cast.{cast}"
+            )
+
+        in_et = torch_dtype_to_fstar(in_dtype)
+        out_et = f"u{out_bits}"
+        rank = spec["call"][0].dim()
+        module = (
+            f"Kuiops.HReducePoly.{op.title()}."
+            f"R{rank}.{in_et.title()}To{out_et.title()}As"
+            f"{str(out_dtype).rsplit('.', 1)[-1].title()}"
+        )
+        name = "hreduce_poly_jit"
+        fst_ctx = dict(
+            module=module, name=name, r=rank, in_et=in_et, out_et=out_et,
+            reduce_op=reduce_op, pre_map=pre_map)
+        wrapper_ctx = dict(
+            module=module.replace(".", "_"), name=name, r=rank,
+            cpp_in=torch_dtype_to_ctype(in_dtype),
+            cpp_kernel_out=torch_dtype_to_ctype(
+                getattr(torch, f"uint{out_bits}")),
+            out_scalar=torch_dtype_to_aten_scalar(out_dtype))
+        return self._mod(module, fst_ctx, wrapper_ctx).run(spec["call"][0])
 
 
 class MeanImpl(_Family):

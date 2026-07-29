@@ -1,0 +1,114 @@
+{%- macro shp(n) -%}
+{% for k in range(n) %}(SZ.v d{{ k }}) @| {% endfor %}INil
+{%- endmacro -%}
+{%- macro prod(n) -%}
+{% if n == 0 %}1{% else %}{% for k in range(n) %}(SZ.v d{{ k }}){% if not loop.last %} * {% endif %}{% endfor %}{% endif %}
+{%- endmacro -%}
+{%- macro fits(n) -%}
+{%- if n == 1 -%}SZ.fits (SZ.v d0)
+{%- elif n == 2 -%}SZ.fits ((SZ.v d0) * (SZ.v d1))
+{%- elif n == 3 -%}
+SZ.fits ((SZ.v d0) * (SZ.v d1)) /\
+SZ.fits ((SZ.v d1) * (SZ.v d2)) /\
+SZ.fits ((SZ.v d0) * ((SZ.v d1) * (SZ.v d2)))
+{%- elif n == 4 -%}
+SZ.fits ((SZ.v d0) * (SZ.v d1)) /\
+SZ.fits ((SZ.v d1) * (SZ.v d2)) /\
+SZ.fits ((SZ.v d0) * ((SZ.v d1) * (SZ.v d2))) /\
+SZ.fits ((SZ.v d2) * (SZ.v d3)) /\
+SZ.fits ((SZ.v d1) * ((SZ.v d2) * (SZ.v d3))) /\
+SZ.fits ((SZ.v d0) * ((SZ.v d1) * ((SZ.v d2) * (SZ.v d3))))
+{%- endif -%}
+{%- endmacro -%}
+{%- macro cs(n) -%}
+{% for k in range(n) %}CCons d{{ k }} ({% endfor %}CNil{% for k in range(n) %}){% endfor %}
+{%- endmacro -%}
+{%- macro idx(n, tail) -%}
+{% for k in range(n) %}(i{{ k }}, {% endfor %}{{ tail }}{% for k in range(n) %}){% endfor %}
+{%- endmacro -%}
+{%- macro rm(n) -%}
+{%- if n == 0 -%}pack lunit
+{%- elif n == 1 -%}l1_forward (SZ.v d0)
+{%- elif n == 2 -%}l2_row_major (SZ.v d0) (SZ.v d1)
+{%- elif n == 3 -%}l3_batched_row_major (SZ.v d0) (SZ.v d1) (SZ.v d2)
+{%- elif n == 4 -%}l4_batched_row_major (SZ.v d0) (SZ.v d1) (SZ.v d2) (SZ.v d3)
+{%- endif -%}
+{%- endmacro -%}
+{%- macro crm(n) -%}
+{%- if n == 0 -%}c_pack cunit
+{%- elif n == 1 -%}c_l1_forward (SZ.v d0)
+{%- elif n == 2 -%}c_l2_row_major (SZ.v d0) d1
+{%- elif n == 3 -%}c_l3_batched_row_major (SZ.v d0) d1 d2
+{%- elif n == 4 -%}c_l4_batched_row_major (SZ.v d0) d1 d2 d3
+{%- endif -%}
+{%- endmacro -%}
+module {{ module }}
+#lang-pulse
+
+open Kuiper
+open Kuiper.Functions
+open Kuiper.Shape
+open Kuiper.Seq.Common
+open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg
+open Pulse.Lib.Pledge
+open Kuiops.HReducePoly.Exact
+open Kuiops.HReducePoly.Ops
+
+module SZ = Kuiper.SizeT
+
+inline_for_extraction noextract
+let append_index
+  {% for k in range(r) %}(d{{ k }} : szp)
+  {% endfor %}(i : conc ({{ shp(r - 1) }}))
+  (j : szlt (SZ.v d{{ r - 1 }}))
+  : conc ({{ shp(r) }}) =
+  {% if r > 1 %}let {{ idx(r - 1, '()') }} = i in{% endif %}
+  {{ idx(r - 1, '(j, ())') }}
+
+let append_index_up
+  {% for k in range(r) %}(d{{ k }} : szp)
+  {% endfor %}(i : conc ({{ shp(r - 1) }}))
+  (j : szlt (SZ.v d{{ r - 1 }}))
+  : Lemma (
+      up (append_index {% for k in range(r) %}d{{ k }} {% endfor %}i j) ==
+      abs_snoc #{{ r - 1 }} #({{ shp(r - 1) }})
+        #(SZ.v d{{ r - 1 }}) (up i) (SZ.v j))
+= ()
+
+fn {{ name }}
+  {% for k in range(r) %}(d{{ k }} : szp{% if loop.last %} { {{ fits(r) }} }{% endif %})
+  {% endfor %}(rows : szp {
+    SZ.v rows == sizeof ({{ shp(r - 1) }}) /\ rows <= max_blocks })
+  (nth : szp {
+    nth <= max_threads /\ nth <= d{{ r - 1 }} /\
+    SZ.fits (d{{ r - 1 }} + nth) })
+  (input : tensor ({{ in_et }}) ({{ rm(r) }}) { is_global input })
+  (output : tensor ({{ out_et }}) ({{ rm(r - 1) }}) { is_global output })
+  (vin : chest ({{ shp(r) }}) ({{ in_et }}))
+  (s : stream_t)
+  (#e : epoch_t)
+  norewrite
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (input |-> vin) ** on gpu_loc (live output)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (input |-> vin) **
+        (output |-> mk #{{ r - 1 }} ({{ shp(r - 1) }}) #({{ out_et }}) (fun i ->
+          reduced #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
+            #{{ r - 1 }} #({{ shp(r - 1) }}) #(SZ.v d{{ r - 1 }})
+            {{ reduce_op }} ({{ pre_map }}) (fun (x : {{ out_et }}) -> x) vin i))))
+{
+  with vout. assert on gpu_loc (output |-> vout);
+  FStar.Classical.forall_intro_3 {{ reduce_op }}_assoc;
+  reduce_indexed #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
+    ({{ cs(r - 1) }}) {{ reduce_op }} ({{ pre_map }})
+    (fun (x : {{ out_et }}) -> x)
+    rows d{{ r - 1 }} nth
+    (append_index {% for k in range(r) %}d{{ k }} {% endfor %})
+    (append_index_up {% for k in range(r) %}d{{ k }} {% endfor %})
+    #({{ rm(r) }}) #({{ crm(r) }})
+    #({{ rm(r - 1) }}) #({{ crm(r - 1) }})
+    input output s;
+}
