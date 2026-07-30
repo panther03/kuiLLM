@@ -5,6 +5,7 @@ Python bindings for KuiOps kernels. These classes:
 """
 from . import compile as _compile
 from . import autotune as _autotune
+from . import config as _config
 from .config import log
 
 import torch
@@ -361,6 +362,12 @@ _TC2D_OUTPUT_DTYPES = {
 }
 _TC2D_TO_INPUT_DTYPES = (torch.float16, torch.bfloat16)
 
+def _tc2d_device_supported(dtype, device):
+    cc = _config.cuda_device_capability(device)
+    minimum = (8, 0) if dtype == torch.bfloat16 else (7, 0)
+    return cc is not None and cc >= minimum
+
+
 def _bt2d_tiles(dtype, M, N, K):
     """Return every legal BlockTiling2D parameterization for this problem.
 
@@ -516,7 +523,9 @@ class MmImpl(_GemmFamily):
         M, K, N = int(M), int(K), int(N)
         specs = []
         tensor_cores_enabled = (
-            self.tune_params["impl"] == "tc2d" or requested_impl is not None
+            _tc2d_device_supported(A.dtype, A.device)
+            and (self.tune_params["impl"] == "tc2d"
+                 or requested_impl is not None)
         )
         if (tensor_cores_enabled
                 and requested_impl != "tc2d_to"
@@ -735,7 +744,11 @@ class AddmmImpl(_GemmFamily):
         M, K = (int(x) for x in A.shape)
         _, N = (int(x) for x in B.shape)
         specs = []
-        if (self.tune_params["impl"] == "tc2d"
+        tensor_cores_enabled = (
+            self.tune_params["impl"] == "tc2d"
+            and _tc2d_device_supported(A.dtype, A.device)
+        )
+        if (tensor_cores_enabled
                 and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
             for tile in _tc2d_tiles(A.dtype, M, N, K):
                 if _gemm_blocks_ok(1, M, N, tile):
@@ -743,7 +756,7 @@ class AddmmImpl(_GemmFamily):
                         ("tc2d", tile, A.dtype, out_dtype, [Cin, A, B],
                          alpha, beta)
                     )
-        if (self.tune_params["impl"] == "tc2d"
+        if (tensor_cores_enabled
                 and out_dtype == A.dtype
                 and A.dtype in _TC2D_TO_INPUT_DTYPES):
             for tile in _tc2d_tiles(A.dtype, M, N, K):

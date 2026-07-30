@@ -136,14 +136,20 @@ else:
         "-O3", "--use_fast_math", "-Xcompiler", "-fPIC",
     ]
 
-def nvcc_arch_flag():
-    """gencode flag for the current device, or None if torch/CUDA unavailable."""
-    try:
-        import torch
-        cc = torch.cuda.get_device_capability(0)
-        return f"-gencode=arch=compute_{cc[0]}{cc[1]},code=sm_{cc[0]}{cc[1]}"
-    except Exception:
+def cuda_device_capability(device=0):
+    """Compute capability for a CUDA device, or None when CUDA is unavailable."""
+    import torch
+    if not torch.cuda.is_available():
         return None
+    return torch.cuda.get_device_capability(device)
+
+
+def nvcc_arch_flag():
+    """gencode flag for the current device, or None if CUDA is unavailable."""
+    cc = cuda_device_capability()
+    if cc is None:
+        return None
+    return f"-gencode=arch=compute_{cc[0]}{cc[1]},code=sm_{cc[0]}{cc[1]}"
 
 
 def ensure_dirs():

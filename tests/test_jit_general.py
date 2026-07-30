@@ -59,5 +59,30 @@ def test_unsupported_falls_through():
     Bc = torch.randn(64, 64)
     assert impl.supported(aten.mm.default, (Ac, Bc), {}) is None
 
+
+def test_pascal_disables_tensorcore_headers(monkeypatch):
+    import kuipy.config
+    monkeypatch.setattr(kuipy.config, "cuda_device_capability", lambda: (6, 1))
+    flags = jit_compile._nvcc_flags()
+    assert "-gencode=arch=compute_61,code=sm_61" in flags
+    assert "-DKUIPER_CFG_TENSORCORES=0" in flags
+
+
+def test_volta_keeps_tensorcore_headers(monkeypatch):
+    import kuipy.config
+    monkeypatch.setattr(kuipy.config, "cuda_device_capability", lambda: (7, 0))
+    flags = jit_compile._nvcc_flags()
+    assert "-gencode=arch=compute_70,code=sm_70" in flags
+    assert "-DKUIPER_CFG_TENSORCORES=0" not in flags
+
+
+def test_tensorcore_dtype_capability(monkeypatch):
+    import kuipy.config
+    monkeypatch.setattr(
+        kuipy.config, "cuda_device_capability", lambda device: (7, 0)
+    )
+    assert kuiops._tc2d_device_supported(torch.float16, "cuda")
+    assert not kuiops._tc2d_device_supported(torch.bfloat16, "cuda")
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-s", "-v"]))

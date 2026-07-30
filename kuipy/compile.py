@@ -132,9 +132,13 @@ def delete_kernel(module):
 
 def _nvcc_flags():
     flags = C.NVCC_BASE_FLAGS.copy()
-    arch = C.nvcc_arch_flag()
-    if arch:
-        flags.append(arch)
+    cc = C.cuda_device_capability()
+    if cc is not None:
+        flags.append(
+            f"-gencode=arch=compute_{cc[0]}{cc[1]},code=sm_{cc[0]}{cc[1]}"
+        )
+        if cc < (7, 0):
+            flags.append("-DKUIPER_CFG_TENSORCORES=0")
     return flags
 
 

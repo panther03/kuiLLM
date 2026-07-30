@@ -24,6 +24,13 @@ def _need_cuda():
         pytest.skip("CUDA not available")
 
 
+def _need_tensor_cores(dtype):
+    _need_cuda()
+    minimum = (8, 0) if dtype == torch.bfloat16 else (7, 0)
+    if torch.cuda.get_device_capability() < minimum:
+        pytest.skip(f"{dtype} tensor cores require sm_{minimum[0]}{minimum[1]}+")
+
+
 def _run(impl, func, args, kwargs=None):
     kwargs = kwargs or {}
     spec = impl.supported(func, args, kwargs)
@@ -53,7 +60,7 @@ def _assert_close(out, ref, dtype):
     (torch.bfloat16, torch.float32),
 ])
 def test_mm_tensorcore2d(in_dtype, out_dtype):
-    _need_cuda()
+    _need_tensor_cores(in_dtype)
     impl = kuiops.MmImpl({})
     torch.manual_seed(0)
     A = torch.randn(64, 64, device="cuda", dtype=in_dtype)
@@ -69,7 +76,7 @@ def test_mm_tensorcore2d(in_dtype, out_dtype):
 
 @pytest.mark.parametrize("implementation", ["tc2d", "tc2d_to"])
 def test_mm_bf16_output(implementation):
-    _need_cuda()
+    _need_tensor_cores(torch.bfloat16)
     impl = kuiops.MmImpl({})
     torch.manual_seed(0)
     A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
@@ -84,7 +91,7 @@ def test_mm_bf16_output(implementation):
 
 
 def test_mm_tensorcore2d_dtype_selection():
-    _need_cuda()
+    _need_tensor_cores(torch.bfloat16)
     impl = kuiops.MmImpl({})
     A16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
     B16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
@@ -173,7 +180,11 @@ def test_addmm(dtype, alpha, beta):
     bias = torch.randn(M, N, device="cuda", dtype=dtype)  # 2D bias/C matrix
     kw = dict(alpha=alpha, beta=beta)
     spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
-    expected_impl = "bt2d" if dtype == torch.float32 else "tc2d_to"
+    expected_impl = (
+        "tc2d_to"
+        if kuiops._tc2d_device_supported(dtype, A.device)
+        else "bt2d"
+    )
     assert spec is not None and spec[0] == expected_impl
     out = impl.run(spec, (bias, A, B), kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
@@ -183,7 +194,7 @@ def test_addmm(dtype, alpha, beta):
 
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
 def test_addmm_tensorcore2d(alpha, beta):
-    _need_cuda()
+    _need_tensor_cores(torch.bfloat16)
     impl = kuiops.AddmmImpl({})
     torch.manual_seed(0)
     M, K, N = 64, 64, 64
