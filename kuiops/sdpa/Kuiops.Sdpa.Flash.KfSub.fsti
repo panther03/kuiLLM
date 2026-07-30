@@ -23,8 +23,8 @@ unfold let warp_row_span : nat = SZ.v warp_size / 16
 
 unfold
 let row_subtile
-  (#et:Type0)
-  (shA : array2 et (l2_row_major 16 16))
+  (#et:Type0) (#l : layout2 16 16)
+  (shA : array2 et l)
   (i : natlt 16) : slprop
 = exists* (r : chest2 et 1 16).
     array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
@@ -106,10 +106,10 @@ let out_store_cells
   (#lout : layout4 b hq sq d)
   (gout : array4 et lout)
   (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
-  (r0 : sz) (lane : szlt warp_size) : slprop
-= forall+ (ij : out_stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)).
-    when__ (SZ.v r0 + ij._1 < SZ.v rows) (fun _ ->
-      out_cell b hq sq d gout bi kvh group (SZ.v r0 + ij._1) ij._2)
+  (r0 : nat) (lane : natlt BW.warp_size) : slprop
+= forall+ (ij : out_stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size lane).
+    when_ (r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2)
 
 unfold
 let jt_rest
@@ -118,13 +118,17 @@ let jt_rest
   (#_ : squash (16 /?+ SZ.v d))
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
   (#lgmask : layout4 b hq sq sk)
-  (#lcw #lm #ll : layout1 16) (#lO : layout2 16 (SZ.v d))
-  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et_acc (l2_row_major 16 16))
-  (shP : array2 et_ab (l2_row_major 16 16))
+  (#lcw #lm #ll : layout1 16)
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
+  (#lO : layout2 16 (SZ.v d))
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
   (shO : array2 et_acc lO)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shm : array1 et_acc lm)
   (shl : array1 et_acc ll)
@@ -172,7 +176,10 @@ fn sdpa_flash_jt_body
   (d sk : szp) (b hq sq : szp)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
   (#lgmask : layout4 b hq sq sk)
-  (#lcw #lm #ll : layout1 16) (#lO : layout2 16 (SZ.v d))
+  (#lcw #lm #ll : layout1 16)
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
+  (#lO : layout2 16 (SZ.v d))
   (#_ : squash (16 /?+ SZ.v d))
   (#_ : squash (warp_row_span /?+ 16))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
@@ -182,14 +189,20 @@ fn sdpa_flash_jt_body
   (#_ : squash (valid_frag_et_dims et_ab FragB 16 16 16))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc 16 16 16))
   {| ctlayout lgK |} {| ctlayout lgV |} {| ctlayout lgmask |}
-  {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |} {| ctlayout lO |}
+  {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
+  {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
+  {| ctlayout lP |} {| ctlayout lPVc |} {| ctlayout lO |}
+  {| strided_row_major lK |} {| strided_row_major lV |}
+  {| strided_row_major lS |} {| strided_row_major lP |}
+  {| strided_row_major lPVc |}
   (lane : szlt warp_size) (nthr : szp) (tid : szlt nthr)
-  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et_acc (l2_row_major 16 16))
-  (shP : array2 et_ab (l2_row_major 16 16))
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
   (shO : array2 et_acc lO)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shm : array1 et_acc lm)
   (shl : array1 et_acc ll)
@@ -275,10 +288,10 @@ fn sdpa_flash_o_store
     (shgl |-> Frac fgl egl)
   requires if_ (w = 0sz)
     (out_store_cells b hq sq bm d rows gout
-      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane)
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
   ensures if_ (w = 0sz)
     (out_store_cells b hq sq bm d rows gout
-      (SZ.v bi) (SZ.v kvh) (SZ.v group) r0 lane)
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
 
 inline_for_extraction noextract
 fn sdpa_flash_block_prologue
@@ -396,8 +409,8 @@ fn stride_reindex
 
 ghost
 fn row_reindex
-  (#et:Type0)
-  (shA : array2 et (l2_row_major 16 16))
+  (#et:Type0) (#l : layout2 16 16)
+  (shA : array2 et l)
   (i j : natlt BW.warp_size)
   requires pure (i == j) ** when__ (i < 16) (fun _ -> row_subtile shA i)
   ensures when__ (j < 16) (fun _ -> row_subtile shA j)
@@ -491,10 +504,13 @@ let sdpa_flash_jt_frame
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
   (#lgmask : layout4 b hq sq sk)
   (#lcw : layout1 16)
-  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et_acc (l2_row_major 16 16))
-  (shP : array2 et_ab (l2_row_major 16 16))
-  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
+  (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : array4 et_ab lgmask)
   (#fKg #fVg #fmask : perm)
@@ -528,16 +544,19 @@ let sdpa_flash_pre
   (#lgmask : layout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (#lcw : layout1 16)
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
   (gQ : array4 et_ab lgQ)
   (gK : array2 et_ab lgK)
   (gV : array2 et_ab lgV)
   (gmask : array4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et_acc (l2_row_major 16 16))
-  (shP : array2 et_ab (l2_row_major 16 16))
-  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
+  (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
@@ -570,7 +589,8 @@ let sdpa_flash_pre
     (combine_cells nw 16sz shscale shgm shgl (sdpa_flash_lane nw nthr tid))
   ** if_ (sdpa_flash_w nw nthr tid = 0sz)
     (out_store_cells b hq sq 16sz d rows gout
-      bi (SZ.v kvh) (SZ.v group) r0 (sdpa_flash_lane nw nthr tid))
+      bi (SZ.v kvh) (SZ.v group) (SZ.v r0)
+      (SZ.v (sdpa_flash_lane nw nthr tid)))
 
 unfold
 let sdpa_flash_post
@@ -584,16 +604,19 @@ let sdpa_flash_post
   (#lgmask : layout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (#lcw : layout1 16)
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
   (gQ : array4 et_ab lgQ)
   (gK : array2 et_ab lgK)
   (gV : array2 et_ab lgV)
   (gmask : array4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shK shV : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shS : array2 et_acc (l2_row_major 16 16))
-  (shP : array2 et_ab (l2_row_major 16 16))
-  (shPVc : array2 et_acc (l2_row_major 16 16))
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
+  (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
@@ -622,4 +645,5 @@ let sdpa_flash_post
     (SZ.v (sdpa_flash_lane nw nthr tid))
   ** if_ (sdpa_flash_w nw nthr tid = 0sz)
     (out_store_cells b hq sq 16sz d rows gout
-      bi (SZ.v kvh) (SZ.v group) r0 (sdpa_flash_lane nw nthr tid))
+      bi (SZ.v kvh) (SZ.v group) (SZ.v r0)
+      (SZ.v (sdpa_flash_lane nw nthr tid)))

@@ -1,3 +1,6 @@
+// TODO: this shoud have more of the actual kernel_desc? move from Kuiops.Sdpa.Flash
+// agent forgot to put setup teardown etc. here
+
 module Kuiops.Sdpa.Flash.KernelDesc
 
 #lang-pulse
