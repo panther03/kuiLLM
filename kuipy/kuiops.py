@@ -530,7 +530,8 @@ class MmImpl(_GemmFamily):
         if (tensor_cores_enabled
                 and requested_impl != "tc2d_to"
                 and A.dtype in _TC2D_TO_INPUT_DTYPES
-                and out_dtype in _FLOAT_DTYPES):
+                and (requested_impl == "tc2d"
+                     or out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ()))):
             for tile in _tc2d_tiles(A.dtype, M, N, K):
                 if not _gemm_blocks_ok(1, M, N, tile):
                     continue

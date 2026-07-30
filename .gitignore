@@ -57,3 +57,4 @@ kernel_call.log
 
 *.qdstrm
 *.sqlite
+data/

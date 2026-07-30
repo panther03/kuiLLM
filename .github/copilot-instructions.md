@@ -9,19 +9,13 @@ extracts, compiles, and dispatches them.
 
 ## Build / run / test
 
-Always use the project virtualenv interpreter — there is no system install:
-`./.venv/bin/python` (Makefile targets just call `python3`,
-so run them with the venv active or use the venv python directly).
+For development, there is a `kuillm` micromamba environment you can use to 
+provide python3 dependencies.
 `environment.yml` (used by CI, see `.github/workflows/ci.yml`) declares the same
-dependency set for a micromamba/conda setup:
+dependency set for a fresh micromamba/conda setup:
 `micromamba create -f environment.yml && micromamba activate kuillm`. It does not
 provide CUDA — nvcc 12.x must come from the host.
 
-- **Run one Kuiper install target before anything else**:
-  `make install-kuiper-release` installs the latest stable binary package,
-  while `make install-kuiper-nightly` installs the latest nightly. Neither
-  requires a Kuiper source checkout. Use `make install-kuiper-src` after changes
-  to the Kuiper source repo; it builds and copies `$KUIPER_HOME` into `./inst`.
 - `make infer` / `make infer-no-kuiper` — run `infer.py` with / without Kuiper.
 - `python infer.py "prompt" --max-new-tokens 8 --temperature 0` — single prompt.
   Other flags: `--prompts FILE`, `--batch N`, `--no-kuiper`, `--timing`,
@@ -33,6 +27,11 @@ provide CUDA — nvcc 12.x must come from the host.
   new kernel instantiation compiles via F*+nvcc (tens of seconds)**; reruns hit the
   on-disk cache.
 - `make verify-kuiops` — F*-verify the `kuiops/*.fst{i}` support modules.
+- The makefile provides an option to reinstall Kuiper, but please ask before running this,
+  because usually concurrent work is happening at $KUIPER_HOME (so installing would trigger a
+  long rebuild) and nightly/release might be incompatible with the current state of the 
+  kuiops repo. Generally speaking, expect `inst/` to be present before starting work 
+  and ask if it is not there.
 
 ## Architecture (the JIT dispatch path)
 
@@ -83,7 +82,7 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
   parameterizations and writes shape/device-specific winners to the committed
   `tune_params.json`; `KUIPY_TUNE_PARAMS` overrides its path. Normal runs only
   consume the file. Bump `TUNING_SCHEMA_VERSION` after tuning-relevant changes.
-- **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. There is one exception right now in the form of `mm` which uses a cast at the output because it doesn't handle bf16 x bf16 -> bf16 matmul in Kuiper. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). `supported()` constraints should reflect the kernel's ability to handle broadcasting, and `run()` should not attempt to implement it in Python.
+- **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). In general, `supported()` constraints should reflect EXACTLY what the kernel is capable of; any code implemented in the CUDA wrappers and Python is untrusted, and we would like to keep these as minimal wrappers that only do the bare minimum to integrate with the verified implementations. The burden of supporting more edge cases of the Python operators should fall on the Kuiper code, NOT on the Python or CUDA wrappers.
 - **Allocations**: By convention, the Kuiper kernels do not allocate output tensors and instead take the output tensor as argument. In terms of the native_functions.yaml of ATen, If it is OK for an input tensor to be modified and it is in the same alias set as the output, then the Kuiper implementation shall modify that input in place instead of there being a separate argument (this is the case for a unary elementwise operation for instance). The allocation of the output tensor should happen on the CUDA/C++ template side, not in Python. The allocation could also be a copy of some input tensor, for example in the `addmm` operator which copies the C matrix to the output matrix and the Kuiper kernel modifies this in-place. 
 - Remember that in F* and Pulse, you do not need to write `return` to return a value from a function; the last expression is returned automatically.
 - Keep code concise and match existing style; IMPORTANT: AVOID EXCESSIVE COMMENTS. Ask first if you should use a separate worktree or stay on the main one. Commits include:

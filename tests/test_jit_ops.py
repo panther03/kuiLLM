@@ -81,7 +81,7 @@ def test_mm_bf16_output(implementation):
     torch.manual_seed(0)
     A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    kwargs = {} if implementation == "tc2d" else {"impl": implementation}
+    kwargs = {"impl": implementation}
     spec = impl.supported(aten.mm.default, (A, B), kwargs)
     assert spec is not None and spec[0] == implementation
     out = impl.run(spec, (A, B), kwargs)
@@ -99,10 +99,10 @@ def test_mm_tensorcore2d_dtype_selection():
     A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
     default_spec = impl.supported(aten.mm.default, (A, B), {})
-    assert default_spec is not None and default_spec[0] == "tc2d"
+    assert default_spec is not None and default_spec[0] == "tc2d_to"
     assert impl.supported(
         aten.mm.default, (A, B), {"out_dtype": torch.bfloat16}
-    )[0] == "tc2d"
+    )[0] == "tc2d_to"
     assert impl.supported(
         aten.mm.default, (A, B), {"impl": "tc2d_to"}
     )[0] == "tc2d_to"
