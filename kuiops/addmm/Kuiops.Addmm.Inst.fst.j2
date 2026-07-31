@@ -12,14 +12,14 @@ open Kuiops.Gemm
 
 module MS = Kuiper.Spec.GEMM
 
-{% if impl == "tc2d" %}
+{% if backend == "tc2d" %}
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
     tc2d_async ({{ in_et }}) ({{ acc_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.lincomb #({{ acc_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
         rows shared cols
-{% elif impl == "tc2d_to" %}
+{% elif backend == "tc2d_to" %}
 // TensorCore2D.To writes the result out of place, so the wrapper passes the
 // copied C buffer as both C and D.
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
@@ -28,12 +28,10 @@ let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
         (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
         rows shared cols
-{% elif impl == "bt2d" and in_et == out_et %}
+{% elif backend == "bt2d" %}
 // BlockTiling2D updates C in place, at batch = 1 (see Kuiops.Mm.Inst).
-let {{ name }} (alpha beta : {{ in_et }}) (rows cols shared : szp) =
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
     bt2d_async #({{ in_et }}) (MS.lincomb #({{ in_et }}) alpha beta)
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz
         1sz rows cols shared
-{% else %}
-UNSUPPORTED ADDMM IMPL
 {% endif %}

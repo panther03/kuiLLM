@@ -3,32 +3,32 @@ module {{ module }}
 
 // JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
 // Generated from kuiops/mm/Kuiops.Mm.Inst.fst.j2
+//
+// mm(A, B) = A@B, i.e. the GEMM combiner `comb2`, which discards the output
+// buffer's old value.
 
 open Kuiper
 open Kuiops.Gemm
 
 module MS = Kuiper.Spec.GEMM
 
-{% if impl == "tc2d" %}
+{% if backend == "tc2d" %}
 let {{ name }} (rows cols shared : szp) =
     tc2d_async ({{ in_et }}) ({{ acc_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.comb2 #({{ acc_et }})) (MS.comb2 #real)
         rows shared cols
-{% elif impl == "tc2d_to" %}
+{% elif backend == "tc2d_to" %}
 let {{ name }} (rows cols shared : szp) =
     tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
         rows shared cols
-{% elif impl == "bt2d" and in_et == out_et %}
-// Fallback for element types the tensor cores cannot take. BlockTiling2D is
-// batched; an [m, n] row-major buffer *is* a [1, m, n] batched row-major one,
-// so this runs it at batch = 1 over the very same pointers.
+{% elif backend == "bt2d" %}
+// BlockTiling2D is batched; an [m, n] row-major buffer *is* a [1, m, n] batched
+// row-major one, so this runs it at batch = 1 over the very same pointers.
 let {{ name }} (rows cols shared : szp) =
     bt2d_async #({{ in_et }}) (MS.comb2 #({{ in_et }}))
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz
         1sz rows cols shared
-{% else %}
-UNSUPPORTED MM IMPL
 {% endif %}

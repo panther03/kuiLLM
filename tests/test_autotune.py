@@ -24,12 +24,8 @@ def _key(operation="aten.mm.default", shape=(64, 64)):
     }
 
 
-def _candidate(name, speed):
-    return autotune.Candidate(
-        params={"impl": "test", "tile": name},
-        spec={"name": name, "speed": speed},
-        module=f"Kuiops.Test.{name}",
-    )
+def _spec(name, speed):
+    return {"module": f"Kuiops.Test.{name}", "tile": name, "speed": speed}
 
 
 def _configure(monkeypatch, tmp_path, enabled):
@@ -39,61 +35,60 @@ def _configure(monkeypatch, tmp_path, enabled):
     autotune.reset_state()
 
 
+def test_no_candidates_is_unsupported(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, enabled=False)
+    assert autotune.tune(_key(), {}, [], None, None) is None
+
+
 def test_runtime_uses_committed_entry(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path, enabled=False)
     key = _key()
-    candidates = [_candidate("slow", 2.0), _candidate("fast", 1.0)]
-    store = autotune.TuneStore()
-    store.update(autotune.key_hash(key), key, candidates[1])
+    candidates = [_spec("slow", 2.0), _spec("fast", 1.0)]
+    autotune.TuneStore().update(autotune.key_hash(key), key, candidates[1])
 
     def no_benchmark(*args):
         raise AssertionError("runtime mode must not benchmark")
 
-    monkeypatch.setattr(autotune, "_benchmark_candidate", no_benchmark)
-    selected = autotune.select_candidate(key, candidates, lambda spec: None, None)
-    assert selected == candidates[1].spec
+    monkeypatch.setattr(autotune, "_benchmark", no_benchmark)
+    assert autotune.tune(key, {}, candidates, None, None) is candidates[1]
 
 
 def test_runtime_cache_miss_uses_first_candidate(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path, enabled=False)
-    candidates = [_candidate("default", 2.0), _candidate("other", 1.0)]
-    selected = autotune.select_candidate(
-        _key(), candidates, lambda spec: None, None
-    )
-    assert selected == candidates[0].spec
+    candidates = [_spec("default", 2.0), _spec("other", 1.0)]
+    assert autotune.tune(_key(), {}, candidates, None, None) is candidates[0]
     assert not config.TUNE_PARAMS_PATH.exists()
 
 
 def test_autotune_ignores_json_once_per_process(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path, enabled=True)
     key = _key()
-    candidates = [_candidate("old", 3.0), _candidate("winner", 1.0)]
-    store = autotune.TuneStore()
-    store.update(autotune.key_hash(key), key, candidates[0])
+    candidates = [_spec("old", 3.0), _spec("winner", 1.0)]
+    autotune.TuneStore().update(autotune.key_hash(key), key, candidates[0])
 
     calls = []
 
-    def benchmark(candidate, run_candidate, device):
-        calls.append(candidate.module)
-        return candidate.spec["speed"]
+    def benchmark(spec, run_candidate, args, kwargs, device):
+        calls.append(spec["module"])
+        return spec["speed"]
 
     removed = []
-    monkeypatch.setattr(autotune, "_benchmark_candidate", benchmark)
+    monkeypatch.setattr(autotune, "_benchmark", benchmark)
+    monkeypatch.setattr(autotune, "_synthesize_args", lambda key, device: [])
     monkeypatch.setattr(jit_compile, "delete_kernel", removed.append)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
 
-    first = autotune.select_candidate(key, candidates, lambda spec: None, None)
-    second = autotune.select_candidate(key, candidates, lambda spec: None, None)
+    first = autotune.tune(key, {}, candidates, None, None)
+    second = autotune.tune(key, {}, candidates, None, None)
 
-    assert first == second == candidates[1].spec
-    assert calls == [candidate.module for candidate in candidates]
-    assert removed == [candidates[0].module]
+    assert first is second is candidates[1]
+    assert calls == [spec["module"] for spec in candidates]
+    assert removed == [candidates[0]["module"]]
     entry = json.loads(config.TUNE_PARAMS_PATH.read_text())["entries"][
         autotune.key_hash(key)
     ]
     assert entry["key"] == key
-    assert entry["params"] == candidates[1].params
-    assert entry["module"] == candidates[1].module
+    assert entry["spec"] == candidates[1]
 
 
 def test_schema_mismatch_invalidates_file(monkeypatch, tmp_path):
@@ -116,15 +111,12 @@ def test_hash_is_canonical():
     assert autotune.key_hash(first) == autotune.key_hash(second)
 
 
-def test_tile_enumeration_preserves_defaults():
-    bt2d = kuiops._bt2d_tiles(torch.float32, 128, 128, 64)
-    tc2d = kuiops._tc2d_tiles(torch.bfloat16, 128, 128, 64)
-    assert len(bt2d) > 1 and bt2d[0] == kuiops._bt2d_tile(
-        torch.float32, 128, 128, 64
-    )
-    assert len(tc2d) > 1 and tc2d[0] == kuiops._tc2d_tile(
-        torch.bfloat16, 128, 128, 64
-    )
+def test_tile_enumeration_is_grid_bounded():
+    assert len(kuiops._tiles("bt2d", torch.float32, 1, 128, 128, 64)) > 1
+    assert len(kuiops._tiles("tc2d", torch.bfloat16, 1, 128, 128, 64)) > 1
+    # A grid that would exceed the block limit leaves no legal tiling.
+    huge = kuiops._MAX_BLOCKS * 128
+    assert kuiops._tiles("bt2d", torch.float32, huge, 128, 128, 64) == []
 
 
 def test_delete_kernel_removes_only_instantiation(monkeypatch, tmp_path):

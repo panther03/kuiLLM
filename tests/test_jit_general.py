@@ -34,7 +34,7 @@ def test_cache_is_hot_on_second_call():
     _need_cuda()
     import kuipy.config
     kuipy.config.JIT_STRICTNESS = 2
-    impl = kuiops.MmImpl({})
+    impl = kuiops.MmImpl()
     A = torch.randn(64, 64, device="cuda")
     B = torch.randn(64, 64, device="cuda")
     # First call may compile; second must be served from the in-process cache.
@@ -49,7 +49,7 @@ def test_cache_is_hot_on_second_call():
 
 def test_unsupported_falls_through():
     _need_cuda()
-    impl = kuiops.MmImpl({})
+    impl = kuiops.MmImpl()
     # K=63 is not divisible by any valid block-K tile -> no plan.
     A = torch.randn(128, 63, device="cuda")
     B = torch.randn(63, 128, device="cuda")
@@ -81,8 +81,8 @@ def test_tensorcore_dtype_capability(monkeypatch):
     monkeypatch.setattr(
         kuipy.config, "cuda_device_capability", lambda device: (7, 0)
     )
-    assert kuiops._tc2d_device_supported(torch.float16, "cuda")
-    assert not kuiops._tc2d_device_supported(torch.bfloat16, "cuda")
+    assert kuiops._tc_device_supported(torch.float16, "cuda")
+    assert not kuiops._tc_device_supported(torch.bfloat16, "cuda")
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-s", "-v"]))

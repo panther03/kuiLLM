@@ -23,11 +23,11 @@ from .. import compile as _compile
 
 aten = torch.ops.aten
 
-# One singleton Impl per family (mirrors the old registry).
-_MM = kuiops.MmImpl({})
-_ADDMM = kuiops.AddmmImpl({})
-_BMM = kuiops.BmmImpl({})
-_SDPA = kuiops.SdpaImpl({})
+# One singleton Impl per family.
+_MM = kuiops.MmImpl()
+_ADDMM = kuiops.AddmmImpl()
+_BMM = kuiops.BmmImpl()
+_SDPA = kuiops.SdpaImpl()
 
 _EFFICIENT_SDPA = aten._scaled_dot_product_efficient_attention.default
 

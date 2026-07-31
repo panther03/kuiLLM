@@ -54,61 +54,81 @@ def _assert_close(out, ref, dtype):
 # mm
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("in_dtype,out_dtype", [
-    (torch.float16, torch.float16),
-    (torch.float16, torch.float32),
-    (torch.bfloat16, torch.float32),
+@pytest.mark.parametrize("in_dtype,acc_dtype,out_dtype", [
+    (torch.float16, torch.float16, torch.float16),
+    (torch.float16, torch.float32, torch.float32),
+    (torch.bfloat16, torch.float32, torch.float32),
 ])
-def test_mm_tensorcore2d(in_dtype, out_dtype):
+def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype):
+    """TensorCore2D wins whenever the accumulator *is* the output type."""
     _need_tensor_cores(in_dtype)
-    impl = kuiops.MmImpl({})
+    impl = kuiops.MmImpl()
     torch.manual_seed(0)
     A = torch.randn(64, 64, device="cuda", dtype=in_dtype)
     B = torch.randn(64, 64, device="cuda", dtype=in_dtype)
-    kwargs = {"out_dtype": out_dtype}
+    kwargs = {"acc_dtype": acc_dtype, "out_dtype": out_dtype}
     spec = impl.supported(aten.mm.default, (A, B), kwargs)
-    assert spec is not None and spec[0] == "tc2d"
+    assert spec is not None and spec["backend"] == "tc2d"
     out = impl.run(spec, (A, B), kwargs)
     ref = torch.mm(A.float(), B.float()).to(out_dtype)
     assert out.dtype == out_dtype
     _assert_close(out, ref, out_dtype)
 
 
-@pytest.mark.parametrize("implementation", ["tc2d", "tc2d_to"])
-def test_mm_bf16_output(implementation):
-    _need_tensor_cores(torch.bfloat16)
-    impl = kuiops.MmImpl({})
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_mm_tensorcore2d_to(dtype):
+    """With the defaults (f32 accumulator, input-typed output) the cast-on-write
+    backend is the one that fits."""
+    _need_tensor_cores(dtype)
+    impl = kuiops.MmImpl()
     torch.manual_seed(0)
-    A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    kwargs = {"impl": implementation}
-    spec = impl.supported(aten.mm.default, (A, B), kwargs)
-    assert spec is not None and spec[0] == implementation
-    out = impl.run(spec, (A, B), kwargs)
-    ref = torch.mm(A, B)
-    assert out.dtype == torch.bfloat16
-    _assert_close(out, ref, torch.bfloat16)
+    A = torch.randn(64, 64, device="cuda", dtype=dtype)
+    B = torch.randn(64, 64, device="cuda", dtype=dtype)
+    spec = impl.supported(aten.mm.default, (A, B), {})
+    assert spec is not None and spec["backend"] == "tc2d_to"
+    out = impl.run(spec, (A, B), {})
+    assert out.dtype == dtype
+    _assert_close(out, torch.mm(A, B), dtype)
 
 
-def test_mm_tensorcore2d_dtype_selection():
+def test_mm_blocktiling2d():
+    """f32 is not a tensor-core input type, so only BlockTiling2D is left."""
+    _need_cuda()
+    impl = kuiops.MmImpl()
+    torch.manual_seed(0)
+    A = torch.randn(64, 64, device="cuda")
+    B = torch.randn(64, 64, device="cuda")
+    spec = impl.supported(aten.mm.default, (A, B), {})
+    assert spec is not None and spec["backend"] == "bt2d"
+    out = impl.run(spec, (A, B), {})
+    _assert_close(out, torch.mm(A, B), torch.float32)
+
+
+def test_mm_backend_selection():
     _need_tensor_cores(torch.bfloat16)
-    impl = kuiops.MmImpl({})
-    A16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
-    B16 = torch.randn(64, 64, device="cuda", dtype=torch.float16)
-    assert impl.supported(aten.mm.default, (A16, B16), {})[0] == "tc2d"
-    A = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    B = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    default_spec = impl.supported(aten.mm.default, (A, B), {})
-    assert default_spec is not None and default_spec[0] == "tc2d_to"
-    assert impl.supported(
-        aten.mm.default, (A, B), {"out_dtype": torch.bfloat16}
-    )[0] == "tc2d_to"
-    assert impl.supported(
-        aten.mm.default, (A, B), {"impl": "tc2d_to"}
-    )[0] == "tc2d_to"
-    assert impl.supported(
-        aten.mm.default, (A, B), {"impl": "tc2d"}
-    )[0] == "tc2d"
+    impl = kuiops.MmImpl()
+
+    def backend(dtype, **kwargs):
+        A = torch.randn(64, 64, device="cuda", dtype=dtype)
+        B = torch.randn(64, 64, device="cuda", dtype=dtype)
+        spec = impl.supported(aten.mm.default, (A, B), kwargs)
+        return spec and spec["backend"]
+
+    assert backend(torch.float16) == "tc2d_to"
+    assert backend(torch.float16, acc_dtype=torch.float16) == "tc2d"
+    assert backend(torch.bfloat16, out_dtype=torch.float32) == "tc2d"
+    assert backend(torch.float32) == "bt2d"
+    # bf16 can only accumulate in f32 on a tensor core, so an explicit bf16
+    # accumulator falls through to the block-tiled backend.
+    assert backend(torch.bfloat16, acc_dtype=torch.bfloat16) == "bt2d"
+    assert backend(torch.bfloat16, acc_dtype=torch.float16) is None
+    assert backend(torch.float64) is None
+    # An explicit `impl` rejects the call rather than falling to another backend.
+    assert backend(torch.bfloat16, impl="tc2d_to") == "tc2d_to"
+    assert backend(torch.bfloat16, impl="tc2d") is None
+    assert backend(torch.float32, impl="tc2d_to") is None
+    assert backend(torch.float32, impl="bt2d") == "bt2d"
+    assert backend(torch.float32, impl="nonsense") is None
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +138,7 @@ def test_mm_tensorcore2d_dtype_selection():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_bmm(dtype):
     _need_cuda()
-    impl = kuiops.BmmImpl({})
+    impl = kuiops.BmmImpl()
     torch.manual_seed(0)
     # BlockTiling2D (now the batched GEMM) needs tile-divisible dims.
     A = torch.randn(5, 64, 32, device="cuda", dtype=dtype)
@@ -131,7 +151,7 @@ def test_bmm(dtype):
 
 def test_bmm_unsupported():
     _need_cuda()
-    impl = kuiops.BmmImpl({})
+    impl = kuiops.BmmImpl()
     # mismatched batch dim
     A = torch.randn(2, 32, 32, device="cuda")
     B = torch.randn(3, 32, 32, device="cuda")
@@ -155,7 +175,7 @@ def test_bmm_unsupported():
 @pytest.mark.skip(reason="broadcasting currently disabled")
 def test_addmm_1d_bias(dtype, alpha, beta):
     _need_cuda()
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     torch.manual_seed(0)
     M, K, N = 64, 64, 64
     A = torch.randn(M, K, device="cuda", dtype=dtype)
@@ -172,7 +192,7 @@ def test_addmm_1d_bias(dtype, alpha, beta):
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
 def test_addmm(dtype, alpha, beta):
     _need_cuda()
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     torch.manual_seed(0)
     M, K, N = 64, 64, 64
     A = torch.randn(M, K, device="cuda", dtype=dtype)
@@ -180,12 +200,13 @@ def test_addmm(dtype, alpha, beta):
     bias = torch.randn(M, N, device="cuda", dtype=dtype)  # 2D bias/C matrix
     kw = dict(alpha=alpha, beta=beta)
     spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
-    expected_impl = (
+    expected = (
         "tc2d_to"
-        if kuiops._tc2d_device_supported(dtype, A.device)
+        if dtype in kuiops._TC_INPUT_DTYPES
+        and kuiops._tc_device_supported(dtype, A.device)
         else "bt2d"
     )
-    assert spec is not None and spec[0] == expected_impl
+    assert spec is not None and spec["backend"] == expected
     out = impl.run(spec, (bias, A, B), kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
     assert out.shape == ref.shape
@@ -195,7 +216,7 @@ def test_addmm(dtype, alpha, beta):
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
 def test_addmm_tensorcore2d(alpha, beta):
     _need_tensor_cores(torch.bfloat16)
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     torch.manual_seed(0)
     M, K, N = 64, 64, 64
     A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
@@ -203,7 +224,7 @@ def test_addmm_tensorcore2d(alpha, beta):
     bias = torch.randn(M, N, device="cuda", dtype=torch.float32)
     kw = dict(alpha=alpha, beta=beta, out_dtype=torch.float32)
     spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
-    assert spec is not None and spec[0] == "tc2d"
+    assert spec is not None and spec["backend"] == "tc2d"
     out = impl.run(spec, (bias, A, B), kw)
     ref = alpha * (A.float() @ B.float()) + beta * bias
     assert out.dtype == torch.float32
@@ -212,7 +233,7 @@ def test_addmm_tensorcore2d(alpha, beta):
 
 def test_addmm_rejects_f64():
     _need_cuda()
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     # BlockTiling2D needs has_vec_cpy -> no f64.
     A = torch.randn(32, 32, device="cuda", dtype=torch.float64)
     B = torch.randn(32, 32, device="cuda", dtype=torch.float64)
@@ -222,7 +243,7 @@ def test_addmm_rejects_f64():
 
 def test_addmm_rejects_broadcast_bias():
     _need_cuda()
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     M, K, N = 32, 32, 32
     A = torch.randn(M, K, device="cuda")
     B = torch.randn(K, N, device="cuda")
@@ -241,7 +262,7 @@ def test_addmm_rejects_broadcast_bias():
 @pytest.mark.skip(reason="RowSoftmax extraction takes ~6min per instantiation")
 def test_softmax(dtype, shape):
     _need_cuda()
-    impl = kuiops.SoftmaxImpl({})
+    impl = kuiops.SoftmaxImpl()
     torch.manual_seed(0)
     X = torch.randn(*shape, device="cuda", dtype=dtype)
     dim = X.dim() - 1
@@ -256,7 +277,7 @@ def test_softmax(dtype, shape):
 
 def test_softmax_non_last_dim_unsupported():
     _need_cuda()
-    impl = kuiops.SoftmaxImpl({})
+    impl = kuiops.SoftmaxImpl()
     X = torch.randn(16, 16, device="cuda")
     # Only the last dim is supported.
     assert impl.supported(aten._softmax.default, (X, 0, False), {}) is None
@@ -276,7 +297,7 @@ def test_softmax_non_last_dim_unsupported():
 ])
 def test_hreduce_poly(func, dtype, kwargs):
     _need_cuda()
-    impl = kuiops.HReducePolyImpl({})
+    impl = kuiops.HReducePolyImpl()
     X = torch.tensor(
         [[[1, 2, 0, 3], [2, 1, 1, 2], [1, 1, 1, 1]],
          [[3, 1, 2, 1], [0, 2, 1, 3], [2, 2, 1, 1]]],
@@ -291,7 +312,7 @@ def test_hreduce_poly(func, dtype, kwargs):
 
 def test_hreduce_poly_dtype_conversion():
     _need_cuda()
-    impl = kuiops.HReducePolyImpl({})
+    impl = kuiops.HReducePolyImpl()
     X = torch.arange(8, device="cuda", dtype=torch.int8).reshape(2, 4)
     args = (X, [1], False)
     out = _run(
@@ -303,7 +324,7 @@ def test_hreduce_poly_dtype_conversion():
 
 def test_hreduce_poly_support_constraints():
     _need_cuda()
-    impl = kuiops.HReducePolyImpl({})
+    impl = kuiops.HReducePolyImpl()
     ints = torch.ones(2, 4, device="cuda", dtype=torch.int32)
     floats = ints.float()
     assert impl.supported(
@@ -344,7 +365,7 @@ def test_hreduce_poly_support_constraints():
 ])
 def test_sdpa(dtypes):
     _need_cuda()
-    impl = kuiops.SdpaImpl({})
+    impl = kuiops.SdpaImpl()
     torch.manual_seed(0)
     q_dtype, k_dtype, v_dtype, bias_dtype = dtypes
     N, H, L, S, E, Ev = 2, 3, 8, 10, 16, 12
@@ -377,7 +398,7 @@ def test_sdpa(dtypes):
 
 def test_sdpa_causal_unsupported():
     _need_cuda()
-    impl = kuiops.SdpaImpl({})
+    impl = kuiops.SdpaImpl()
     N, H, L, S, E, Ev = 1, 1, 4, 4, 8, 8
     Q = torch.randn(N, H, L, E, device="cuda")
     K = torch.randn(N, H, S, E, device="cuda")
@@ -400,7 +421,7 @@ def test_sdpa_causal_unsupported():
 @pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
 def test_gather(dtype, shape, dim):
     _need_cuda()
-    impl = kuiops.GatherImpl({})
+    impl = kuiops.GatherImpl()
     torch.manual_seed(0)
     Inp = torch.randn(*shape, device="cuda", dtype=dtype)
     idx_shape = list(shape)
@@ -414,7 +435,7 @@ def test_gather(dtype, shape, dim):
 
 def test_gather_unsupported():
     _need_cuda()
-    impl = kuiops.GatherImpl({})
+    impl = kuiops.GatherImpl()
     Inp = torch.randn(4, 4, device="cuda")
     # index must be int64
     Idx_f = torch.zeros(4, 4, device="cuda", dtype=torch.int32)
@@ -435,7 +456,7 @@ def test_gather_unsupported():
 @pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
 def test_scatter(dtype, shape, dim):
     _need_cuda()
-    impl = kuiops.ScatterImpl({})
+    impl = kuiops.ScatterImpl()
     torch.manual_seed(0)
     Self = torch.randn(*shape, device="cuda", dtype=dtype)
     Src = torch.randn(*shape, device="cuda", dtype=dtype)
@@ -457,7 +478,7 @@ def test_scatter(dtype, shape, dim):
 
 def test_scatter_unsupported():
     _need_cuda()
-    impl = kuiops.ScatterImpl({})
+    impl = kuiops.ScatterImpl()
     Self = torch.randn(4, 4, device="cuda")
     Idx = torch.zeros(4, 4, device="cuda", dtype=torch.int64)
     Src = torch.randn(4, 4, device="cuda")
@@ -481,7 +502,7 @@ def test_scatter_unsupported():
 @pytest.mark.parametrize("dim", [0, 1, 2])
 def test_cat(dtype, dim):
     _need_cuda()
-    impl = kuiops.CatImpl({})
+    impl = kuiops.CatImpl()
     torch.manual_seed(0)
     a_shape = [4, 3, 6]
     b_shape = list(a_shape)
@@ -496,7 +517,7 @@ def test_cat(dtype, dim):
 
 def test_cat_unsupported():
     _need_cuda()
-    impl = kuiops.CatImpl({})
+    impl = kuiops.CatImpl()
     A = torch.randn(4, 4, device="cuda")
     B = torch.randn(4, 4, device="cuda")
     # only binary cat is supported
@@ -519,7 +540,7 @@ def test_cat_unsupported():
 ])
 def test_elem_binary(dtype, func, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(3, 5, 7, device="cuda", dtype=dtype)
     B = torch.randn(3, 5, 7, device="cuda", dtype=dtype).abs() + 0.5
@@ -533,7 +554,7 @@ def test_elem_binary(dtype, func, ref):
 ])
 def test_elem_scalar(func, c, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(4, 9, device="cuda", dtype=torch.float32)
     out = _run(impl, func, (A, c))
@@ -542,7 +563,7 @@ def test_elem_scalar(func, c, ref):
 
 def test_elem_bitwise():
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
     B = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
@@ -558,7 +579,7 @@ def test_elem_bitwise():
 ])
 def test_elem_compare_scalar(func, c, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(5, 8, device="cuda", dtype=torch.float32)
     out = _run(impl, func, (A, c))
@@ -569,7 +590,7 @@ def test_elem_compare_scalar(func, c, ref):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_elem_where(dtype):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     C = torch.randint(0, 2, (3, 4, 5), device="cuda", dtype=torch.bool)
     X = torch.randn(3, 4, 5, device="cuda", dtype=dtype)
@@ -580,7 +601,7 @@ def test_elem_where(dtype):
 
 def test_elem_unsupported():
     _need_cuda()
-    impl = kuiops.ElementwiseImpl({})
+    impl = kuiops.ElementwiseImpl()
     A = torch.randn(4, 4, device="cuda")
     B = torch.randn(4, 4, device="cuda")
     # Tensor comparisons (bool output) have no not-in-place binary map kernel.

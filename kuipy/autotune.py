@@ -1,39 +1,34 @@
-"""Shape-specific autotuning for verified Kuiper kernel instantiations."""
+"""Shape-specific autotuning for verified Kuiper kernel instantiations.
+
+An operator's ``supported()`` hands ``tune`` every legal parameterization of a
+call as a list of specs. Normal runs consume the committed tuning file (falling
+back to the first candidate on a miss); ``KUIPY_AUTOTUNE=1`` benchmarks each
+candidate and records the winner.
+
+Benchmarking never sees the caller's tensors: it synthesizes its own from the
+shapes/strides/dtypes in the key, so a selection made while tracing a graph
+(where the caller's tensors are fake) is still measured on real memory.
+"""
 import hashlib
 import json
 import os
 import statistics
 import tempfile
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 from filelock import FileLock
 import torch
+from torch._subclasses.fake_tensor import unset_fake_temporarily
 
 from . import compile as _compile
 from . import config as C
 
-
-@dataclass
-class Candidate:
-    params: dict
-    spec: object
-    module: str
-
-
-@dataclass
-class _Selection:
-    params: dict
-    module: str
-
-
+# cache_key -> winning spec, so a hot call is a dict lookup.
 _selected = {}
-_tuned = set()
 _locks = {}
 _device_locks = {}
-_locks_guard = threading.Lock()
-_state_lock = threading.Lock()
+_registry_lock = threading.Lock()
 
 
 def _normalize(value):
@@ -49,6 +44,9 @@ def _normalize(value):
 
 
 def make_key(operation, args, parameters=None):
+    """Identify a call by its tensor inputs, the selection-relevant parameters
+    and the GPU. The tensor descriptions double as the recipe for synthesizing
+    inputs when benchmarking."""
     tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
     if not tensors:
         raise ValueError(f"{operation} has no tensor inputs")
@@ -115,11 +113,11 @@ class TuneStore:
             raise RuntimeError(
                 f"autotune key collision or corrupt entry {digest} in {self.path}"
             )
-        if not isinstance(entry.get("params"), dict):
+        if not isinstance(entry.get("spec"), dict):
             raise RuntimeError(f"invalid autotune entry {digest} in {self.path}")
         return entry
 
-    def update(self, digest, key, candidate):
+    def update(self, digest, key, spec):
         C.KUIPY_CACHE.mkdir(parents=True, exist_ok=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(self.lock_path)):
@@ -129,11 +127,7 @@ class TuneStore:
                 raise RuntimeError(
                     f"autotune key collision for {digest} in {self.path}"
                 )
-            data["entries"][digest] = {
-                "key": key,
-                "params": _normalize(candidate.params),
-                "module": candidate.module,
-            }
+            data["entries"][digest] = {"key": key, "spec": _normalize(spec)}
             ordered = {
                 "tuning_schema": C.TUNING_SCHEMA_VERSION,
                 "entries": {
@@ -154,47 +148,55 @@ class TuneStore:
 
     def referenced_modules(self):
         return {
-            entry["module"]
+            entry["spec"]["module"]
             for entry in self._read()["entries"].values()
-            if isinstance(entry, dict) and isinstance(entry.get("module"), str)
+            if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
         }
 
 
 def _key_lock(cache_key):
-    with _locks_guard:
+    with _registry_lock:
         return _locks.setdefault(cache_key, threading.Lock())
 
 
 def _device_lock(device):
-    with _locks_guard:
+    with _registry_lock:
         return _device_locks.setdefault(str(device), threading.Lock())
 
 
 def _gpu_lock_path(key, device):
     identity = f"{key['gpu']}|{device}"
     if device is not None:
-        properties = torch.cuda.get_device_properties(device)
-        identity = str(properties.uuid)
+        identity = str(torch.cuda.get_device_properties(device).uuid)
     digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / (
         f"kuipy-autotune-{os.getuid()}-{digest}.lock"
     )
 
 
-def _find_candidate(candidates, params):
-    normalized = _normalize(params)
-    for candidate in candidates:
-        if _normalize(candidate.params) == normalized:
-            return candidate
+def _match(candidates, normalized):
+    for spec in candidates:
+        if _normalize(spec) == normalized:
+            return spec
     return None
 
 
-def _benchmark_candidate(candidate, run_candidate, device):
+def _synthesize_args(key, device):
+    return [
+        torch.empty_strided(
+            entry["shape"], entry["strides"],
+            dtype=getattr(torch, entry["dtype"]), device=device,
+        ).zero_()
+        for entry in key["inputs"]
+    ]
+
+
+def _benchmark(spec, run_candidate, args, kwargs, device):
     with torch.cuda.device(device):
-        run_candidate(candidate.spec)
+        run_candidate(spec, args, kwargs)
         torch.cuda.synchronize(device)
         for _ in range(C.AUTOTUNE_WARMUP):
-            run_candidate(candidate.spec)
+            run_candidate(spec, args, kwargs)
         torch.cuda.synchronize(device)
 
         timings = []
@@ -202,7 +204,7 @@ def _benchmark_candidate(candidate, run_candidate, device):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            run_candidate(candidate.spec)
+            run_candidate(spec, args, kwargs)
             end.record()
             end.synchronize()
             timings.append(float(start.elapsed_time(end)))
@@ -211,117 +213,105 @@ def _benchmark_candidate(candidate, run_candidate, device):
 
 def _cleanup(candidates, winner, store):
     referenced = store.referenced_modules()
-    with _state_lock:
-        referenced.update(selection.module for selection in _selected.values())
-    for candidate in candidates:
-        if candidate.module != winner.module and candidate.module not in referenced:
+    with _registry_lock:
+        referenced.update(spec["module"] for spec in _selected.values())
+    for spec in candidates:
+        module = spec["module"]
+        if module != winner["module"] and module not in referenced:
             try:
-                _compile.delete_kernel(candidate.module)
+                _compile.delete_kernel(module)
             except OSError as exc:
-                C.log(f"failed to remove losing kernel {candidate.module}: {exc}")
+                C.log(f"failed to remove losing kernel {module}: {exc}")
 
 
-def select_candidate(key, candidates, run_candidate, device):
+def _tune_now(key, kwargs, candidates, run_candidate, device, store, digest):
+    if _compile.is_capturing():
+        raise RuntimeError(
+            "KUIPY_AUTOTUNE cannot run inside kuipy.batch_capture()"
+        )
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "KUIPY_AUTOTUNE cannot run during CUDA graph capture; "
+            "run the tuning pass without CUDA graphs"
+        )
+
+    print(
+        f"[kuipy-autotune] tuning {key['operation']} "
+        f"({len(candidates)} candidates, {digest[:12]})",
+        flush=True,
+    )
+    args = _synthesize_args(key, device)
+    results = []
+    failures = []
+    for index, spec in enumerate(candidates, 1):
+        print(f"[kuipy-autotune] [{index}/{len(candidates)}] {spec}", flush=True)
+        try:
+            timing = _benchmark(spec, run_candidate, args, kwargs, device)
+        except RuntimeError as exc:
+            failures.append((spec, str(exc)))
+            print(f"[kuipy-autotune] candidate failed: {exc}", flush=True)
+            continue
+        results.append((timing, index, spec))
+        print(f"[kuipy-autotune] {timing:.4f} ms", flush=True)
+
+    if not results:
+        detail = "\n".join(f"{spec}: {error}" for spec, error in failures)
+        raise RuntimeError(
+            f"all autotune candidates failed for {key['operation']}:\n{detail}"
+        )
+
+    _, _, winner = min(results, key=lambda result: (result[0], result[1]))
+    store.update(digest, key, winner)
+    _cleanup(candidates, winner, store)
+    print(f"[kuipy-autotune] selected {winner}", flush=True)
+    return winner
+
+
+def tune(key, kwargs, candidates, run_candidate, device):
+    """Pick one spec out of ``candidates`` (given in priority order).
+
+    Returns ``None`` for an empty candidate list, so a caller can return the
+    result of ``tune`` straight out of ``supported()``."""
     if not candidates:
-        raise ValueError("autotuning requires at least one candidate")
+        return None
     digest = key_hash(key)
     store = TuneStore()
     cache_key = (str(store.path), digest)
 
     with _key_lock(cache_key):
-        with _state_lock:
-            selection = _selected.get(cache_key)
-        if selection is not None:
-            candidate = _find_candidate(candidates, selection.params)
-            if candidate is not None:
-                return candidate.spec
-            with _state_lock:
+        with _registry_lock:
+            chosen = _selected.get(cache_key)
+        if chosen is not None:
+            spec = _match(candidates, _normalize(chosen))
+            if spec is not None:
+                return spec
+            with _registry_lock:
                 _selected.pop(cache_key, None)
 
-        if not C.AUTOTUNE:
+        if C.AUTOTUNE:
+            C.KUIPY_CACHE.mkdir(parents=True, exist_ok=True)
+            with (_device_lock(device),
+                  FileLock(str(_gpu_lock_path(key, device))),
+                  FileLock(str(C.KUIPY_CACHE / "autotune-artifacts.lock")),
+                  unset_fake_temporarily()):
+                spec = _tune_now(key, kwargs, candidates, run_candidate,
+                                 device, store, digest)
+        else:
             entry = store.lookup(digest, key)
-            candidate = (
-                _find_candidate(candidates, entry["params"])
-                if entry is not None else None
-            )
-            if candidate is None:
-                candidate = candidates[0]
+            spec = _match(candidates, entry["spec"]) if entry is not None else None
+            if spec is None:
                 if entry is not None:
                     C.log(f"ignoring stale autotune entry {digest}")
-            with _state_lock:
-                _selected[cache_key] = _Selection(
-                    candidate.params, candidate.module
-                )
-            return candidate.spec
+                spec = candidates[0]
 
-        C.KUIPY_CACHE.mkdir(parents=True, exist_ok=True)
-        gpu_file_lock = FileLock(str(_gpu_lock_path(key, device)))
-        cache_file_lock = FileLock(
-            str(C.KUIPY_CACHE / "autotune-artifacts.lock")
-        )
-        with _device_lock(device), gpu_file_lock, cache_file_lock:
-            if _compile.is_capturing():
-                raise RuntimeError(
-                    "KUIPY_AUTOTUNE cannot run inside kuipy.batch_capture()"
-                )
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    "KUIPY_AUTOTUNE cannot run during CUDA graph capture; "
-                    "run the tuning pass without CUDA graphs"
-                )
-
-            print(
-                f"[kuipy-autotune] tuning {key['operation']} "
-                f"({len(candidates)} candidates, {digest[:12]})",
-                flush=True,
-            )
-            results = []
-            failures = []
-            for index, candidate in enumerate(candidates, 1):
-                print(
-                    f"[kuipy-autotune] [{index}/{len(candidates)}] "
-                    f"{candidate.params}",
-                    flush=True,
-                )
-                try:
-                    timing = _benchmark_candidate(
-                        candidate, run_candidate, device
-                    )
-                except RuntimeError as exc:
-                    failures.append((candidate.params, str(exc)))
-                    print(
-                        f"[kuipy-autotune] candidate failed: {exc}", flush=True
-                    )
-                    continue
-                results.append((timing, index, candidate))
-                print(f"[kuipy-autotune] {timing:.4f} ms", flush=True)
-
-            if not results:
-                detail = "\n".join(
-                    f"{params}: {error}" for params, error in failures
-                )
-                raise RuntimeError(
-                    f"all autotune candidates failed for "
-                    f"{key['operation']}:\n{detail}"
-                )
-
-            _, _, winner = min(results, key=lambda result: (result[0], result[1]))
-            store.update(digest, key, winner)
-            with _state_lock:
-                _selected[cache_key] = _Selection(
-                    winner.params, winner.module
-                )
-                _tuned.add(cache_key)
-            _cleanup(candidates, winner, store)
-            print(f"[kuipy-autotune] selected {winner.params}", flush=True)
-            return winner.spec
+        with _registry_lock:
+            _selected[cache_key] = spec
+        return spec
 
 
 def reset_state():
     """Clear process-local selections; intended for tests."""
-    with _state_lock:
+    with _registry_lock:
         _selected.clear()
-        _tuned.clear()
-    with _locks_guard:
         _locks.clear()
         _device_locks.clear()

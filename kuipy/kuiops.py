@@ -27,27 +27,22 @@ def _norm_dim(d, rank):
 
 
 class _Family:
+    """An operator family: ``supported(func, args, kwargs)`` returns the spec of
+    the kernel instantiation serving this call (or ``None``), and ``run(spec,
+    args, kwargs)`` extracts, compiles and invokes it."""
+
     fst_template = None
     wrapper_template = None
-    tune_key = ""
-    tune_params = ()
     # False for families whose kernel internally launches several GPU kernels and
     # synchronizes to observe the intermediate results: those cannot take a
     # caller-supplied stream, so they must not be recorded into a CUDA graph.
     # They stay callable directly (e.g. from the unit tests).
     graph_safe = True
 
-    def __init__(self, all_tune_params):
-        self.tune_params = all_tune_params.get(self.tune_key, self.tune_params)
-
     def _mod(self, module, fst_ctx, wrapper_ctx):
         return _compile.build_kernel(module,
             self.fst_template, fst_ctx,
             self.wrapper_template, wrapper_ctx)
-    
-    def tune(self, all_tune_params):
-        all_tune_params[self.tune_key] = self.tune_params
-        return all_tune_params
 
 def torch_dtype_to_fstar(dt):
     return {
@@ -179,8 +174,6 @@ def _const_tag(constargs):
 class ElementwiseImpl(_Family):
     fst_template = "elementwise/Kuiops.Elementwise.Inst.fst.j2"
     wrapper_template = "elementwise/wrapper_elementwise.cu.j2"
-    tune_key = "ELEM"
-    tune_params = ()
 
     # aten op -> F* impl name (arithmetic ops via the scalar/floating typeclass).
     _IMPL = {
@@ -237,7 +230,7 @@ class ElementwiseImpl(_Family):
                 return None
             return dict(kind="map", method=ElementwiseImpl._BITWISE1[func],
                         in_dtypes=[A.dtype], out_dtype=A.dtype,
-                        constargs=[], call=[A])
+                        constargs=[])
 
         # Binary bitwise (bool), in-place.
         if func in ElementwiseImpl._BITWISE2:
@@ -245,7 +238,7 @@ class ElementwiseImpl(_Family):
                 return None
             return dict(kind="map2", method=ElementwiseImpl._BITWISE2[func],
                         in_dtypes=[A.dtype, A.dtype], out_dtype=A.dtype,
-                        constargs=[], call=[A, args[1]])
+                        constargs=[])
 
         # Scalar comparisons -> bool. Only the scalar-rhs form is supported:
         # there is no not-in-place *binary* map kernel, so the Tensor overloads
@@ -258,7 +251,7 @@ class ElementwiseImpl(_Family):
                 return None
             return dict(kind="map_nip", method=ElementwiseImpl._COMPARE[func],
                         in_dtypes=[A.dtype], out_dtype=torch.bool,
-                        constargs=[s], call=[A])
+                        constargs=[s])
 
         # Ternary select: where(cond, x, y). No broadcasting: shapes must match.
         if func is aten.where.self:
@@ -274,7 +267,7 @@ class ElementwiseImpl(_Family):
                 return None
             return dict(kind="map3", method="bwhere",
                         in_dtypes=[Cnd.dtype, X.dtype, Y.dtype],
-                        out_dtype=X.dtype, constargs=[], call=[Cnd, X, Y])
+                        out_dtype=X.dtype, constargs=[])
 
         # Arithmetic path (unary / binary / scalar-broadcast).
         impl = ElementwiseImpl._IMPL.get(func)
@@ -287,7 +280,7 @@ class ElementwiseImpl(_Family):
 
         if len(args) == 1:
             return dict(kind="map", method=impl, in_dtypes=[A.dtype],
-                        out_dtype=A.dtype, constargs=[], call=[A])
+                        out_dtype=A.dtype, constargs=[])
 
         constargs = []
         if func in (aten.add.Tensor, aten.add.Scalar) and kwargs.get("alpha", 1) != 1:
@@ -300,22 +293,21 @@ class ElementwiseImpl(_Family):
         if (func is aten.pow.Tensor_Scalar and isinstance(args[1], int)
                 and args[1] == 2):
             return dict(kind="map", method="square", in_dtypes=[A.dtype],
-                        out_dtype=A.dtype, constargs=[], call=[A])
+                        out_dtype=A.dtype, constargs=[])
 
         # Scalar second operand (by spec e.g. add.Scalar, or by overloading).
         if (s := _scalar(args[1])) is not None:
             constargs += [s]
             return dict(kind="map", method=impl, in_dtypes=[A.dtype],
-                        out_dtype=A.dtype, constargs=constargs, call=[A])
+                        out_dtype=A.dtype, constargs=constargs)
         if same(args[1]):
             return dict(kind="map2", method=impl, in_dtypes=[A.dtype, A.dtype],
-                        out_dtype=A.dtype, constargs=constargs, call=[A, args[1]])
+                        out_dtype=A.dtype, constargs=constargs)
         return None
 
     def run(self, spec, args, kwargs):
         kind, method = spec["kind"], spec["method"]
         in_dtypes, out_dtype = spec["in_dtypes"], spec["out_dtype"]
-        call = spec["call"]
 
         # TODO: proper PyTorch type promotion. For now constants are cast to the
         # input element type.
@@ -347,29 +339,48 @@ class ElementwiseImpl(_Family):
             fst_ctx["eto"] = torch_dtype_to_fstar(out_dtype)
             wrapper_ctx["cpp_et"] = torch_dtype_to_ctype(in_dtypes[1])
 
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*args[:len(in_dtypes)])
+
 
 # ---------------------------------------------------------------------------
-# Matmul (no GEMM)
+# Matmul family (mm / addmm / bmm)
 # ---------------------------------------------------------------------------
+#
+# Three Kuiper GEMM backends, all row-major:
+#   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at
+#            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one).
+#   tc2d     TensorCore2D, accumulates in `acc` and writes `acc` in place.
+#   tc2d_to  TensorCore2D.To, accumulates in `acc` and casts to `out`.
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
+_MAX_BLOCKS = 2097152
 _WARP = 32
-_TC2D_OUTPUT_DTYPES = {
+
+# The GEMM operands are copied through `has_vec_cpy`, which exists for these
+# element types only.
+_VEC_CPY_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
+
+# Tensor-core input element types and the compute capability each needs.
+_TC_INPUT_DTYPES = {torch.float16: (7, 0), torch.bfloat16: (8, 0)}
+
+# Accumulator element types the tensor cores can pair with each input type
+# (Kuiper's `valid_frag_et_dims` / `valid_frag_et_comb`).
+_TC_ACC_DTYPES = {
     torch.float16: (torch.float16, torch.float32),
     torch.bfloat16: (torch.float32,),
 }
-_TC2D_TO_INPUT_DTYPES = (torch.float16, torch.bfloat16)
 
-def _tc2d_device_supported(dtype, device):
+_BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "bt2d": "Bt2D"}
+
+
+def _tc_device_supported(dtype, device):
     cc = _config.cuda_device_capability(device)
-    minimum = (8, 0) if dtype == torch.bfloat16 else (7, 0)
-    return cc is not None and cc >= minimum
+    return cc is not None and cc >= _TC_INPUT_DTYPES[dtype]
 
 
 def _bt2d_tiles(dtype, M, N, K):
-    """Return every legal BlockTiling2D parameterization for this problem.
+    """Every legal BlockTiling2D parameterization for this problem.
 
     chunk and the shared-memory byte budget scale with the element size
     (``chunk et = 16/sizeof(et)``)."""
@@ -399,49 +410,32 @@ def _bt2d_tiles(dtype, M, N, K):
                         fill = chunk * threads
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        tiles.append(
-                            dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn)
-                        )
+                        tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn))
     return tiles
 
 
-def _bt2d_tile(dtype, M, N, K):
-    tiles = _bt2d_tiles(dtype, M, N, K)
-    if tiles:
-        return tiles[0]
-    log(f"no BT2D tile params found for M={M}, N={N}, K={K}")
-    return None
-
-
 def _tc2d_tiles(dtype, M, N, K):
-    """Return every legal TensorCore2D parameterization for this problem."""
+    """Every legal TensorCore2D parameterization for this problem, ranges listed
+    in preference order. The fragment dims are fixed at the 16x16x16 shape."""
     tiles = []
-    seen = set()
-    chunk = 16 // (dtype.itemsize)
+    chunk = 16 // dtype.itemsize
     tm = tn = tk = 16
-
-    # Preserve the existing hand-picked default as the first candidate.
-    good = dict(bm=128, bn=128, bk=32, tm=16, tn=16, tk=16, wm=8, wn=4)
-    if ((M % (good["bm"]) == 0) and (N % (good["bn"]) == 0) and (K % (good["bk"]) == 0) and
-        (good["bn"] % chunk == 0) and (good["bk"] % chunk == 0)):
-        tiles.append(good)
-        seen.add(tuple(good.items()))
     for bm in (128, 64):
         if M % bm or bm % tm:
             continue
         for bn in (128, 64):
             if N % bn or bn % chunk or bn % tn:
                 continue
-            for bk in (64, 32, 16):
+            for bk in (32, 64, 16):
                 if K % bk or bk % chunk or bk % tk:
                     continue
                 if 2 * (bm * bk + bk * bn) > _SHMEM_BYTES:
                     continue
-                for wm in (16, 8, 4, 2):
-                    if (bm % (tm * wm)) or (bm % (wm * tm)):
+                for wm in (8, 4, 2, 16):
+                    if bm % (wm * tm):
                         continue
-                    for wn in (16, 8, 4, 2):
-                        if bn % (tn * wn):
+                    for wn in (4, 8, 2, 16):
+                        if bn % (wn * tn):
                             continue
                         warps = (bm // (wm * tm)) * (bn // (wn * tn))
                         if warps * _WARP > _MAX_THREADS:
@@ -449,398 +443,234 @@ def _tc2d_tiles(dtype, M, N, K):
                         fill = chunk * warps * _WARP
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        tile = dict(
-                            bm=bm, bn=bn, bk=bk, tm=tm, tn=tn, tk=tk,
-                            wm=wm, wn=wn
-                        )
-                        identity = tuple(tile.items())
-                        if identity not in seen:
-                            tiles.append(tile)
-                            seen.add(identity)
+                        tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn,
+                                          tk=tk, wm=wm, wn=wn))
     return tiles
 
 
-def _tc2d_tile(dtype, M, N, K):
-    tiles = _tc2d_tiles(dtype, M, N, K)
-    if tiles:
-        return tiles[0]
-    log(f"no TC2D tile params found for M={M}, N={N}, K={K}")
-    return None
+def _tiles(backend, dtype, batch, M, N, K):
+    """Legal tilings, in priority order, whose grid also fits in one launch."""
+    enumerate_tiles = _bt2d_tiles if backend == "bt2d" else _tc2d_tiles
+    return [
+        tile for tile in enumerate_tiles(dtype, M, N, K)
+        if batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
+    ]
 
 
-_MAX_BLOCKS = 2097152
+def _backend_supports(backend, in_dtype, acc_dtype, out_dtype, device):
+    if backend == "bt2d":
+        return (in_dtype in _VEC_CPY_DTYPES
+                and acc_dtype == in_dtype and out_dtype == in_dtype)
+    if (in_dtype not in _TC_INPUT_DTYPES
+            or not _tc_device_supported(in_dtype, device)
+            or acc_dtype not in _TC_ACC_DTYPES[in_dtype]):
+        return False
+    if backend == "tc2d":
+        # TensorCore2D writes the accumulator itself; no cast on the way out.
+        return out_dtype == acc_dtype
+    return out_dtype in _VEC_CPY_DTYPES
 
 
-def _gemm_blocks_ok(batch, M, N, tile):
-    """The (batched) BlockTiling2D grid is batch * (M/bm) * (N/bn) blocks."""
-    return batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
+class _MatmulFamily(_Family):
+    """Backend selection shared by mm / addmm / bmm.
+
+    ``acc_dtype`` and ``out_dtype`` kwargs pin the accumulator and output
+    element types; ``impl`` pins the backend (and rejects the call outright if
+    that backend cannot serve it). An unset ``acc_dtype`` means f32 for the
+    tensor-core backends, and the input type for BlockTiling2D."""
+
+    # Backends this operator can use, in priority order.
+    backends = ()
+    operation = None
+
+    def _plans(self, kwargs, in_dtype, device):
+        """The (backend, acc_dtype, out_dtype) triples this call admits."""
+        requested = kwargs.get("impl")
+        if requested is not None and requested not in self.backends:
+            return []
+        acc_dtype = kwargs.get("acc_dtype")
+        out_dtype = kwargs.get("out_dtype", in_dtype)
+        plans = []
+        for backend in self.backends:
+            if requested is not None and backend != requested:
+                continue
+            acc = acc_dtype
+            if acc is None:
+                acc = in_dtype if backend == "bt2d" else torch.float32
+            if _backend_supports(backend, in_dtype, acc, out_dtype, device):
+                plans.append((backend, acc, out_dtype))
+        return plans
+
+    def _select(self, args, kwargs, specs):
+        key = _autotune.make_key(self.operation, args, {
+            "impl": kwargs.get("impl"),
+            "acc_dtype": kwargs.get("acc_dtype"),
+            "out_dtype": kwargs.get("out_dtype"),
+        })
+        return _autotune.tune(key, kwargs, specs, self.run, args[0].device)
 
 
-class _GemmFamily(_Family):
-    """Shared TensorCore2D.To and BlockTiling2D selection."""
-
-    tune_params = {"impl": "tc2d"}
-
-    def _select_tc2d_to(self, dtype, M, N, K, force=False):
-        if ((not force and self.tune_params["impl"] != "tc2d")
-                or dtype not in _TC2D_TO_INPUT_DTYPES):
-            return None
-        tile = _tc2d_tile(dtype, M, N, K)
-        if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-            return "tc2d_to", tile, torch.float32
-        return None
-
-    def _select_bt2d(self, dtype, M, N, K):
-        tile = _bt2d_tile(dtype, M, N, K)
-        if tile is not None and _gemm_blocks_ok(1, M, N, tile):
-            return "bt2d", tile
-        return None
-
-    @staticmethod
-    def _candidate(spec, params, module):
-        return _autotune.Candidate(params=params, spec=spec, module=module)
+def _tile_tag(tile):
+    return "_".join(f"{k}{v}" for k, v in tile.items())
 
 
-class MmImpl(_GemmFamily):
+def _gemm_fst_ctx(spec, name):
+    return dict(
+        module=spec["module"], name=name, backend=spec["backend"],
+        in_et=torch_dtype_to_fstar(spec["in_dtype"]),
+        acc_et=torch_dtype_to_fstar(spec["acc_dtype"]),
+        out_et=torch_dtype_to_fstar(spec["out_dtype"]),
+        **spec["tile"])
+
+
+def _gemm_wrapper_ctx(spec, name):
+    return dict(
+        module=spec["module"].replace(".", "_"), name=name,
+        backend=spec["backend"],
+        cpp_in_et=torch_dtype_to_ctype(spec["in_dtype"]),
+        cpp_acc_et=torch_dtype_to_ctype(spec["acc_dtype"]),
+        cpp_out_et=torch_dtype_to_ctype(spec["out_dtype"]),
+        out_scalar=torch_dtype_to_aten_scalar(spec["out_dtype"]))
+
+
+class MmImpl(_MatmulFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
-    tune_key = "MM"
+    backends = ("tc2d", "tc2d_to", "bt2d")
+    operation = "aten.mm.default"
 
     @staticmethod
-    def _module(spec):
-        impl, tile_params, dtype, _, out_dtype, _ = spec
-        et = torch_dtype_to_fstar(dtype)
-        out_et = torch_dtype_to_fstar(out_dtype)
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        return (
-            f"Kuiops.Mm.{impl.title()}.{et.title()}.{out_et.title()}."
-            f"P_{tile_params_str}"
-        )
-
-    def _candidate_specs(self, A, B, out_dtype, requested_impl):
-        M, K = A.shape
-        _, N = B.shape
-        M, K, N = int(M), int(K), int(N)
-        specs = []
-        tensor_cores_enabled = (
-            _tc2d_device_supported(A.dtype, A.device)
-            and (self.tune_params["impl"] == "tc2d"
-                 or requested_impl is not None)
-        )
-        if (tensor_cores_enabled
-                and requested_impl != "tc2d_to"
-                and A.dtype in _TC2D_TO_INPUT_DTYPES
-                and (requested_impl == "tc2d"
-                     or out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ()))):
-            for tile in _tc2d_tiles(A.dtype, M, N, K):
-                if not _gemm_blocks_ok(1, M, N, tile):
-                    continue
-                acc_dtype = (
-                    out_dtype
-                    if out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())
-                    else torch.float32
-                )
-                specs.append(
-                    ("tc2d", tile, A.dtype, acc_dtype, out_dtype, [A, B])
-                )
-        if (tensor_cores_enabled
-                and requested_impl != "tc2d"
-                and A.dtype in _TC2D_TO_INPUT_DTYPES
-                and out_dtype in _FLOAT_DTYPES):
-            for tile in _tc2d_tiles(A.dtype, M, N, K):
-                if _gemm_blocks_ok(1, M, N, tile):
-                    specs.append(
-                        ("tc2d_to", tile, A.dtype, torch.float32,
-                         out_dtype, [A, B])
-                    )
-        if requested_impl is None and out_dtype == A.dtype:
-            for tile in _bt2d_tiles(A.dtype, M, N, K):
-                if _gemm_blocks_ok(1, M, N, tile):
-                    specs.append(
-                        ("bt2d", tile, A.dtype, A.dtype, out_dtype, [A, B])
-                    )
-        return specs
-
-    def supported(self, func, args, kwargs):
-        # supposedly mm supports an alpha parameter, we don't
-        if len(args) != 2 or (kwargs.get("alpha", 1) != 1):
-            return None
-        A, B = args
-        if not ((A.is_cuda and B.is_cuda) and
-        # technically unecessary as this op does not support broadcast
-            (A.dim() == 2 and B.dim() == 2) and
-            (A.dtype == B.dtype)):
-            return None
-        M, K = A.shape
-        K2, _ = B.shape
-        if K != K2:
-            return None
-        out_dtype = kwargs.get("out_dtype", A.dtype)
-        requested_impl = kwargs.get("impl")
-        if requested_impl not in (None, "tc2d", "tc2d_to"):
-            return None
-        specs = self._candidate_specs(A, B, out_dtype, requested_impl)
-        return specs[0] if specs else None
-
-    def run(self, spec, args, kwargs):
-        A, B = args
-        out_dtype = kwargs.get("out_dtype", A.dtype)
-        requested_impl = kwargs.get("impl")
-        specs = self._candidate_specs(A, B, out_dtype, requested_impl)
-        candidates = [
-            self._candidate(
-                candidate,
-                {"impl": candidate[0], **candidate[1]},
-                self._module(candidate),
-            )
-            for candidate in specs
-        ]
-        key = _autotune.make_key(
-            "aten.mm.default",
-            args,
-            {
-                "out_dtype": out_dtype,
-                "requested_impl": requested_impl,
-            },
-        )
-        spec = _autotune.select_candidate(
-            key, candidates, self._run, A.device
-        )
-        return self._run(spec)
-
-    def _run(self, spec):
-        impl, tile_params, dtype, acc_dtype, out_dtype, call = spec
-        et = torch_dtype_to_fstar(dtype)
-        acc_et = torch_dtype_to_fstar(acc_dtype)
-        out_et = torch_dtype_to_fstar(out_dtype)
-
-        module = self._module(spec)
-        # keeping it short for this one...
-        name = "mm_jit"
-        fst_ctx = dict(
-            module=module,
-            name=name,
-            in_et=et,
-            acc_et=acc_et,
-            out_et=out_et,
-            impl=impl,
-            **tile_params
-        )
-        wrapper_ctx = dict(
-            module=module.replace(".", "_"),
-            name=name,
-            impl=impl,
-            cpp_in_et=torch_dtype_to_ctype(dtype),
-            cpp_out_et=torch_dtype_to_ctype(out_dtype),
-            cpp_kernel_et=torch_dtype_to_ctype(
-                acc_dtype if impl == "tc2d" else out_dtype
-            ),
-            kernel_scalar=torch_dtype_to_aten_scalar(
-                acc_dtype if impl == "tc2d" else out_dtype
-            ),
-            out_scalar=torch_dtype_to_aten_scalar(out_dtype),
-            cast_output=impl == "tc2d" and acc_dtype != out_dtype,
-        )
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
-
-
-# ---------------------------------------------------------------------------
-# Batched matmul (bmm)
-# ---------------------------------------------------------------------------
-
-class BmmImpl(_Family):
-    """BlockTiling2D is batched, so one launch covers every page."""
-
-    fst_template = "bmm/Kuiops.Bmm.Inst.fst.j2"
-    wrapper_template = "bmm/wrapper_bmm.cu.j2"
-    tune_key = "BMM"
-    tune_params = ()
-
-    @staticmethod
-    def _module(spec):
-        tile_params, dtype, _ = spec
-        et = torch_dtype_to_fstar(dtype)
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        return f"Kuiops.Bmm.{et.title()}.P_{tile_params_str}"
-
-    @staticmethod
-    def _candidate_specs(A, B):
-        Bn, M, K = (int(x) for x in A.shape)
-        _, _, N = (int(x) for x in B.shape)
-        return [
-            (tile, A.dtype, [A, B])
-            for tile in _bt2d_tiles(A.dtype, M, N, K)
-            if _gemm_blocks_ok(Bn, M, N, tile)
-        ]
+    def _spec(backend, tile, in_dtype, acc_dtype, out_dtype):
+        module = (
+            f"Kuiops.Mm.{_BACKEND_TAG[backend]}"
+            f".{torch_dtype_to_fstar(in_dtype).title()}"
+            f".{torch_dtype_to_fstar(acc_dtype).title()}"
+            f".{torch_dtype_to_fstar(out_dtype).title()}.P_{_tile_tag(tile)}")
+        return dict(module=module, backend=backend, tile=tile,
+                    in_dtype=in_dtype, acc_dtype=acc_dtype, out_dtype=out_dtype)
 
     def supported(self, func, args, kwargs):
         if len(args) != 2:
             return None
         A, B = args
-        if not (A.is_cuda and B.is_cuda and A.dim() == 3 and B.dim() == 3 and
-                A.dtype == B.dtype and A.dtype in _FLOAT_DTYPES):
-            return None
-        Bn, M, K = (int(x) for x in A.shape)
-        Bn2, K2, N = (int(x) for x in B.shape)
-        if Bn != Bn2 or K != K2:
-            return None
-        # the three batch products must fit in a u32 index.
-        if max(Bn * M * K, Bn * K * N, Bn * M * N) >= 2 ** 32:
-            return None
-        specs = self._candidate_specs(A, B)
-        return specs[0] if specs else None
-
-    def run(self, spec, args, kwargs):
-        A, B = args
-        specs = self._candidate_specs(A, B)
-        candidates = [
-            _autotune.Candidate(
-                params={"impl": "bt2d", **candidate[0]},
-                spec=candidate,
-                module=self._module(candidate),
-            )
-            for candidate in specs
-        ]
-        key = _autotune.make_key("aten.bmm.default", args)
-        spec = _autotune.select_candidate(
-            key, candidates, self._run, A.device
-        )
-        return self._run(spec)
-
-    def _run(self, spec):
-        tile_params, dtype, call = spec
-        et = torch_dtype_to_fstar(dtype)
-        module = self._module(spec)
-        name = "bmm_jit"
-        fst_ctx = dict(module=module, name=name, et=et, **tile_params)
-        wrapper_ctx = dict(
-            module=module.replace(".", "_"),
-            name=name,
-            cpp_et=torch_dtype_to_ctype(dtype),
-        )
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
-
-
-# ---------------------------------------------------------------------------
-# addmm (GEMM with alpha/beta)
-# ---------------------------------------------------------------------------
-
-class AddmmImpl(_GemmFamily):
-    fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
-    wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    tune_key = "ADDMM"
-
-    @staticmethod
-    def _module(spec):
-        impl, tile_params, dtype, acc_dtype, _, _, _ = spec
-        et = torch_dtype_to_fstar(dtype)
-        acc_et = torch_dtype_to_fstar(acc_dtype)
-        tile_params_str = "_".join(f"{k}{v}" for k, v in tile_params.items())
-        return (
-            f"Kuiops.Addmm.{impl.title()}.{et.title()}.{acc_et.title()}."
-            f"P_{tile_params_str}"
-        )
-
-    def _candidate_specs(self, Cin, A, B, out_dtype, alpha, beta):
-        M, K = (int(x) for x in A.shape)
-        _, N = (int(x) for x in B.shape)
-        specs = []
-        tensor_cores_enabled = (
-            self.tune_params["impl"] == "tc2d"
-            and _tc2d_device_supported(A.dtype, A.device)
-        )
-        if (tensor_cores_enabled
-                and out_dtype in _TC2D_OUTPUT_DTYPES.get(A.dtype, ())):
-            for tile in _tc2d_tiles(A.dtype, M, N, K):
-                if _gemm_blocks_ok(1, M, N, tile):
-                    specs.append(
-                        ("tc2d", tile, A.dtype, out_dtype, [Cin, A, B],
-                         alpha, beta)
-                    )
-        if (tensor_cores_enabled
-                and out_dtype == A.dtype
-                and A.dtype in _TC2D_TO_INPUT_DTYPES):
-            for tile in _tc2d_tiles(A.dtype, M, N, K):
-                if _gemm_blocks_ok(1, M, N, tile):
-                    specs.append(
-                        ("tc2d_to", tile, A.dtype, torch.float32,
-                         [Cin, A, B], alpha, beta)
-                    )
-        if out_dtype == A.dtype:
-            for tile in _bt2d_tiles(A.dtype, M, N, K):
-                if _gemm_blocks_ok(1, M, N, tile):
-                    specs.append(
-                        ("bt2d", tile, A.dtype, A.dtype, [Cin, A, B],
-                         alpha, beta)
-                    )
-        return specs
-
-    def supported(self, func, args, kwargs):
-        if len(args) != 3:
-            return None
-        Cin, A, B = args
-        out_dtype = kwargs.get("out_dtype", A.dtype)
-        if not (A.is_cuda and B.is_cuda and Cin.is_cuda and
-                A.dim() == 2 and B.dim() == 2 and Cin.dim() == 2 and
-                A.dtype == B.dtype and Cin.dtype == out_dtype and
-                A.dtype in (torch.float16, torch.float32, torch.bfloat16)):
+        if not (isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor)
+                and A.is_cuda and B.is_cuda
+                and A.dim() == 2 and B.dim() == 2 and A.dtype == B.dtype):
             return None
         M, K = (int(x) for x in A.shape)
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
-        if tuple(int(x) for x in Cin.shape) != (M, N):
+        specs = [
+            self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
+            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            for tile in _tiles(backend, A.dtype, 1, M, N, K)
+        ]
+        return self._select(args, kwargs, specs)
+
+    def run(self, spec, args, kwargs):
+        name = "mm_jit"
+        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
+                        _gemm_wrapper_ctx(spec, name))
+        return mod.run(*args)
+
+
+class BmmImpl(_MatmulFamily):
+    """BlockTiling2D is batched, so one launch covers every page."""
+
+    fst_template = "bmm/Kuiops.Bmm.Inst.fst.j2"
+    wrapper_template = "bmm/wrapper_bmm.cu.j2"
+    backends = ("bt2d",)
+    operation = "aten.bmm.default"
+
+    @staticmethod
+    def _spec(backend, tile, in_dtype, acc_dtype, out_dtype):
+        module = (f"Kuiops.Bmm.{torch_dtype_to_fstar(in_dtype).title()}"
+                  f".P_{_tile_tag(tile)}")
+        return dict(module=module, backend=backend, tile=tile,
+                    in_dtype=in_dtype, acc_dtype=acc_dtype, out_dtype=out_dtype)
+
+    def supported(self, func, args, kwargs):
+        if len(args) != 2:
+            return None
+        A, B = args
+        if not (isinstance(A, torch.Tensor) and isinstance(B, torch.Tensor)
+                and A.is_cuda and B.is_cuda
+                and A.dim() == 3 and B.dim() == 3 and A.dtype == B.dtype):
+            return None
+        batch, M, K = (int(x) for x in A.shape)
+        batch2, K2, N = (int(x) for x in B.shape)
+        if batch != batch2 or K != K2:
+            return None
+        # The three batched products must fit in a u32 index.
+        if max(batch * M * K, batch * K * N, batch * M * N) >= 2 ** 32:
+            return None
+        specs = [
+            self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
+            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            for tile in _tiles(backend, A.dtype, batch, M, N, K)
+        ]
+        return self._select(args, kwargs, specs)
+
+    def run(self, spec, args, kwargs):
+        name = "bmm_jit"
+        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
+                        _gemm_wrapper_ctx(spec, name))
+        return mod.run(*args)
+
+
+class AddmmImpl(_MatmulFamily):
+    """addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B). The output is a copy
+    of C, which the kernel updates through the `lincomb` combiner."""
+
+    fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
+    wrapper_template = "addmm/wrapper_addmm.cu.j2"
+    backends = ("tc2d", "tc2d_to", "bt2d")
+    operation = "aten.addmm.default"
+
+    @staticmethod
+    def _spec(backend, tile, in_dtype, acc_dtype, out_dtype):
+        module = (
+            f"Kuiops.Addmm.{_BACKEND_TAG[backend]}"
+            f".{torch_dtype_to_fstar(in_dtype).title()}"
+            f".{torch_dtype_to_fstar(acc_dtype).title()}"
+            f".{torch_dtype_to_fstar(out_dtype).title()}.P_{_tile_tag(tile)}")
+        return dict(module=module, backend=backend, tile=tile,
+                    in_dtype=in_dtype, acc_dtype=acc_dtype, out_dtype=out_dtype)
+
+    def supported(self, func, args, kwargs):
+        if len(args) != 3:
+            return None
+        Cin, A, B = args
+        if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 2
+                   for t in (Cin, A, B)):
+            return None
+        if A.dtype != B.dtype:
+            return None
+        M, K = (int(x) for x in A.shape)
+        K2, N = (int(x) for x in B.shape)
+        if K != K2 or tuple(int(x) for x in Cin.shape) != (M, N):
             return None
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
             return None
-        specs = self._candidate_specs(
-            Cin, A, B, out_dtype, float(alpha), float(beta)
-        )
-        return specs[0] if specs else None
+        specs = [
+            self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
+            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            # C is the output buffer, so it already has to be the output type.
+            if Cin.dtype == out_dtype
+            for tile in _tiles(backend, A.dtype, 1, M, N, K)
+        ]
+        return self._select(args, kwargs, specs)
 
     def run(self, spec, args, kwargs):
-        Cin, A, B = args
-        out_dtype = kwargs.get("out_dtype", A.dtype)
+        name = "addmm_jit"
+        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
+                        _gemm_wrapper_ctx(spec, name))
         alpha = float(_scalar(kwargs.get("alpha", 1)))
         beta = float(_scalar(kwargs.get("beta", 1)))
-        specs = self._candidate_specs(Cin, A, B, out_dtype, alpha, beta)
-        candidates = [
-            self._candidate(
-                candidate,
-                {"impl": candidate[0], **candidate[1]},
-                self._module(candidate),
-            )
-            for candidate in specs
-        ]
-        key = _autotune.make_key(
-            "aten.addmm.default", args, {"out_dtype": out_dtype}
-        )
-        spec = _autotune.select_candidate(
-            key, candidates, self._run, A.device
-        )
-        return self._run(spec)
-
-    def _run(self, spec):
-        impl, tile_params, dtype, acc_dtype, call, alpha, beta = spec
-        Cin, A, B = call
-        et = torch_dtype_to_fstar(dtype)
-        acc_et = torch_dtype_to_fstar(acc_dtype)
-        module = self._module(spec)
-        name = "addmm_jit"
-        fst_ctx = dict(module=module, name=name, in_et=et, acc_et=acc_et,
-                       out_et=torch_dtype_to_fstar(call[0].dtype),
-                       impl=impl, **tile_params)
-        wrapper_ctx = dict(
-            module=module.replace(".", "_"),
-            name=name,
-            impl=impl,
-            cpp_in_et=torch_dtype_to_ctype(dtype),
-            cpp_out_et=torch_dtype_to_ctype(call[0].dtype),
-            cpp_acc_et=torch_dtype_to_ctype(acc_dtype),
-        )
-        return self._mod(module, fst_ctx, wrapper_ctx).run(Cin, A, B, alpha, beta)
+        return mod.run(*args, alpha, beta)
 
 
 # ---------------------------------------------------------------------------
@@ -851,8 +681,6 @@ class AddmmImpl(_GemmFamily):
 class SoftmaxImpl(_Family):
     fst_template = "softmax/Kuiops.Softmax.Inst.fst.j2"
     wrapper_template = "softmax/wrapper_softmax.cu.j2"
-    tune_key = "SOFTMAX"
-    tune_params = ()
     # RowSoftmax is a composite kernel: it launches several GPU kernels and syncs
     # in between to observe their results, so it cannot be graph-captured.
     graph_safe = False
@@ -872,11 +700,11 @@ class SoftmaxImpl(_Family):
         # RowSoftmax: m <= max_blocks, m*n <= max_blocks*max_threads.
         if m <= 0 or m > _MAX_BLOCKS or m * n > _MAX_NUMEL:
             return None
-        return (X.dtype, m, n, [X])
+        return dict(dtype=X.dtype, rows=m, cols=n)
 
     def run(self, spec, args, kwargs):
-        dtype, m, n, call = spec
-        X = call[0]
+        dtype, m, n = spec["dtype"], spec["rows"], spec["cols"]
+        X = args[0]
         et = torch_dtype_to_fstar(dtype)
         module = f"Kuiops.Softmax.{et.title()}"
         name = "softmax_jit"
@@ -902,8 +730,6 @@ import math as _math
 class SdpaImpl(_Family):
     fst_template = "sdpa/Kuiops.Sdpa.Inst.fst.j2"
     wrapper_template = "sdpa/wrapper_sdpa.cu.j2"
-    tune_key = "SDPA"
-    tune_params = ()
     # Composite (it runs a row softmax internally), so it syncs: not graph-safe.
     graph_safe = False
 
@@ -943,10 +769,10 @@ class SdpaImpl(_Family):
         scale = kwargs.get("scale", None)
         if scale is None:
             scale = 1.0 / _math.sqrt(E)
-        return (bias.dtype, float(scale), [Q, Kt, V, bias])
+        return dict(out_dtype=bias.dtype, scale=float(scale))
 
     def run(self, spec, args, kwargs):
-        out_dtype, scale, call = spec
+        out_dtype, scale = spec["out_dtype"], spec["scale"]
         dtype = torch.float32
         et = torch_dtype_to_fstar(dtype)
         module = "Kuiops.Sdpa.F32"
@@ -957,7 +783,7 @@ class SdpaImpl(_Family):
             name=name,
             cpp_et=torch_dtype_to_ctype(dtype),
         )
-        Q, Kt, V, bias = call
+        Q, Kt, V, bias = args[:4]
         Q = Q if Q.dtype == dtype else Q.to(dtype)
         Kt = Kt if Kt.dtype == dtype else Kt.to(dtype)
         V = V if V.dtype == dtype else V.to(dtype)
@@ -977,17 +803,13 @@ class SdpaImpl(_Family):
 # These kernels only move element payloads (no arithmetic), so they impose no
 # `scalar` typeclass requirement on the element type -- any dtype with a layout
 # is fine. The index tensor is int64 and reinterpreted bit-for-bit as the
-# kernel's machine-word offset type. The concrete tensor shapes are baked into
-# the F* instantiation (hence the module name encodes them), and the output is
-# allocated on the C++ side per the wrapper conventions.
+# kernel's machine-word offset type. Shapes flow at runtime, so an instantiation
+# is keyed by (element type, rank, axis) only, and the output is allocated on the
+# C++ side per the wrapper conventions.
 
 def _shape_le(small, large):
     """Pointwise ``small[d] <= large[d]`` over equal ranks (Kuiper ``shape_le``)."""
     return len(small) == len(large) and all(s <= l for s, l in zip(small, large))
-
-
-def _shp(dims):
-    return "x".join(str(int(d)) for d in dims)
 
 
 def _numel(dims):
@@ -1000,8 +822,6 @@ def _numel(dims):
 class GatherImpl(_Family):
     fst_template = "gather/Kuiops.Gather.Inst.fst.j2"
     wrapper_template = "gather/wrapper_gather.cu.j2"
-    tune_key = "GATHER"
-    tune_params = ()
 
     def supported(self, func, args, kwargs):
         # aten.gather.default(self, dim, index, *, sparse_grad=False)
@@ -1026,12 +846,11 @@ class GatherImpl(_Family):
             return None
         if not (0 < _numel(idx_shape) <= _MAX_NUMEL):
             return None
-        return (Inp.dtype, dim, inp_shape, idx_shape, [Inp, Idx])
+        return dict(dtype=Inp.dtype, dim=dim, rank=rank)
 
     def run(self, spec, args, kwargs):
-        dtype, dim, inp_shape, idx_shape, call = spec
+        dtype, dim, rank = spec["dtype"], spec["dim"], spec["rank"]
         et = torch_dtype_to_fstar(dtype)
-        rank = len(inp_shape)
         # Dims flow at runtime, so one module per (element type, rank, axis).
         module = f"Kuiops.Gather.{et.title()}.R{rank}.Dim{dim}"
         name = "gather_jit"
@@ -1040,14 +859,12 @@ class GatherImpl(_Family):
             module=module.replace(".", "_"), name=name, dim=dim, r=rank,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(Input, Index)
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(args[0], args[2])
 
 
 class ScatterImpl(_Family):
     fst_template = "scatter/Kuiops.Scatter.Inst.fst.j2"
     wrapper_template = "scatter/wrapper_scatter.cu.j2"
-    tune_key = "SCATTER"
-    tune_params = ()
 
     def supported(self, func, args, kwargs):
         # aten.scatter.src(self, dim, index, src)
@@ -1079,13 +896,12 @@ class ScatterImpl(_Family):
             return None
         if not (0 < _numel(src_shape) <= _MAX_NUMEL):
             return None
-        return (Self.dtype, dim, src_shape, self_shape, [Self, Idx, Src])
+        return dict(dtype=Self.dtype, dim=dim, rank=rank)
 
     def run(self, spec, args, kwargs):
-        dtype, dim, src_shape, self_shape, call = spec
-        Self, Idx, Src = call
+        dtype, dim, rank = spec["dtype"], spec["dim"], spec["rank"]
+        Self, Idx, Src = args[0], args[2], args[3]
         et = torch_dtype_to_fstar(dtype)
-        rank = len(self_shape)
         module = f"Kuiops.Scatter.{et.title()}.R{rank}.Dim{dim}"
         name = "scatter_jit"
         fst_ctx = dict(module=module, name=name, r=rank, dim=dim, et=et)
@@ -1099,8 +915,6 @@ class ScatterImpl(_Family):
 class CatImpl(_Family):
     fst_template = "cat/Kuiops.Cat.Inst.fst.j2"
     wrapper_template = "cat/wrapper_cat.cu.j2"
-    tune_key = "CAT"
-    tune_params = ()
 
     def supported(self, func, args, kwargs):
         # aten.cat.default(tensors, dim=0) -- the kernel is binary only.
@@ -1130,12 +944,11 @@ class CatImpl(_Family):
         out_shape[dim] = a_shape[dim] + b_shape[dim]
         if not (0 < _numel(out_shape) <= _MAX_NUMEL):
             return None
-        return (A.dtype, dim, a_shape, b_shape, out_shape, [A, B])
+        return dict(dtype=A.dtype, dim=dim, rank=rank)
 
     def run(self, spec, args, kwargs):
-        dtype, dim, a_shape, b_shape, out_shape, call = spec
+        dtype, dim, rank = spec["dtype"], spec["dim"], spec["rank"]
         et = torch_dtype_to_fstar(dtype)
-        rank = len(out_shape)
         module = f"Kuiops.Cat.{et.title()}.R{rank}.Dim{dim}"
         name = "cat_jit"
         fst_ctx = dict(module=module, name=name, r=rank, dim=dim, et=et)
@@ -1143,14 +956,12 @@ class CatImpl(_Family):
             module=module.replace(".", "_"), name=name, dim=dim, r=rank,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(A, B)
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(*args[0])
 
 
 class HReducePolyImpl(_Family):
     fst_template = "reduce/Kuiops.HReducePoly.Inst.fst.j2"
     wrapper_template = "reduce/wrapper_hreduce_poly.cu.j2"
-    tune_key = "HREDUCE_POLY"
-    tune_params = ()
 
     _OPS = {
         aten.sum.dim_IntList: "add",
@@ -1216,9 +1027,7 @@ class HReducePolyImpl(_Family):
         else:
             out_dtype = torch.uint8 if Inp.dtype is torch.uint8 else torch.bool
 
-        return dict(
-            op=op, in_dtype=Inp.dtype, out_dtype=out_dtype,
-            call=[Inp])
+        return dict(op=op, in_dtype=Inp.dtype, out_dtype=out_dtype, rank=rank)
 
     def run(self, spec, args, kwargs):
         op = spec["op"]
@@ -1252,7 +1061,7 @@ class HReducePolyImpl(_Family):
 
         in_et = torch_dtype_to_fstar(in_dtype)
         out_et = f"u{out_bits}"
-        rank = spec["call"][0].dim()
+        rank = spec["rank"]
         module = (
             f"Kuiops.HReducePoly.{op.title()}."
             f"R{rank}.{in_et.title()}To{out_et.title()}As"
@@ -1268,14 +1077,12 @@ class HReducePolyImpl(_Family):
             cpp_kernel_out=torch_dtype_to_ctype(
                 getattr(torch, f"uint{out_bits}")),
             out_scalar=torch_dtype_to_aten_scalar(out_dtype))
-        return self._mod(module, fst_ctx, wrapper_ctx).run(spec["call"][0])
+        return self._mod(module, fst_ctx, wrapper_ctx).run(args[0])
 
 
 class MeanImpl(_Family):
     fst_template = "mean/Kuiops.Mean.Inst.fst.j2"
     wrapper_template = "mean/wrapper_mean.cu.j2"
-    tune_key = "MEAN"
-    tune_params = ()
 
     def supported(self, func, args, kwargs):
         # aten.mean.dim(self, dim, keepdim=False, *, dtype=None). The parallel
@@ -1318,10 +1125,10 @@ class MeanImpl(_Family):
             return None
         if m * length > _MAX_NUMEL:
             return None
-        return (Inp.dtype, length, [Inp])
+        return dict(dtype=Inp.dtype, length=length)
 
     def run(self, spec, args, kwargs):
-        dtype, length, call = spec
+        dtype, length = spec["dtype"], spec["length"]
         et = torch_dtype_to_fstar(dtype)
         # Keyed only by (element type, reduced length): m is a runtime arg, so
         # one module serves every rank/batch size with this last-dim length.
@@ -1332,4 +1139,4 @@ class MeanImpl(_Family):
             module=module.replace(".", "_"), name=name,
             cpp_et=torch_dtype_to_ctype(dtype))
         # wrapper: op(Input)
-        return self._mod(module, fst_ctx, wrapper_ctx).run(*call)
+        return self._mod(module, fst_ctx, wrapper_ctx).run(args[0])
