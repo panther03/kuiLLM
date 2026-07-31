@@ -23,6 +23,7 @@ open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.ForEvery
 open Kuiper.Ghost.TensorTranspose
 open Kuiper.EMatrix
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
@@ -1924,6 +1925,7 @@ fn sdpa_flash_jt_body
 
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
+inline_for_extraction noextract
 let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
   ij:(natlt rows & natlt cols) {
     (ij._1 * cols + ij._2) % nthr == tid}
@@ -1939,6 +1941,26 @@ let optional_inc (b : bool) (x : sz { SZ.fits (SZ.v x + 1) }) : sz =
   if b then x +^ 1sz else 0sz
 
 let sz_of_szp (x : szp) : sz = x
+
+inline_for_extraction noextract
+let flash_scale_ctlayout
+  (nw bm : szp) (lane : szlt bm)
+  (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))
+  (#uf : squash (SZ.fits (
+    stride_subtile_layout
+      (l2_row_major (SZ.v nw) (SZ.v bm))
+      1 (SZ.v bm) 0 (SZ.v lane)).ulen))
+  (#af : squash (all_fit (
+    (SZ.v nw / 1) @| (SZ.v bm / SZ.v bm) @| INil)))
+  : ctlayout (
+      stride_subtile_layout
+        (l2_row_major (SZ.v nw) (SZ.v bm))
+        1 (SZ.v bm) 0 (SZ.v lane)) =
+{
+  ulen_fits = uf;
+  all_fit = af;
+  cimap = flash_scale_cimap nw bm lane;
+}
 
 inline_for_extraction noextract
 fn sdpa_flash_ml_init_active
@@ -2251,8 +2273,7 @@ fn sdpa_flash_combine_partials_active
     let sc = fexp (mv `sub` !gm);
     (* TODO(line 223): clamp [sc] to zero when not finite once Kuiper has an
        extractable [isfinite].  The current [kind] test is ghost-only. *)
-    let cscale = c_stride_subtile_layout
-      (l2_row_major nw bm) 1 (SZ.v bm) 0 (SZ.v lane);
+    let cscale = flash_scale_ctlayout nw bm lane;
     tensor_write #_ #_ #_ #_ #cscale
       (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane))
       (cidx2 iw 0sz) sc;

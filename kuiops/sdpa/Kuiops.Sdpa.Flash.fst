@@ -18,6 +18,7 @@ open Kuiper.ForEvery
 open Kuiper.Shape
 open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.KfSub
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
@@ -483,6 +484,7 @@ fn sdpa_flash_kf
 
 unfold let flash_nwarps : nat = 4
 
+inline_for_extraction noextract
 let flash_shmems
   (et_ab et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
   (nw d : szp)
@@ -505,26 +507,6 @@ let flash_shmems
   ; SHArray et_acc 16sz
   ; SHArray et_acc 16sz
   ]
-
-noeq
-inline_for_extraction noextract
-type flash_views
-  (et_ab et_acc : Type0) (nw d : nat) =
-{
-  shQv : array2 et_ab (l2_row_major 16 d);
-  shKv : array2 et_ab (l2_row_major (nw * 16) d);
-  shVv : array2 et_ab (l2_row_major (nw * 16) d);
-  shSv : array2 et_acc (l2_row_major (nw * 16) 16);
-  shPv : array2 et_ab (l2_row_major (nw * 16) 16);
-  shPVv : array2 et_acc (l2_row_major (nw * 16) 16);
-  shcwv : array2 et_acc (l2_row_major nw 16);
-  shMv : array2 et_acc (l2_row_major nw 16);
-  shLv : array2 et_acc (l2_row_major nw 16);
-  shscalev : array2 et_acc (l2_row_major nw 16);
-  shOv : array2 et_acc (l2_row_major (nw * 16) d);
-  shgmv : array1 et_acc (l1_forward 16);
-  shglv : array1 et_acc (l1_forward 16);
-}
 
 inline_for_extraction noextract
 let flash_views_of
@@ -5792,7 +5774,7 @@ fn sdpa_flash_async
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
   // TODO: why do we have an nblk? why is it not just b * hkv * tiles etc.?
-  (nblk : szp { SZ.v nblk <= max_blocks })\
+  (nblk : szp { SZ.v nblk <= max_blocks })
   // And an nthr?
   (nw nthr : szp {
     SZ.v nthr == FD.block_threads nw /\
