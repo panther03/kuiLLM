@@ -126,3 +126,9 @@ _install-kuiper-tree:
 
 verify-kuiops: .kuiper.touch
 	@+$(MAKE) -f verify.mk verify-kuiops
+
+# Delegate
+.PHONY: .force
+.PRECIOUS: $(filter .kuipy_cache/%,$(MAKECMDGOALS))
+$(filter .kuipy_cache/%,$(MAKECMDGOALS)) &: .force
+	$(MAKE) -f verify.mk $(filter .kuipy_cache/%,$(MAKECMDGOALS))

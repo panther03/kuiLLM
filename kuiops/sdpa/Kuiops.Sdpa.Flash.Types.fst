@@ -24,7 +24,7 @@ let flash_scale_cimap
     assert (SZ.v j == 0);
     i *^ bm +^ j *^ bm +^ lane
 
-inline_for_extraction noextract
+noeq inline_for_extraction noextract
 type flash_views
   (et_ab et_acc : Type0) (nw d : nat) =
 {

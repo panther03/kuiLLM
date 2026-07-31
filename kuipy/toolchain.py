@@ -135,7 +135,7 @@ def extract_cu(module: str, fst_text: str):
         _run([str(C.FSTAR_EXE), *C.FSTAR_FLAGS, *admit,
               "--already_cached", already,
               "--codegen", "krml", "--load_cmxs", str(C.PLUGIN),
-              "--extract", f"-*,+{module},+Kuiper,+Klas",
+              "--extract", f"-*,+{module},+Kuiper",
               "-o", str(krml), str(fst_path)],
              "fstar-extract", module)
 

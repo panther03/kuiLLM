@@ -41,10 +41,8 @@ Organization:
 - `tests/`: Unit tests for kuipy.
 - `infer.py`: Where the main Qwen2.5 integration test lives.
 
-The polymorphic kernels come from Kuiper binary packages or a separate
-source repo (`$KUIPER_HOME`, usually `~/work/kuiper`); this repo instantiates,
-extracts, compiles, and dispatches them.
-
+You can expect the upstream kuiper source to live at $KUIPER_HOME. You can use this for searching for lemmas
+and the kernel sources.
 
 ## Build / run / test
 
@@ -69,6 +67,8 @@ provide CUDA — nvcc 12.x must come from the host.
   long rebuild) and nightly/release might be incompatible with the current state of the 
   kuiops repo. Generally speaking, expect `inst/` to be present before starting work 
   and ask if it is not there.
+- Verify a single file through makefile: given some `Kuiops.My.Module.fst{i}` anywhere in `kuiops/`, `make .kuipy_cache/checked/Kuiops.My.Module.fst{i}.checked` verifies it
+- Extract a single file through makefile: given some `Kuiops.My.Module.fst{i}` anywhere in `kuiops/`, `make .kuipy_cache/cu/Kuiops_My_Module.cu` extracts to CUDA.
 
 Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 
