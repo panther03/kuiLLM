@@ -1,11 +1,50 @@
 # kuiLLM — Copilot instructions
 
-This repo runs an LLM inference pipeline (Qwen2.5-0.5B) in PyTorch where eligible
-`aten` operators are JIT-replaced by **verified Kuiper GPU kernels**. Kuiper is an
-F*/Pulse extension that writes separation-logic-verified GPU code and extracts it
-to CUDA. The polymorphic kernels come from Kuiper binary packages or a separate
+This repo contains a system for offloading PyTorch tensor operations to verified GPU kernels
+written in Kuiper, a language for memory safe and verified GPU development built on top of 
+F* and Pulse. It primarily targets operations used in LLM inference pipelines, currently 
+using Qwen2.5-0.5B inference as a main integration target. 
+
+Kuiper supports writing highly polymorphic, higher-order GPU kernels that are generic
+in element types, tensor layouts (column major, row major, strided subtiles, etc.),
+and even operations. For example, Kuiper implements matrix multiplication kernels 
+that can take any layout of 2D matrix, on any floating point element datatype, and with
+any generic function as the combinator between the result of A @ B and the C matrix.
+
+Once these higher order aspects that cannot be represented in CUDA are specialized away,
+we can _extract_ the specialized instance of the kernel to standard CUDA.
+
+kuiLLM specializes, extracts, compiles, and executes Kuiper kernels just-in-time by 
+exposing Python functions that implement `aten` operators. This system is in a package 
+called `kuipy`. When a kuipy implementation of an operator is called, the parameters 
+such as the datatype and shape of the input tensors inform the JIT extraction process 
+and build a specialized instance of that kernel. It caches the built kernel as well. 
+`kuipy` also exposes an Inductor pass that allows replacing calls in an operator graph 
+with Kuiper kernels. This is used to run end-to-end LLM inference with the Kuiper kernels.
+
+## Architecture
+
+Organization:
+- `kuipy/`: The Python code that supports JIT extraction, compilation, etc. and all the 
+  glue needed to hook up the CUDA code to ATen/PyTorch-compatible Python operators. Some highlights:
+  - `kuipy/kuiops.py` holds one `*Impl` class per operator family (subclasses of
+    `_Family`). `supported()` returns `None` if no kernel parameterization fits,
+    else a spec; `run()` instantiates templates, compiles via `_mod`, and invokes.
+- `kuiops/`: Where the supporting F* and CUDA files for each operator lives. Each
+   operator lives in `kuiops/<op>` and gets a `Kuiops.<Op>.Inst.fst.j2` (F*
+   instantiation) and `wrapper_<op>.cu.j2` (Torch-tensor glue). Support F* code
+   lives in `kuiops/Kuiops.<Op>.fst{i}`. These Jinja templates are what produce 
+   the specialized kernel from the information available in the Python context.
+   The fstar template gets extracted to CUDA and then linked against the cuda/C++ wrapper 
+   that exposes a Torch::Tensor compatible interface.
+- `etc/`: Experiments and miscellaneous support files.
+- `tests/`: Unit tests for kuipy.
+- `infer.py`: Where the main Qwen2.5 integration test lives.
+
+The polymorphic kernels come from Kuiper binary packages or a separate
 source repo (`$KUIPER_HOME`, usually `~/work/kuiper`); this repo instantiates,
 extracts, compiles, and dispatches them.
+
 
 ## Build / run / test
 
@@ -16,13 +55,11 @@ dependency set for a fresh micromamba/conda setup:
 `micromamba create -f environment.yml && micromamba activate kuillm`. It does not
 provide CUDA — nvcc 12.x must come from the host.
 
-- `make infer` / `make infer-no-kuiper` — run `infer.py` with / without Kuiper.
-- `python infer.py "prompt" --max-new-tokens 8 --temperature 0` — single prompt.
-  Other flags: `--prompts FILE`, `--batch N`, `--no-kuiper`, `--timing`,
-  `--verify` (run every Kuiper-dispatched op alongside stock PyTorch and report
-  relative-Frobenius divergence), `--verify-tol`.
+- `make infer` / `make infer-no-kuiper` — run Qwen2.5 inference with / without using kuiops kernels.
+- `make verify`: An integration test that runs inference with every Kuiper-dispatched op alongside
+   stock PyTorch and reports relative-Frobenius divergence.
 - `make test` — full suite. Single test:
-  `.venv/bin/python -m pytest tests/test_jit_ops.py::test_bmm -s`.
+  `python -m pytest tests/test_jit_ops.py::test_bmm -s`.
   JIT tests require CUDA (they `pytest.skip` otherwise) and the **first run of each
   new kernel instantiation compiles via F*+nvcc (tens of seconds)**; reruns hit the
   on-disk cache.
@@ -33,39 +70,28 @@ provide CUDA — nvcc 12.x must come from the host.
   kuiops repo. Generally speaking, expect `inst/` to be present before starting work 
   and ask if it is not there.
 
-## Architecture (the JIT dispatch path)
-
-1. `infer.py` wraps generation in `kuipy.KuiperMode`, a `TorchDispatchMode`
-   (`kuipy/__init__.py`). It sees every `aten` call; on a hit it returns a Kuiper
-   result, otherwise it falls through to stock PyTorch.
-2. `kuipy/registry.py` maps `aten.*` overloads → a singleton `*Impl` family. The
-   hot path is deliberately tiny: dict lookup → `impl.supported(...)` → `impl.run(...)`.
-3. `kuipy/kuiops.py` holds one `*Impl` class per operator family (subclasses of
-   `_Family`). `supported()` returns `None` if no kernel parameterization fits,
-   else a spec; `run()` instantiates templates, compiles via `_mod`, and invokes.
-4. `kuipy/compile.py` renders a one-line `.fst` (jinja) + a C++ pybind wrapper,
-   then `toolchain.py` runs F* → karamel → `.cu/.h`, and `torch.utils.cpp_extension.load`
-   builds/caches the `.so`. Loaded modules are memoised in-process; failed builds
-   are negatively cached (`_failed`) so we don't re-run F*/nvcc every call.
-5. `kuiops/<op>/` holds the jinja templates: `Kuiops.<Op>.Inst.fst.j2` (F*
-   instantiation) and `wrapper_<op>.cu.j2` (Torch-tensor glue). Support F* code
-   lives in `kuiops/Kuiops.<Op>.fst{i}`.
-
 Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 
 ## Conventions
 
 - **`supported()` should be as broad as the *kernel's* refinements allow** — do
   not over-restrict dtypes. The source of truth is the typeclass/refinement on the
-  Kuiper kernel: e.g. `map` has no `et` refinement, `gemm` needs `scalar et` (int/
-  float ok), and `TensorCore2D` needs valid fragment/accumulator types (so f32
-  inputs can't use TC2D — fall back to BlockTiling2D). See `MmImpl` for the pattern.
+  Kuiper kernel: e.g. `map` has no `et` refinement, the `BlockTiling2D` backend of `mm`
+  needs `scalar et` (int/float ok), and `TensorCore2D` needs valid fragment/accumulator types 
+  (so f32 inputs can't use TC2D — fall back to BlockTiling2D). See `MmImpl` for the pattern.
 - **No element-type / tile-size branching that selects between fixed kernels** in
-  Python or templates. KEEP TEMPLATES MINIMAL (no proofs). Anything with nontrivial
-  proof obligations belongs in `$KUIPER_HOME`, not here. Prefer instantiating a
-  generic `Klas.<Kernel>.Inst` (e.g. `Klas.GEMM.TensorCore2D.Inst` fixes row-major
-  layout) over `Kuiper.Kernel.<...>` when it saves proof steps — but only if the
-  Klas isn't hardwired to fixed dtypes/tiles.
+  Python or templates: we are trying to make an interface that matches the fully general
+  polymorphic Kuiper kernel. Some of these kernels will be implemented here in Kuiops,
+  but they are usually upstreamed eventually to Kuiper. Once they are in Kuiper, the kernel
+  generally comes with a `Klas` instantiation that fixes some parameters like element type or tensor layout etc.
+  DON'T use these. Always use the `Kuiper.Kernel.` definition. The Klas version will usually be
+  incompatible anyway as Kuiper ops should use an asynchronous kernel launch that accepts an input
+  CUDA stream; the default mode that Klas kernels are written in is to spawn a fresh stream and call
+  cudaStreamSynchronize(). This is illegal in CUDA graph mode, which is what we use to run inference with kuiops kernels.
+- **KEEP TEMPLATES MINIMAL** (no proofs in there, as that verification cost will be paid on
+  every JIT compilation). Anything with nontrivial proof obligations belongs in a support module.
+  If it is reusable between multiple operators, you can consider adding a module at the root of `kuiops/`.
+  Or you can suggest that it be upstreamed to kuiper itself.
 - **Naming**: F* modules/templates are in namespace `Kuiops`, titlecased after the
   aten op (`Kuiops.Mm`, `Kuiops.Addmm`). The instantiation template is always
   `Kuiops.<Op>.Inst.fst.j2`; supporting defs go in `Kuiops.<Op>.fst{i}`.
@@ -92,4 +118,3 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 
 - `KERNELS.md` — checklist of every observed aten op signature and whether it's
   hooked up (the integration backlog).
-- `notes.md` — the original design prompts describing the JIT approach.
