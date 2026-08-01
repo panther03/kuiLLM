@@ -344,8 +344,11 @@ fn sdpa_flash_kf
     assert pure (SZ.v next == SZ.v !jt + SZ.v nw);
     assert pure (SZ.v !jt < SZ.v next);
     assert pure (SZ.fits (SZ.v !iter + 1));
-    iter := !iter +^ 1sz;
+    (* [jt := next] must not be the final statement: karamel would turn the
+       loop into a [for] whose increment reads [next], which is scoped to the
+       body, and the emitted CUDA would not compile. *)
     jt := next;
+    iter := !iter +^ 1sz;
   };
 
   unfold jt_rest #et_ab #et_acc d sk b hq sq
@@ -5319,8 +5322,6 @@ fn sdpa_flash_thread
         (flash_views_of nw d sh).shglv) **
     B.barrier_state 3
 {
-  let v = flash_views_of nw d sh;
-  rewrite each (flash_views_of nw d sh) as v;
   let w = sdpa_flash_w nw nthr tid;
   let lane = sdpa_flash_lane nw nthr tid;
   let rt : szlt tiles = bid %^ tiles;
@@ -5349,7 +5350,7 @@ fn sdpa_flash_thread
 
   unfold flash_thread_pre nw nthr
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout v
+    gQ gK gV gmask gout (flash_views_of nw d sh)
     #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
     #(fV /. (SZ.v nblk) /. (SZ.v nthr))
@@ -5363,13 +5364,13 @@ fn sdpa_flash_thread
   assert pure (SZ.v lane == SZ.v tid % BW.warp_size);
   rewrite each (SZ.v tid / BW.warp_size) as (SZ.v w);
   rewrite each (SZ.v tid % BW.warp_size) as (SZ.v lane);
-  flash_b0_to_descriptor nw d v
+  flash_b0_to_descriptor nw d (flash_views_of nw d sh)
     (SZ.v w) (SZ.v lane)
     (SZ.v tid <: natlt (FD.block_threads nw));
-  flash_ml_to_pre nw v.shMv v.shLv
+  flash_ml_to_pre nw (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv
     (SZ.v w) (SZ.v lane) w lane;
   flash_combine_to_pre nw
-    v.shscalev v.shgmv v.shglv
+    (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
     (SZ.v w) (SZ.v lane) w lane;
   rewrite
     (when_ (SZ.v w = 0)
@@ -5424,20 +5425,20 @@ fn sdpa_flash_thread
     chest_slice 0 (SZ.v kvh)
       (chest_slice 0 (SZ.v bi) eV);
   unfold flash_jt_local d
-    (flash_warp_k v (SZ.v w))
-    (flash_warp_v v (SZ.v w))
-    (flash_warp_s v (SZ.v w))
-    (flash_warp_p v (SZ.v w))
-    (flash_warp_pv v (SZ.v w))
-    (flash_warp_cw v (SZ.v w))
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v w))
     (SZ.v lane);
   fold sdpa_flash_jt_frame d sk b hq sq
-    (flash_warp_k v (SZ.v w))
-    (flash_warp_v v (SZ.v w))
-    (flash_warp_s v (SZ.v w))
-    (flash_warp_p v (SZ.v w))
-    (flash_warp_pv v (SZ.v w))
-    (flash_warp_cw v (SZ.v w))
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v w))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v w))
     gKkv gVkv gmask
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
     #(fV /. (SZ.v nblk) /. (SZ.v nthr))
@@ -5453,14 +5454,14 @@ fn sdpa_flash_thread
     nw nthr d sk b hq sq rows
     #lgQ #_ #_ #lgmask #lout #_
     gQ gKkv gVkv gmask gout
-    v.shQv
-    (flash_warp_k v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_v v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_s v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_p v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_pv v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_cw v (SZ.v (sdpa_flash_w nw nthr tid)))
-    v.shMv v.shLv v.shscalev v.shOv v.shgmv v.shglv
+    (flash_views_of nw d sh).shQv
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
     tid bi r0 group kvh
     #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
@@ -5495,28 +5496,28 @@ fn sdpa_flash_thread
       #(c_l2_row_major (SZ.v nw * 16) 16sz)
       16 16 (SZ.v (sdpa_flash_w nw nthr tid)) 0)
     gQ gKkv gVkv gmask gout
-    v.shQv
-    (flash_warp_k v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_v v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_s v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_p v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_pv v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_cw v (SZ.v (sdpa_flash_w nw nthr tid)))
-    v.shMv v.shLv v.shscalev v.shOv v.shgmv v.shglv
+    (flash_views_of nw d sh).shQv
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
     tid bi r0 group kvh causal scale;
 
   unfold sdpa_flash_post #et_ab #et_acc
     nw nthr d sk b hq sq rows
     #lgQ #_ #_ #lgmask #lout #_
     gQ gKkv gVkv gmask gout
-    v.shQv
-    (flash_warp_k v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_v v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_s v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_p v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_pv v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_cw v (SZ.v (sdpa_flash_w nw nthr tid)))
-    v.shMv v.shLv v.shscalev v.shOv v.shglv
+    (flash_views_of nw d sh).shQv
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shglv
     tid bi r0 group kvh
     #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
@@ -5524,12 +5525,12 @@ fn sdpa_flash_thread
     #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
     #eQ #eKkv #eVkv #emask;
   unfold sdpa_flash_jt_frame d sk b hq sq
-    (flash_warp_k v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_v v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_s v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_p v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_pv v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_cw v (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     gKkv gVkv gmask
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
     #(fV /. (SZ.v nblk) /. (SZ.v nthr))
@@ -5537,12 +5538,12 @@ fn sdpa_flash_thread
     #eKkv #eVkv #emask
     (SZ.v (sdpa_flash_lane nw nthr tid));
   fold flash_jt_local d
-    (flash_warp_k v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_v v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_s v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_p v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_pv v (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_warp_cw v (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_k (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_v (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_s (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
+    (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (SZ.v (sdpa_flash_lane nw nthr tid));
   flash_output_from_post b hq sq rows d gout
     (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0)
@@ -5550,7 +5551,7 @@ fn sdpa_flash_thread
     (SZ.v (sdpa_flash_lane nw nthr tid))
     (sdpa_flash_w nw nthr tid)
     (sdpa_flash_lane nw nthr tid);
-  flash_gm_from_post v.shgmv
+  flash_gm_from_post (flash_views_of nw d sh).shgmv
     (SZ.v (sdpa_flash_w nw nthr tid))
     (SZ.v (sdpa_flash_lane nw nthr tid))
     (sdpa_flash_w nw nthr tid)
@@ -5607,7 +5608,6 @@ fn sdpa_flash_thread
     as (SZ.v tid / BW.warp_size);
   rewrite each (SZ.v (sdpa_flash_lane nw nthr tid))
     as (SZ.v tid % BW.warp_size);
-  rewrite each v as (flash_views_of nw d sh);
   fold flash_thread_post nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout (flash_views_of nw d sh)

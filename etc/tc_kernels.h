@@ -42,6 +42,21 @@ void tc2d_manual_gemm_launch(
 // memory; the two matmuls (QK^T and P@V) run on tensor cores. D <= 64, D % 16 == 0.
 // Sq > 1 (prefill) uses a dedicated query-tiled kernel; pass force_decode_kernel
 // =true to always use the GQA-batched key-split decode kernel instead.
+// The original FA1-style implementation of the same operator (etc/
+// tc_flash_attn_fa1.cu) -- the kernel the verified Kuiper port targets. Same
+// signature; kept alongside so both can be benchmarked in one extension.
+void tc_flash_attn_fa1_launch(
+    const __nv_bfloat16* q,
+    const __nv_bfloat16* k,
+    const __nv_bfloat16* v,
+    const __nv_bfloat16* mask,   // nullable
+    __nv_bfloat16* out,
+    int B, int Hq, int Hkv, int Sq, int Sk, int D,
+    float scale, bool causal,
+    int64_t ms_b, int64_t ms_h, int64_t ms_q, int64_t ms_k,
+    bool force_decode_kernel,
+    cudaStream_t stream);
+
 void tc_flash_attn_launch(
     const __nv_bfloat16* q,
     const __nv_bfloat16* k,

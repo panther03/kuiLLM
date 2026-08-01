@@ -60,8 +60,10 @@ def build():
         name="tc_kernels",
         sources=[os.path.join(HERE, "tc_kernels_wrapper.cu"),
                  os.path.join(HERE, "tc2d_linear_manual.cu"),
-                 os.path.join(HERE, "tc_flash_attn.cu")],
-        extra_include_paths=[HERE, KUIPER_INC],
+                 os.path.join(HERE, "tc_flash_attn.cu"),
+                 os.path.join(HERE, "tc_flash_attn_fa1.cu"),
+                 os.path.join(HERE, "Kuiops_Sdpa_Flash_Inst.cu")],
+        extra_include_paths=[HERE, KUIPER_INC, os.path.join(ROOT, "include")],
         # Kuiper headers rely on implicit int->half conversion (fragment `{0}`
         # init); undo the torch defaults that would disable it.
         extra_cuda_cflags=["-U__CUDA_NO_HALF_OPERATORS__",
@@ -137,7 +139,7 @@ def bench_mm(dtype, out_dtype, implementation=None):
     print(f"=== mm: C = A @ W^T   vs F.linear   "
           f"[kuipy MmImpl {implementation_label}, "
           f"in {dtype} -> out {out_dtype}] ===")
-    impl = kuiops.MmImpl({})
+    impl = kuiops.MmImpl()
     g = torch.Generator(device=DEV).manual_seed(0)
     kwargs = {"out_dtype": out_dtype}
     if implementation is not None:
@@ -162,7 +164,7 @@ def bench_addmm(dtype):
     which the bias-free mm path never hits. Validated against a fp32 reference."""
     print("=== addmm epilogue: D = alpha*(A@B) + beta*C   vs fp32 reference "
           f"(perf vs {dtype} torch.addmm)   [kuipy AddmmImpl] ===")
-    impl = kuiops.AddmmImpl({})
+    impl = kuiops.AddmmImpl()
     g = torch.Generator(device=DEV).manual_seed(2)
     alpha, beta = 0.75, 1.5
     kw = dict(alpha=alpha, beta=beta)
@@ -235,7 +237,6 @@ def bench_sdpa(mod, force_decode_kernel=False):
         ok &= err < 5e-2
         print(f"  [{flag}] decode  ctx={ctx:<5} | rel-err {err:.2e} "
               f"| ours {t_ours*1e3:8.1f}us  ref {t_ref*1e3:8.1f}us  {t_ours/t_ref:5.2f}x  {100*t_ref/t_ours:5.1f}%")
-
     # Prefill: full self-attention, is_causal=True, no explicit mask.
     for s in (128, 512):
         q = rand(BATCH, NH, s, HEAD_DIM)
@@ -253,9 +254,45 @@ def bench_sdpa(mod, force_decode_kernel=False):
     return ok
 
 
+def bench_sdpa_kuiper(mod):
+    """Verified Kuiper decode kernel vs the FA1 reference it ports and cuDNN.
+
+    The Kuiper kernel's mask is a dense (B,Hq,Sq,Sk) tensor -- a Kuiper tlayout
+    is an injection, so there is no broadcast layout to instantiate it with --
+    so the mask is materialised and handed to every contender for fairness.
+    """
+    print("=== sdpa: VERIFIED Kuiper flash attention (decode)   vs etc/tc_flash_attn_fa1.cu and cuDNN ===")
+    g = torch.Generator(device=DEV).manual_seed(1)
+    ok = True
+
+    def rand(*shape):
+        return torch.randn(*shape, device=DEV, dtype=DT, generator=g)
+
+    for ctx in (128, 512, 1024, 16384):
+        q = rand(BATCH, NH, 1, HEAD_DIM)
+        kk = rand(BATCH, NKV, ctx, HEAD_DIM)
+        vv = rand(BATCH, NKV, ctx, HEAD_DIM)
+        mask = torch.zeros(BATCH, NH, 1, ctx, device=DEV, dtype=DT)
+        ref = ref_sdpa(q, kk, vv, mask, False)
+        got = mod.sdpa_kuiper(q, kk, vv, mask, SCALE, False)
+        err = rel_fro(got, ref)
+        t_ours = time_call(lambda: mod.sdpa_kuiper(q, kk, vv, mask, SCALE, False))
+        t_fa1 = time_call(lambda: mod.sdpa_fa1(q, kk, vv, mask, SCALE, False, True))
+        t_ref = time_call(lambda: ref_sdpa(q, kk, vv, mask, False))
+        flag = "ok " if err < 5e-2 else "BAD"
+        ok &= err < 5e-2
+        print(f"  [{flag}] decode  ctx={ctx:<5} | rel-err {err:.2e} "
+              f"| kuiper {t_ours*1e3:8.1f}us  fa1 {t_fa1*1e3:8.1f}us  cudnn {t_ref*1e3:8.1f}us"
+              f"  | kuiper {100*t_ref/t_ours:5.1f}% of cudnn, fa1 {100*t_ref/t_fa1:5.1f}%")
+
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sdpa-only", action="store_true",
+                    help="skip the matmul benchmarks")
     ap.add_argument("--force-decode-kernel", action="store_true",
                     help="always use tc_flash_attn_kernel (the decode/GQA kernel), "
                          "never the specialized prefill kernel")
@@ -270,19 +307,23 @@ def main():
     mod = build()
     print(f"device: {torch.cuda.get_device_name(0)}   "
           f"dtype: matmul bf16 / sdpa bf16   batch: {BATCH}\n")
-    ok = bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
-    print()
-    ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d_to")
-    print()
-    ok &= bench_mm(torch.float16, torch.float16)
-    print()
-    ok &= bench_addmm(torch.bfloat16)
-    print()
-    ok &= bench_addmm(torch.float16)
-    print()
-    ok &= bench_gemm_manual(mod)
-    print()
+    ok = True
+    if not args.sdpa_only:
+        ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
+        print()
+        ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d_to")
+        print()
+        ok &= bench_mm(torch.float16, torch.float16)
+        print()
+        ok &= bench_addmm(torch.bfloat16)
+        print()
+        ok &= bench_addmm(torch.float16)
+        print()
+        ok &= bench_gemm_manual(mod)
+        print()
     ok &= bench_sdpa(mod, force_decode_kernel=args.force_decode_kernel)
+    print()
+    ok &= bench_sdpa_kuiper(mod)
     print("\n" + ("ALL PASSED" if ok else "SOME FAILED (rel-err >= 5e-2)"))
     sys.exit(0 if ok else 1)
 

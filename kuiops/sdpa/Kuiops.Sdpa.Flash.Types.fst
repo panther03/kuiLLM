@@ -10,6 +10,7 @@ open Kuiper.Kernel.FlashAttention.KernelDesc
 
 module SZ = Kuiper.SizeT
 
+inline_for_extraction noextract
 let flash_scale_cimap
   (nw bm : szp) (lane : szlt bm)
   (#_ : squash (SZ.fits (SZ.v nw * SZ.v bm)))

@@ -44,7 +44,7 @@ $(OBJ)/%.krml: MOD=$(subst _,.,$(basename $(notdir $@)))
 $(OBJ)/%.krml: | mkobj
 	@$(call msg,"EXTRACT")
 	@$(CURDIR)/fstar.sh --already_cached '*,-Kuiops' --codegen krml \
-	  --load_cmxs $(PLUGIN) --extract "-*,+$(MOD),+Kuiper" -o $@ $<
+	  --load_cmxs $(PLUGIN) --extract "-*,+Kuiops,+Kuiper" -o $@ $<
 
 $(PRE)/%.cu $(PRE)/%.h &: MOD=$(subst _,.,$(basename $(notdir $<)))
 $(PRE)/%.cu $(PRE)/%.h &: $(OBJ)/%.krml | mkobj

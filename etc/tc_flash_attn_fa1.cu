@@ -71,7 +71,7 @@ using namespace nvcuda;
 #define BN 16
 #define HD 64        // shared tile width (head_dim <= 64)
 
-__global__ void tc_flash_attn_kernel(
+__global__ void fa1_flash_attn_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -254,7 +254,7 @@ __global__ void tc_flash_attn_kernel(
 #define P_NWARPS 4
 #define P_QROWS (P_NWARPS * 16)   // 64 query rows per block
 
-__global__ void tc_flash_attn_prefill_kernel(
+__global__ void fa1_flash_attn_prefill_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -392,7 +392,7 @@ __global__ void tc_flash_attn_prefill_kernel(
     }
 }
 
-void tc_flash_attn_launch(
+void tc_flash_attn_fa1_launch(
     const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
     const __nv_bfloat16* mask, __nv_bfloat16* out,
     int B, int Hq, int Hkv, int Sq, int Sk, int D,
@@ -404,7 +404,7 @@ void tc_flash_attn_launch(
     if (B == 0 || Sq == 0) return;
     if (Sq > 1 && !force_decode_kernel) {
         dim3 grid((Sq + P_QROWS - 1) / P_QROWS, Hq, B);
-        tc_flash_attn_prefill_kernel<<<grid, P_NWARPS * WARP, 0, stream>>>(
+        fa1_flash_attn_prefill_kernel<<<grid, P_NWARPS * WARP, 0, stream>>>(
             q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
             ms_b, ms_h, ms_q, ms_k);
         return;
@@ -412,7 +412,7 @@ void tc_flash_attn_launch(
     const int group = Hq / Hkv;
     const int R = group * Sq;
     dim3 grid((R + BM - 1) / BM, Hkv, B);
-    tc_flash_attn_kernel<<<grid, NWARPS * WARP, 0, stream>>>(
+    fa1_flash_attn_kernel<<<grid, NWARPS * WARP, 0, stream>>>(
         q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
         ms_b, ms_h, ms_q, ms_k);
 }

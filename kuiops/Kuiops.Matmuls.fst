@@ -1,4 +1,4 @@
-module Kuiops.Gemm
+module Kuiops.Matmuls
 
 (* Shared asynchronous GEMM launchers for the mm / addmm / bmm families.
 

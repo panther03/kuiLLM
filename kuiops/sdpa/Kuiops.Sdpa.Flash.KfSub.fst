@@ -287,7 +287,12 @@ fn restore_cell1
   Trade.elim_trade _ _;
 }
 
-let szlt_coerce (#n:int) (i:sz{SZ.v i < n}) : szlt n = i
+(* Deliberately not [inline_for_extraction]: inlining it substitutes the
+   [lane] expression into the softmax body and karamel's Low* re-check then
+   rejects the kernel.  As a real (static) function it costs nothing -- nvcc
+   inlines the identity. *)
+[@@CPrologue "__device__"]
+let szlt16 (i : sz { SZ.v i < 16 }) : szlt 16 = i
 
 let ref_of_array_cell
   (#et : Type0) (#len : nat) (#l : layout1 len)
@@ -656,7 +661,6 @@ fn sdpa_flash_pv_mm
 
   let tr = lane /^ 16sz;
   let tc = lane %^ 16sz;
-  let cstr = c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
   tensor_pts_to_ref (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16));
 
   let pf    = __alloc_fragment et_ab  FragA   16sz 16sz 16sz FragLRM;
@@ -709,8 +713,10 @@ fn sdpa_flash_pv_mm
       let prow : szlt 16 = warp_row_span_sz *^ vk +^ tr;
       let orow : szlt lane_row_span = vk;
       let pv  = tensor_read #_ #_ #_ #_ #cPVc shPVc (cidx2 prow tc);
-      let old = tensor_read #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 orow ocol);
-      tensor_write #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 orow ocol) (old `sc_acc.add` pv);
+      let old = tensor_read #_ #_ #_ #_ #(c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
+        (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 orow ocol);
+      tensor_write #_ #_ #_ #_ #(c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
+        (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 orow ocol) (old `sc_acc.add` pv);
       k := !k +^ 1sz;
     };
     jcol := !jcol +^ 1sz;
@@ -744,6 +750,7 @@ let tile_idx_lem (s i r n : nat)
   FStar.Math.Lemmas.cancel_mul_div z s;
   FStar.Math.Lemmas.lemma_mult_le_left s (i + 1) z
 
+inline_for_extraction noextract
 fn sdpa_flash_kv_load
   (#et : Type0)
   (bn d sk : szp)
@@ -777,10 +784,6 @@ fn sdpa_flash_kv_load
 {
   let tr = lane /^ 16sz;
   let tc = lane %^ 16sz;
-  let cstrK = c_stride_subtile_layout lshK #cshK
-    warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
-  let cstrV = c_stride_subtile_layout lshV #cshV
-    warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
   let nrow : sz = bn /^ warp_row_span_sz;
   let ncol : sz = d  /^ 16sz;
 
@@ -818,12 +821,16 @@ fn sdpa_flash_kv_load
       let dd : szlt d = 16sz *^ bcol +^ tc;
 
       let vk = tensor_read gK (cidx2 kr dd);
-      tensor_write #_ #_ #_ #_ #cstrK
+      tensor_write #_ #_ #_ #_
+        #(c_stride_subtile_layout lshK #cshK
+            warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
         (array2_stride_subtile shK warp_row_span 16
           (SZ.v lane / 16) (SZ.v lane % 16))
         (cidx2 arow bcol) vk;
       let vv = tensor_read gV (cidx2 kr dd);
-      tensor_write #_ #_ #_ #_ #cstrV
+      tensor_write #_ #_ #_ #_
+        #(c_stride_subtile_layout lshV #cshV
+            warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
         (array2_stride_subtile shV warp_row_span 16
           (SZ.v lane / 16) (SZ.v lane % 16))
         (cidx2 arow bcol) vv;
@@ -852,6 +859,7 @@ fn sdpa_flash_kv_load
    whole vector, so it is passed with a divided read-only fraction over the
    entire array -- no need to split it into per-lane cells since it is read
    exclusively.  Memory safety only. *)
+inline_for_extraction noextract
 fn sdpa_flash_scale
   (#et : Type0) {| scalar et |}
   (hd : szp)
@@ -874,7 +882,6 @@ fn sdpa_flash_scale
     (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
 {
   let tr = lane /^ 16sz;
-  let cstr = c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16);
   let ncol : sz = hd /^ 16sz;
 
   let mut orow : sz = 0sz;
@@ -902,8 +909,10 @@ fn sdpa_flash_scale
     {
       let vocol = !ocol;
       let oc : szlt (SZ.v hd / 16) = vocol;
-      let ov = tensor_read #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc);
-      tensor_write #_ #_ #_ #_ #cstr (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc) (ov `mul` cwv);
+      let ov = tensor_read #_ #_ #_ #_ #(c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
+        (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc);
+      tensor_write #_ #_ #_ #_ #(c_stride_subtile_layout lO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
+        (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)) (cidx2 vor oc) (ov `mul` cwv);
       ocol := !ocol +^ 1sz;
     };
     orow := !orow +^ 1sz;
@@ -1799,7 +1808,7 @@ fn sdpa_flash_softmax_maybe
     when__elim_true (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
 
     sdpa_flash_softmax_active b hq sq sk shS shP shcw shm shl gmask
-      (szlt_coerce lane) bi qh qpos k0 cbound row_active causal scale;
+      (szlt16 lane) bi qh qpos k0 cbound row_active causal scale;
 
     when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
     when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
@@ -1939,8 +1948,6 @@ let strided_cells2
 inline_for_extraction noextract
 let optional_inc (b : bool) (x : sz { SZ.fits (SZ.v x + 1) }) : sz =
   if b then x +^ 1sz else 0sz
-
-let sz_of_szp (x : szp) : sz = x
 
 inline_for_extraction noextract
 let flash_scale_ctlayout
@@ -2082,17 +2089,16 @@ fn sdpa_flash_q_load
     let qv : et_ab = if (r <^ rows) { qread } else { zero #et_ab #_ };
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
     unfold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
-    let ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid) =
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
     forevery_extract'
-      #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) ij _;
-    with oldq. assert (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) oldq);
-    rewrite (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) oldq)
+      #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+    with oldq. assert (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) oldq);
+    rewrite (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) oldq)
          as (tensor_pts_to_cell shQ (up (cidx2 i dd)) oldq);
     tensor_write_cell shQ (cidx2 i dd) qv;
     with newq. assert (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq);
     rewrite (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq)
-         as (tensor_pts_to_cell shQ (idx2 ij._1 ij._2) newq);
+         as (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) newq);
     elim_forall
       (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) ->
         exists* x. tensor_pts_to_cell shQ (idx2 ij._1 ij._2) x);
@@ -2126,19 +2132,16 @@ fn sdpa_flash_q_load
     let dd : szlt d = flat %^ d;
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
     unfold strided_cells2 shO BW.warp_size (SZ.v lane);
-    let ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane) =
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
-    assert pure (ij._1 == SZ.v i);
-    assert pure (ij._2 == SZ.v dd);
     forevery_extract'
-      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ij _;
-    with oldo. assert (tensor_pts_to_cell shO (idx2 ij._1 ij._2) oldo);
-    rewrite (tensor_pts_to_cell shO (idx2 ij._1 ij._2) oldo)
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+    with oldo. assert (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) oldo);
+    rewrite (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) oldo)
          as (tensor_pts_to_cell shO (up (cidx2 i dd)) oldo);
     tensor_write_cell shO (cidx2 i dd) (zero #et_acc #_);
     with newo. assert (tensor_pts_to_cell shO (up (cidx2 i dd)) newo);
     rewrite (tensor_pts_to_cell shO (up (cidx2 i dd)) newo)
-         as (tensor_pts_to_cell shO (idx2 ij._1 ij._2) newo);
+         as (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) newo);
     elim_forall
       (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ->
         exists* x. tensor_pts_to_cell shO (idx2 ij._1 ij._2) x);
@@ -2203,7 +2206,7 @@ fn sdpa_flash_causal_mask
   ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1)
 {
   let kmax : sz =
-    if causal { sdpa_flash_causal_active bm sk sq rows r0 } else { sz_of_szp sk };
+    if causal { sdpa_flash_causal_active bm sk sq rows r0 } else { (sk <: sz) };
   let r = SZ.sdivup kmax bn;
   SZ.lem_sdivup kmax bn;
   r
@@ -2273,8 +2276,7 @@ fn sdpa_flash_combine_partials_active
     let sc = fexp (mv `sub` !gm);
     (* TODO(line 223): clamp [sc] to zero when not finite once Kuiper has an
        extractable [isfinite].  The current [kind] test is ghost-only. *)
-    let cscale = flash_scale_ctlayout nw bm lane;
-    tensor_write #_ #_ #_ #_ #cscale
+    tensor_write #_ #_ #_ #_ #(flash_scale_ctlayout nw bm lane)
       (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane))
       (cidx2 iw 0sz) sc;
     gl := !gl `add` (sc `mul` lv);

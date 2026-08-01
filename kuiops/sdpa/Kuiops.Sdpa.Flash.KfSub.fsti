@@ -62,6 +62,7 @@ let ml_cells
 = cell_full_n shm (SZ.v (clamp_lt bm lane)) **
   cell_full_n shl (SZ.v (clamp_lt bm lane))
 
+inline_for_extraction noextract
 let combine_active (bm : szp) (w : sz) (lane : szlt warp_size) : bool =
   (w = 0sz) && (lane <^ bm)
 
