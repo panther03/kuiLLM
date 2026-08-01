@@ -30,6 +30,7 @@ _BMM = kuiops.BmmImpl()
 _SDPA = kuiops.SdpaImpl()
 
 _EFFICIENT_SDPA = aten._scaled_dot_product_efficient_attention.default
+_CUDNN_SDPA = aten._scaled_dot_product_cudnn_attention.default
 
 
 def _run_impl(impl, func, args, kwargs):
@@ -89,20 +90,38 @@ def _bmm_fake(a, b):
 
 @torch.library.custom_op("kuiperjit::sdpa", mutates_args=())
 def sdpa(q: Tensor, k: Tensor, v: Tensor, bias: Tensor,
-         scale: float) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    args = (q, k, v, bias, False, 0.0, False)
+         scale: float, causal: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    args = (q, k, v, bias, False, 0.0, causal)
     out = _run_impl(_SDPA, _EFFICIENT_SDPA, args, {"scale": scale})
     return tuple(out)
 
 
 @sdpa.register_fake
-def _sdpa_fake(q, k, v, bias, scale):
+def _sdpa_fake(q, k, v, bias, scale, causal):
     N, H, L, _ = q.shape
     Ev = v.shape[3]
     out = q.new_empty((N, H, L, Ev))
     lse = q.new_empty((N, H, 0), dtype=torch.float32)
     empty = q.new_empty((0,), dtype=torch.int64)
     return out, lse, empty, empty
+
+
+@torch.library.custom_op("kuiperjit::sdpa_cudnn", mutates_args=())
+def sdpa_cudnn(q: Tensor, k: Tensor, v: Tensor, bias: Tensor, scale: float,
+               causal: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, int, int,
+                                      Tensor, Tensor, Tensor]:
+    args = (q, k, v, bias, False, 0.0, causal, False)
+    return tuple(_run_impl(_SDPA, _CUDNN_SDPA, args, {"scale": scale}))
+
+
+@sdpa_cudnn.register_fake
+def _sdpa_cudnn_fake(q, k, v, bias, scale, causal):
+    N, H, L, D = q.shape
+    e0 = q.new_empty((0,), dtype=torch.int64)
+    empty = q.new_empty((), dtype=torch.int64)
+    return (q.new_empty((N, H, L, D)),
+            q.new_empty((N, H, 0), dtype=torch.float32),
+            e0, e0, 0, 0, empty, empty, q.new_empty((0,)))
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +171,19 @@ def claim(node):
         if _supported(_ADDMM, aten.addmm.default, (_fake(bias), _fake(a), _fake(b)), kw):
             return (torch.ops.kuiperjit.addmm.default, (bias, a, b, beta, alpha))
 
-    elif t is _EFFICIENT_SDPA:
+    elif t is _EFFICIENT_SDPA or t is _CUDNN_SDPA:
         q, k, v, bias = node.args[:4]
         compute_lse = node.args[4] if len(node.args) > 4 else False
+        causal = bool(node.args[6]) if len(node.args) > 6 else False
         scale = node.kwargs.get("scale")
-        sargs = (_fake(q), _fake(k), _fake(v), _fake(bias), compute_lse, 0.0, False)
-        if _supported(_SDPA, _EFFICIENT_SDPA, sargs, {"scale": scale}):
+        sargs = (_fake(q), _fake(k), _fake(v), _fake(bias),
+                 compute_lse, 0.0, causal, False)
+        if _supported(_SDPA, t, sargs, {"scale": scale}):
             fq = _fake(q)
             if scale is None and fq is not None:
                 scale = 1.0 / math.sqrt(int(fq.shape[-1]))
-            return (torch.ops.kuiperjit.sdpa.default, (q, k, v, bias, float(scale)))
+            op = (torch.ops.kuiperjit.sdpa.default if t is _EFFICIENT_SDPA
+                  else torch.ops.kuiperjit.sdpa_cudnn.default)
+            return (op, (q, k, v, bias, float(scale), causal))
 
     return None

@@ -355,62 +355,78 @@ def test_hreduce_poly_support_constraints():
 # sdpa (efficient attention)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32, torch.float32, torch.float32),
-    (torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.bfloat16),
-    (torch.bfloat16, torch.float64, torch.float16, torch.bfloat16),
-    (torch.int32, torch.uint8, torch.bool, torch.float64),
-    (torch.float32, torch.float32, torch.float32, torch.int32),
-    (torch.bool, torch.bool, torch.bool, torch.bool),
-])
-def test_sdpa(dtypes):
-    _need_cuda()
+def _sdpa_ref(Q, K, V, bias, scale, causal):
+    """Reference attention in f32. Causal follows the kernel: query position
+    ``qpos`` attends to keys ``kj <= qpos + (Sk - Sq)`` (bottom-right aligned)."""
+    sq, sk = Q.shape[2], K.shape[2]
+    group = Q.shape[1] // K.shape[1]
+    Kb = K.repeat_interleave(group, dim=1)
+    Vb = V.repeat_interleave(group, dim=1)
+    logits = (Q.float() @ Kb.float().transpose(-1, -2)) * scale + bias.float()
+    if causal:
+        qpos = torch.arange(sq, device=Q.device).view(sq, 1)
+        kj = torch.arange(sk, device=Q.device).view(1, sk)
+        logits = logits.masked_fill(kj > qpos + (sk - sq), float("-inf"))
+    return (torch.softmax(logits, dim=-1) @ Vb.float()).to(Q.dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("causal", [False, True])
+def test_sdpa(dtype, causal):
+    _need_tensor_cores(dtype)
     impl = kuiops.SdpaImpl()
     torch.manual_seed(0)
-    q_dtype, k_dtype, v_dtype, bias_dtype = dtypes
-    N, H, L, S, E, Ev = 2, 3, 8, 10, 16, 12
-    def rand(shape, dtype):
-        if dtype.is_floating_point:
-            return torch.randn(*shape, device="cuda", dtype=dtype)
-        return torch.randint(0, 2, shape, device="cuda").to(dtype)
-
-    Q = rand((N, H, L, E), q_dtype)
-    K = rand((N, H, S, E), k_dtype)
-    V = rand((N, H, S, Ev), v_dtype)
-    bias = rand((N, H, L, S), bias_dtype)
+    b, hq, hkv, sq, sk, d = 2, 4, 2, 3, 24, 32
+    Q = torch.randn(b, hq, sq, d, device="cuda", dtype=dtype)
+    K = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
+    V = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
+    bias = torch.randn(b, hq, sq, sk, device="cuda", dtype=dtype)
     original_bias = bias.clone()
     scale = 0.3
     func = aten._scaled_dot_product_efficient_attention.default
-    args = (Q, K, V, bias, False)
+    args = (Q, K, V, bias, False, 0.0, causal)
     out, lse, seed, off = _run(impl, func, args, {"scale": scale})
-    ref = F.scaled_dot_product_attention(
-        Q.float(), K.float(), V.float(), attn_mask=bias.float(), scale=scale
-    ).to(bias_dtype)
-    assert out.shape == (N, H, L, Ev)
-    assert out.dtype == bias_dtype
-    assert lse.shape == (N, H, 0) and lse.dtype == torch.float32
-    assert seed.shape == off.shape == () and seed.device.type == off.device.type == "cpu"
+    assert out.shape == (b, hq, sq, d) and out.dtype == dtype
+    assert lse.shape == (b, hq, 0) and lse.dtype == torch.float32
+    assert seed.shape == off.shape == ()
     assert torch.equal(bias, original_bias)
-    if bias_dtype.is_floating_point:
-        _assert_close(out, ref, bias_dtype)
-    else:
-        assert torch.equal(out, ref)
+    _assert_close(out, _sdpa_ref(Q, K, V, bias, scale, causal), dtype)
 
-def test_sdpa_causal_unsupported():
+
+def test_sdpa_unsupported():
     _need_cuda()
     impl = kuiops.SdpaImpl()
-    N, H, L, S, E, Ev = 1, 1, 4, 4, 8, 8
-    Q = torch.randn(N, H, L, E, device="cuda")
-    K = torch.randn(N, H, S, E, device="cuda")
-    V = torch.randn(N, H, S, Ev, device="cuda")
-    bias = torch.randn(N, H, L, S, device="cuda")
+    dtype = torch.bfloat16
+    b, hq, hkv, sq, sk, d = 1, 2, 1, 4, 8, 16
+    def mk(shape, dt=dtype):
+        return torch.randn(*shape, device="cuda", dtype=dt)
+    Q = mk((b, hq, sq, d))
+    K = mk((b, hkv, sk, d))
+    V = mk((b, hkv, sk, d))
+    bias = mk((b, hq, sq, sk))
     func = aten._scaled_dot_product_efficient_attention.default
-    # LSE computation, is_causal, and dropout are unsupported.
+    # LSE computation and dropout have no kernel support.
     assert impl.supported(func, (Q, K, V, bias, True), {}) is None
-    assert impl.supported(func, (Q, K, V, bias, True, 0.0, True), {}) is None
     assert impl.supported(func, (Q, K, V, bias, False, 0.1, False), {}) is None
-    # A missing (None) bias is unsupported.
+    # The mask is read through an injective layout: it cannot be absent or
+    # broadcast, and it must share the input dtype.
     assert impl.supported(func, (Q, K, V, None, False), {}) is None
+    assert impl.supported(
+        func, (Q, K, V, mk((b, 1, 1, sk)).expand(b, hq, sq, sk), False), {}) is None
+    assert impl.supported(
+        func, (Q, K, V, mk((b, hq, sq, sk), torch.float32), False), {}) is None
+    # Tensor-core fragments admit only bf16/f16 inputs with an f32 accumulator.
+    f32 = [t.float() for t in (Q, K, V, bias)]
+    assert impl.supported(func, (*f32, False), {}) is None
+    # head_dim must be a multiple of 16 and sq <= sk.
+    assert impl.supported(
+        func, (mk((b, hq, sq, 24)), mk((b, hkv, sk, 24)), mk((b, hkv, sk, 24)),
+               bias, False), {}) is None
+    assert impl.supported(
+        func, (mk((b, hq, sk + 8, d)), K, V, mk((b, hq, sk + 8, sk)), False),
+        {}) is None
+    # Causal attention IS supported.
+    assert impl.supported(func, (Q, K, V, bias, False, 0.0, True), {}) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -728,71 +728,146 @@ import math as _math
 # ---------------------------------------------------------------------------
 
 class SdpaImpl(_Family):
-    fst_template = "sdpa/Kuiops.Sdpa.Inst.fst.j2"
-    wrapper_template = "sdpa/wrapper_sdpa.cu.j2"
-    # Composite (it runs a row softmax internally), so it syncs: not graph-safe.
-    graph_safe = False
+    """FlashAttention decode kernel (``Kuiops.Sdpa.Flash``).
+
+    One fused kernel, no internal synchronization, so it is graph-safe. The
+    Kuiper kernel is generic in the element types but the tensor-core fragment
+    typeclasses admit only ``(bf16 in, f32 acc)`` and ``(f16 in, f32 acc)`` for
+    a floating accumulator at 16x16x16. The additive mask is read through a
+    ``tlayout``, which is an injection, so a broadcast (stride-0) or absent mask
+    cannot be expressed: a dense ``(B, Hq, Sq, Sk)`` mask of the input dtype is
+    required. That rules out HF's decode mask, which is ``(1, 1, 1, Sk)``;
+    materializing it here would be exactly the kind of unverified patching the
+    wrappers must not do, so lifting the restriction belongs in Kuiper.
+    """
+
+    fst_template = "sdpa/Kuiops.Sdpa.Flash.Inst.fst.j2"
+    wrapper_template = "sdpa/wrapper_sdpa_flash.cu.j2"
+
+    # Accumulator is f32 for every admissible input type; the kernel writes the
+    # output in the input dtype.
+    _ACC = torch.float32
+    _SUPPORTED_IN = (torch.bfloat16, torch.float16)
+
+    # ``KPR_SHMEM_FITS`` budget emitted by the kernel.
+    _MAX_SHMEM = 101376
+
+    @classmethod
+    def _shmem(cls, nw, d):
+        sa, sc = 2, 4  # sizeof(et_ab), sizeof(et_acc)
+        return (sa * 16 * d + 2 * sa * nw * 16 * d +
+                2 * sc * nw * 16 * 16 + sa * nw * 16 * 16 +
+                4 * sc * nw * 16 + sc * nw * 16 * d + 2 * sc * 16)
+
+    @classmethod
+    def _choose_nw(cls, d, nblk):
+        """Largest warp count whose block fits in shared memory and in the
+        thread limit. 4 matches the reference kernel's NWARPS."""
+        for nw in (4, 2, 1):
+            if nw * 32 <= _MAX_THREADS and cls._shmem(nw, d) <= cls._MAX_SHMEM:
+                return nw
+        return None
+
+    # Both ATen entry points have the same leading arguments; they differ only
+    # in the trailing flag and the arity of the returned tuple.
+    _VARIANTS = {
+        "_scaled_dot_product_efficient_attention": "efficient",
+        "_scaled_dot_product_cudnn_attention": "cudnn",
+    }
 
     def supported(self, func, args, kwargs):
-        # _scaled_dot_product_efficient_attention(query, key, value, attn_bias,
-        #   compute_log_sumexp, dropout_p=0.0, is_causal=False, *, scale=None)
-        if len(args) < 5:
+        # (query, key, value, attn_bias, compute_log_sumexp, dropout_p=0.0,
+        #  is_causal=False, [return_debug_mask=False,] *, scale=None)
+        variant = self._VARIANTS.get(getattr(func, "_schema", None)
+                                     and func._schema.name.split("::")[-1])
+        if variant is None or len(args) < 5:
             return None
+        if variant == "cudnn":
+            debug = args[7] if len(args) > 7 else \
+                kwargs.get("return_debug_mask", False)
+            if debug:
+                return None
         Q, Kt, V, bias = args[0], args[1], args[2], args[3]
         compute_log_sumexp = args[4]
         dropout_p = args[5] if len(args) > 5 else kwargs.get("dropout_p", 0.0)
         is_causal = args[6] if len(args) > 6 else kwargs.get("is_causal", False)
-        # The kernel does not produce the LSE needed by the backward pass.
-        if bias is None or compute_log_sumexp or dropout_p != 0.0 or is_causal:
+        # The kernel does not produce the LSE needed by the backward pass, and
+        # has no dropout.
+        if compute_log_sumexp or dropout_p != 0.0:
+            return None
+        # A dense additive mask is mandatory (see the class docstring).
+        if bias is None:
             return None
         if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 4
-                   for t in (Q, Kt, V, bias)):
+                   and t.is_contiguous() for t in (Q, Kt, V, bias)):
             return None
         if not all(t.device == Q.device for t in (Kt, V, bias)):
             return None
-        N, H, L, E = (int(x) for x in Q.shape)
-        N2, H2, S, E2 = (int(x) for x in Kt.shape)
-        N3, H3, S2, Ev = (int(x) for x in V.shape)
-        if min(N, H, L, S, E, Ev) <= 0:
+        if Q.dtype not in self._SUPPORTED_IN:
             return None
-        if (N, H, E) != (N2, H2, E2) or (N, H, S) != (N3, H3, S2):
+        if not all(t.dtype == Q.dtype for t in (Kt, V, bias)):
             return None
-        if tuple(int(x) for x in bias.shape) != (N, H, L, S):
+        b, hq, sq, d = (int(x) for x in Q.shape)
+        bk, hkv, sk, dk = (int(x) for x in Kt.shape)
+        if tuple(int(x) for x in V.shape) != (bk, hkv, sk, dk):
             return None
-        # Kernel index/grid constraints.
-        if (L * S > _MAX_NUMEL or L * Ev > _MAX_NUMEL or
-                N * H * L > _MAX_BLOCKS or N * H * L * S > _MAX_NUMEL):
+        if tuple(int(x) for x in bias.shape) != (b, hq, sq, sk):
             return None
-        if max(N * H * L * E, N * H * S * E, N * H * S * Ev,
-                N * H * L * Ev, N * H * L * S) >= 2 ** 32:
+        if b != bk or d != dk or min(b, hq, hkv, sq, sk, d) <= 0:
+            return None
+        # 16 /?+ d, hq == hkv * group, sq <= sk.
+        if d % 16 != 0 or hq % hkv != 0 or sq > sk:
+            return None
+        group = hq // hkv
+        rows = group * sq
+        tiles = (rows + 15) // 16
+        nblk = b * hkv * tiles
+        if nblk > _MAX_BLOCKS:
+            return None
+        nw = self._choose_nw(d, nblk)
+        if nw is None:
+            return None
+        # Every SZ.fits obligation of the instantiation (SZ is 32-bit here).
+        sizes = (rows + 15, tiles * 16, hkv * group + rows,
+                 b * hq * sq * d, b * hkv * sk * d, b * hq * sq * sk,
+                 16 * d + nw * 32, 16 * d + 32, nw * 16 * 16, nw * 16 * d,
+                 sk + 32 + nw)
+        if max(sizes) >= 2 ** 32:
             return None
         scale = kwargs.get("scale", None)
         if scale is None:
-            scale = 1.0 / _math.sqrt(E)
-        return dict(out_dtype=bias.dtype, scale=float(scale))
+            scale = 1.0 / _math.sqrt(d)
+        return dict(dtype=Q.dtype, nw=nw, variant=variant,
+                    scale=float(scale), causal=bool(is_causal))
 
     def run(self, spec, args, kwargs):
-        out_dtype, scale = spec["out_dtype"], spec["scale"]
-        dtype = torch.float32
-        et = torch_dtype_to_fstar(dtype)
-        module = "Kuiops.Sdpa.F32"
-        name = "sdpa_jit"
-        fst_ctx = dict(module=module, name=name, et=et)
+        dtype = spec["dtype"]
+        et_ab = torch_dtype_to_fstar(dtype)
+        et_acc = torch_dtype_to_fstar(self._ACC)
+        module = f"Kuiops.Sdpa.Flash.{et_ab.title()}.{et_acc.title()}"
+        name = "sdpa_flash_jit"
+        fst_ctx = dict(
+            module=module, name=name,
+            et_ab=torch_dtype_to_fstar_namespace(dtype) + ".t",
+            et_acc=torch_dtype_to_fstar_namespace(self._ACC) + ".t")
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
             name=name,
-            cpp_et=torch_dtype_to_ctype(dtype),
-        )
+            cpp_et_ab=torch_dtype_to_ctype(dtype),
+            cpp_et_acc=torch_dtype_to_ctype(self._ACC))
         Q, Kt, V, bias = args[:4]
-        Q = Q if Q.dtype == dtype else Q.to(dtype)
-        Kt = Kt if Kt.dtype == dtype else Kt.to(dtype)
-        V = V if V.dtype == dtype else V.to(dtype)
-        bias = bias if bias.dtype == dtype else bias.to(dtype)
-        out, lse = self._mod(module, fst_ctx, wrapper_ctx).run(Q, Kt, V, bias, scale)
-        # aten returns (output, log_sumexp[f32], philox_seed, philox_offset).
-        if out_dtype != dtype:
-            out = out.to(out_dtype)
+        out = self._mod(module, fst_ctx, wrapper_ctx).run(
+            Q, Kt, V, bias, spec["scale"], spec["causal"], spec["nw"])
+        # With compute_log_sumexp=False the LSE and the RNG state are unused.
+        b, hq, sq, _ = out.shape
+        lse = torch.empty((b, hq, 0), dtype=torch.float32, device=out.device)
         empty = torch.empty([], dtype=torch.int64)
+        if spec["variant"] == "cudnn":
+            # (output, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k,
+            #  philox_seed, philox_offset, debug_attn_mask)
+            e0 = torch.empty((0,), dtype=torch.int64, device=out.device)
+            return (out, lse, e0, e0, 0, 0, empty, empty,
+                    torch.empty((0,), dtype=out.dtype, device=out.device))
         return (out, lse, empty, empty)
 
 

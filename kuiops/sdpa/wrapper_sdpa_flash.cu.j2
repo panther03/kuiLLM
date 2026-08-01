@@ -1,0 +1,42 @@
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper flash-attention kernel.
+// DO NOT EDIT. Generated from kuiops/sdpa/wrapper_sdpa_flash.cu.j2
+//
+// Q(B,Hq,Sq,D) K/V(B,Hkv,Sk,D) mask(B,Hq,Sq,Sk) -> out(B,Hq,Sq,D), all dense
+// row-major. Shapes and the launch geometry are validated by SdpaImpl.supported.
+
+torch::Tensor op_{{ module }}
+    (torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor mask,
+     double scale, bool causal, int64_t nw)
+{
+    const int64_t b = Q.size(0), hq = Q.size(1), sq = Q.size(2), d = Q.size(3);
+    const int64_t hkv = K.size(1), sk = K.size(2);
+    const int64_t group = hq / hkv;
+    const int64_t rows = group * sq;
+    const int64_t tiles = (rows + 15) / 16;
+
+    auto out = torch::empty({b, hq, sq, d}, Q.options());
+
+    at::cuda::CUDAGuard g(Q.device());
+
+    {{module}}_{{name}} (
+        (uint32_t)(b * hkv * tiles), (uint32_t)nw, (uint32_t)(nw * 32),
+        (uint32_t)b, (uint32_t)hq, (uint32_t)hkv, (uint32_t)group,
+        (uint32_t)sq, (uint32_t)rows, (uint32_t)tiles, (uint32_t)sk, (uint32_t)d,
+        reinterpret_cast<{{cpp_et_ab}}*>(Q.data_ptr()),
+        reinterpret_cast<{{cpp_et_ab}}*>(K.data_ptr()),
+        reinterpret_cast<{{cpp_et_ab}}*>(V.data_ptr()),
+        reinterpret_cast<{{cpp_et_ab}}*>(mask.data_ptr()),
+        reinterpret_cast<{{cpp_et_ab}}*>(out.data_ptr()),
+        causal, static_cast<{{cpp_et_acc}}>((float)scale),
+        kuiops::current_stream());
+
+    return out;
+}
+
+{% include "_pybind.cu.j2" %}
