@@ -3,7 +3,26 @@ shapes and collect timing, throughput and accuracy into a table.
 
 The specific benchmarks live in ``bench_ops.ipynb``.
 """
+import time
+
 import torch
+
+
+def warm_up(ms=300, device="cuda"):
+    """Drive the GPU to a steady clock before any timing is taken.
+
+    Idle SM clocks sit an order of magnitude below boost (210 vs 2100 MHz on an
+    A6000) and need ~100ms of load to ramp -- far longer than a per-call warmup
+    of a few hundred microseconds. Without this the first contender of the first
+    case absorbs the ramp and reads 2-3x slow.
+    """
+    a = torch.randn(2048, 2048, device=device, dtype=torch.float16)
+    b = torch.randn(2048, 2048, device=device, dtype=torch.float16)
+    deadline = time.perf_counter() + ms * 1e-3
+    while time.perf_counter() < deadline:
+        for _ in range(20):
+            torch.mm(a, b)
+        torch.cuda.synchronize()
 
 
 def rel_fro(a, b):
@@ -31,7 +50,7 @@ def time_call(fn, iters=50, warmup=10):
 
 
 def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
-                 reference, flops=None, iters=50, warmup=10):
+                 reference, flops=None, iters=50, warmup=10, warmup_ms=300):
     """Benchmark ``impls`` against ``reference`` over ``cases``.
 
     ``cases`` are ``(name, *data)`` tuples; ``make_inputs``, ``case_columns`` and
@@ -42,12 +61,14 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
 
     ``impls`` is a list of ``(name, callable)``. Each contender is timed once;
     the output of its last timed call is what its error is measured on, against
-    the reference's.
+    the reference's. ``warmup_ms`` of dummy load precedes the whole run to pin
+    the GPU clocks (see ``warm_up``).
 
     Returns a ``pandas.DataFrame``, one row per case.
     """
     import pandas as pd
 
+    warm_up(warmup_ms)
     contenders = list(impls) + [("ref", reference)]
     rows = []
     for name, *data in cases:
