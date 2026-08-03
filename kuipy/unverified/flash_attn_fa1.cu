@@ -392,7 +392,7 @@ __global__ void fa1_flash_attn_prefill_kernel(
     }
 }
 
-void tc_flash_attn_fa1_launch(
+void flash_attn_fa1_launch(
     const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
     const __nv_bfloat16* mask, __nv_bfloat16* out,
     int B, int Hq, int Hkv, int Sq, int Sk, int D,

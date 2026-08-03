@@ -123,7 +123,7 @@ __device__ __forceinline__ void cp_tile(__nv_bfloat16* dst, const __nv_bfloat16*
 // -------------------------------- decode -------------------------------------
 // One warp per block; a 16-row query tile of R = group*Sq batched query rows for
 // one (batch, kv head). Handles Sq==1 (hot path) and general Sq.
-__global__ void tc_flash_attn_decode_kernel(
+__global__ void flash_attn_fa2_decode_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -287,7 +287,7 @@ __global__ void tc_flash_attn_decode_kernel(
 #define PKN 2                      // key subtiles (of 16) per shared chunk
 #define PKW (PKN * 16)
 
-__global__ void tc_flash_attn_prefill_kernel(
+__global__ void flash_attn_fa2_prefill_kernel(
     const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k,
     const __nv_bfloat16* __restrict__ v,
@@ -427,7 +427,7 @@ __global__ void tc_flash_attn_prefill_kernel(
     }
 }
 
-void tc_flash_attn_launch(
+void flash_attn_fa2_launch(
     const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
     const __nv_bfloat16* mask, __nv_bfloat16* out,
     int B, int Hq, int Hkv, int Sq, int Sk, int D,
@@ -439,7 +439,7 @@ void tc_flash_attn_launch(
     if (B == 0 || Sq == 0) return;
     if (Sq > 1 && !force_decode_kernel) {
         dim3 grid((Sq + PM - 1) / PM, Hq, B);
-        tc_flash_attn_prefill_kernel<<<grid, PM_WARPS * WARP, 0, stream>>>(
+        flash_attn_fa2_prefill_kernel<<<grid, PM_WARPS * WARP, 0, stream>>>(
             q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
             ms_b, ms_h, ms_q, ms_k);
         return;
@@ -447,7 +447,7 @@ void tc_flash_attn_launch(
     const int group = Hq / Hkv;
     const int R = group * Sq;
     dim3 grid((R + 15) / 16, Hkv, B);
-    tc_flash_attn_decode_kernel<<<grid, WARP, 0, stream>>>(
+    flash_attn_fa2_decode_kernel<<<grid, WARP, 0, stream>>>(
         q, k, v, mask, out, B, Hq, Hkv, Sq, Sk, D, scale, causal,
         ms_b, ms_h, ms_q, ms_k);
 }

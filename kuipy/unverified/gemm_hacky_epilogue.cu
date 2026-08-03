@@ -197,7 +197,7 @@ Klas_GEMM_TensorCore2D_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4(uint32_t rows,
 
 // C = alpha*(A @ B) + beta*C, fp32-accumulate tensor-core GEMM. When beta != 0
 // the current contents of C are read back as the additive term (in-place GEMM).
-void tc2d_manual_gemm_launch(const __nv_bfloat16* A, const __nv_bfloat16* B,
+void gemm_hacky_epilogue_launch(const __nv_bfloat16* A, const __nv_bfloat16* B,
                              __nv_bfloat16* C, int M, int N, int K,
                              float alpha, float beta) {
     if (M == 0 || N == 0 || K == 0) return;

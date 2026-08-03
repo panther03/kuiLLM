@@ -69,7 +69,7 @@ __device__ __forceinline__ void load_tile_async(
 
 template <typename AccT>
 __global__ __launch_bounds__(THREADS)
-void tc2d_gemm_kernel(const half* __restrict__ gA,
+void gemm_pipe_kernel(const half* __restrict__ gA,
                       const half* __restrict__ gB,
                       half* __restrict__ gC,
                       int M, int N, int K,
@@ -157,21 +157,15 @@ void tc2d_gemm_kernel(const half* __restrict__ gA,
 // C:(M,N), all fp16 row-major. When beta != 0 the current contents of C are read
 // back as the additive term (in-place GEMM). Requires M%128==0, N%128==0,
 // K%32==0.
-void tc2d_gemm_launch(const half* A, const half* B, half* C,
+void gemm_pipe_launch(const half* A, const half* B, half* C,
                       int M, int N, int K, float alpha, float beta) {
     if (M == 0 || N == 0 || K == 0) return;
     KPR_GUARD(M % BM == 0);
     KPR_GUARD(N % BN == 0);
     KPR_GUARD(K % BK == 0);
     dim3 grid((M / BM) * (N / BN));
-    tc2d_gemm_kernel<float><<<grid, THREADS>>>(
+    gemm_pipe_kernel<float><<<grid, THREADS>>>(
         A, B, C, M, N, K, alpha, beta);
     MUST(cudaGetLastError());
     MUST(cudaDeviceSynchronize());
-}
-
-// Plain matmul C = A @ B (alpha=1, beta=0): the bias-free F.linear drop-in.
-void tc2d_matmul_launch(const half* A, const half* B, half* C,
-                        int M, int N, int K) {
-    tc2d_gemm_launch(A, B, C, M, N, K, 1.0f, 0.0f);
 }

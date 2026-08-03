@@ -1,7 +1,7 @@
 module Kuiops.Sdpa.Flash.KfSub
 
 (* Memory-safety-only helpers for the bf16 tensor-core flash-attention kernel
-   in [etc/tc_flash_attn_fa1.cu].  This module contains the prologue, key-tile
+   in [flash_attn_fa1.cu].  This module contains the prologue, key-tile
    loop, epilogue, and ownership bridges composed by [sdpa_flash_kf].  It has
    no functional specification; it verifies bounds and resource ownership. *)
 
@@ -453,7 +453,7 @@ fn sdpa_flash_softmax_upd
 }
 
 (* Memory-safety-only Kuiper port of the Q@K^T tensor-core matmul in the same
-   kernel (etc/tc_flash_attn_fa1.cu, lines 138-147).  A single warp computes one
+   kernel (flash_attn_fa1.cu, lines 138-147).  A single warp computes one
    [16 x 16] score tile [Ssh[w]] by accumulating over the head dimension [d] in
    16-wide chunks (like [subproducts_tc] in Kuiper.Kernel.GEMM.TensorCore).
 
@@ -585,7 +585,7 @@ inline_for_extraction noextract let warp_row_span_sz : sz = warp_size /^ 16sz
 inline_for_extraction noextract let lane_row_span_sz : sz = 16sz /^ warp_row_span_sz
 
 (* Memory-safety-only Kuiper port of the P@V tensor-core matmul plus the
-   per-lane accumulation into [Osh] (etc/tc_flash_attn_fa1.cu, lines 194-209).
+   per-lane accumulation into [Osh] (flash_attn_fa1.cu, lines 194-209).
    A single warp, looping over the head dimension [d] in 16-wide chunks [dc]:
    for each chunk it computes the [16 x 16] product [PV = P @ V[:, dc:dc+16]]
    into a fresh accumulator, stores it to the scratch tile [PVc], and then each
@@ -730,7 +730,7 @@ fn sdpa_flash_pv_mm
 
 (* ────────────────────────────────────────────────────────────────────────
    sdpa_flash_kv_load  --  global -> shared caching of the K/V key tile
-   (etc/tc_flash_attn_fa1.cu, lines 130-135).
+   (flash_attn_fa1.cu, lines 130-135).
 
    A single warp caches the [bn x d] key tile from global to shared.  The tile
    is partitioned across the [warp_size] lanes by the strided [(warp_row_span,
@@ -843,7 +843,7 @@ fn sdpa_flash_kv_load
 
 (* ────────────────────────────────────────────────────────────────────────
    sdpa_flash_scale  --  online-softmax rescale of the output tile
-   (etc/tc_flash_attn_fa1.cu, lines 190-191).
+   (flash_attn_fa1.cu, lines 190-191).
 
    The CUDA loop [for idx = lane; idx < BM*HD; idx += WARP] does the in-place
    row-broadcast multiply [Osh[idx] *= cw[idx / HD]] over the [16 x hd] output
@@ -2027,7 +2027,7 @@ fn sdpa_flash_ml_init_maybe
 }
 
 (* Block-strided Q cache load and per-warp M/L/O initialization
-   (tc_flash_attn_fa1.cu, lines 104-114). *)
+   (flash_attn_fa1.cu, lines 104-114). *)
 inline_for_extraction noextract
 fn sdpa_flash_q_load
   (#et_ab #et_acc : Type0)
@@ -2156,7 +2156,7 @@ fn sdpa_flash_q_load
   ()
 }
 
-(* Causal early-exit bound (tc_flash_attn_fa1.cu, lines 118-127).  The CUDA
+(* Causal early-exit bound (flash_attn_fa1.cu, lines 118-127).  The CUDA
    initializes [maxpos] to -1; [found] keeps that case representable with [sz]:
    no valid row leaves [kmax = sk - sq], while a valid maximum contributes the
    additional [maxpos + 1]. *)

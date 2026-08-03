@@ -1,21 +1,10 @@
+## TODO: this will become refactored into 
+# - this file: unverified operator definitions
+# - benchmarking.py: generic utilities for benchmarking code
+# - bench.ipynb: Jupyter notebook with the specific benchmarks this file handles.
+
+
 #!/usr/bin/env python3
-"""Validate + benchmark the Kuiper tensor-core kernels as drop-in replacements
-for the stock kernels they target in the infer_golden.py trace:
-
-  * mm / addmm -> cuBLAS bf16 tensor-core GEMM (F.linear, torch.addmm)
-  * sdpa       -> cuDNN flash_fprop SDPA (F.scaled_dot_product_attention)
-
-The matmul/GEMM paths go through the real JIT dispatch stack (kuipy.kuiops
-MmImpl / AddmmImpl), i.e. exactly the kernels infer.py would offload to; the
-hand-written etc/tc2d_linear_manual.cu GEMM is benchmarked alongside them as a
-reference point. SDPA still uses the etc/ reference kernel.
-
-For every case it reports the relative-Frobenius divergence vs the stock kernel
-and the mean per-call latency of each. Shapes are Qwen2.5-0.5B at the production
-batch of 256.
-
-    python3 etc/bench_tc_kernels.py
-"""
 import argparse
 import math
 import os
@@ -61,7 +50,7 @@ def build():
         sources=[os.path.join(HERE, "tc_kernels_wrapper.cu"),
                  os.path.join(HERE, "tc2d_linear_manual.cu"),
                  os.path.join(HERE, "tc_flash_attn.cu"),
-                 os.path.join(HERE, "tc_flash_attn_fa1.cu"),
+                 os.path.join(HERE, "flash_attn_fa1.cu"),
                  os.path.join(HERE, "Kuiops_Sdpa_Flash_Inst.cu")],
         extra_include_paths=[HERE, KUIPER_INC, os.path.join(ROOT, "include")],
         # Kuiper headers rely on implicit int->half conversion (fragment `{0}`
@@ -155,7 +144,7 @@ def bench_mm(dtype, out_dtype, implementation=None):
         spec = impl.supported(aten.mm.default, (A, Wt), kwargs)
         t_ours = time_call(lambda: impl.run(spec, (A, Wt), kwargs))
         t_ref = time_call(lambda: F.linear(A, W))
-        ok &= report(name, M, K, N, err, t_ours, t_ref, extra=f"{spec[0]:<8} | ")
+        ok &= report(name, M, K, N, err, t_ours, t_ref, extra=f"{spec['impl']:<8} | ")
     return ok
 
 
@@ -180,7 +169,7 @@ def bench_addmm(dtype):
         t_ours = time_call(lambda: impl.run(spec, (C, A, B), kw))
         t_ref = time_call(lambda: torch.addmm(C, A, B, beta=beta, alpha=alpha))
         ok &= report(name, M, K, N, err, t_ours, t_ref,
-                     extra=f"{spec[0]:<8} | alpha={alpha} beta={beta} | ")
+                     extra=f"{spec['impl']:<8} | alpha={alpha} beta={beta} | ")
     return ok
 
 
@@ -261,7 +250,7 @@ def bench_sdpa_kuiper(mod):
     is an injection, so there is no broadcast layout to instantiate it with --
     so the mask is materialised and handed to every contender for fairness.
     """
-    print("=== sdpa: VERIFIED Kuiper flash attention (decode)   vs etc/tc_flash_attn_fa1.cu and cuDNN ===")
+    print("=== sdpa: VERIFIED Kuiper flash attention (decode)   vs flash_attn_fa1.cu and cuDNN ===")
     g = torch.Generator(device=DEV).manual_seed(1)
     ok = True
 
@@ -309,8 +298,8 @@ def main():
           f"dtype: matmul bf16 / sdpa bf16   batch: {BATCH}\n")
     ok = True
     if not args.sdpa_only:
-        ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
-        print()
+        # ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d")
+        # print()
         ok &= bench_mm(torch.bfloat16, torch.bfloat16, "tc2d_to")
         print()
         ok &= bench_mm(torch.float16, torch.float16)

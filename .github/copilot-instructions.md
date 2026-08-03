@@ -74,6 +74,7 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 
 ## Conventions
 
+- **Keep code concise and match existing style; IMPORTANT: AVOID EXCESSIVE COMMENTS. DO NOT document historical behavior or changes in comments unless asked. Over-documentation creates noise and can becomes a maintenance burden that if handled improperly results in outright misleading information, as the codebase evolves and the information becomes out of date. DO NOT regurgitate user requirements in documentation either. Codebase documentation including comments should stand on its own as a useful, up-to-date, and concise aid to the reader.**
 - **`supported()` should be as broad as the *kernel's* refinements allow** — do
   not over-restrict dtypes. The source of truth is the typeclass/refinement on the
   Kuiper kernel: e.g. `map` has no `et` refinement, the `BlockTiling2D` backend of `mm`
@@ -111,8 +112,8 @@ Caches live in `.kuipy_cache/` (`src/`, `checked/`, `pre/`, `cu/`, `build/`).
 - **Operator calls**: Do not call aten operators in the Python or C++ integration code, such as `.to()`. Do not use these operators to implement PyTorch broadcasting semantics either; this should be handled by Kuiper kernels (although we do not have a reusable solution for this yet, so it is a known limitation that we do not support broadcasting). In general, `supported()` constraints should reflect EXACTLY what the kernel is capable of; any code implemented in the CUDA wrappers and Python is untrusted, and we would like to keep these as minimal wrappers that only do the bare minimum to integrate with the verified implementations. The burden of supporting more edge cases of the Python operators should fall on the Kuiper code, NOT on the Python or CUDA wrappers.
 - **Allocations**: By convention, the Kuiper kernels do not allocate output tensors and instead take the output tensor as argument. In terms of the native_functions.yaml of ATen, If it is OK for an input tensor to be modified and it is in the same alias set as the output, then the Kuiper implementation shall modify that input in place instead of there being a separate argument (this is the case for a unary elementwise operation for instance). The allocation of the output tensor should happen on the CUDA/C++ template side, not in Python. The allocation could also be a copy of some input tensor, for example in the `addmm` operator which copies the C matrix to the output matrix and the Kuiper kernel modifies this in-place. 
 - Remember that in F* and Pulse, you do not need to write `return` to return a value from a function; the last expression is returned automatically.
-- Keep code concise and match existing style; IMPORTANT: AVOID EXCESSIVE COMMENTS. Ask first if you should use a separate worktree or stay on the main one. Commits include:
-  `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
+- Ask first if you should use a separate worktree or stay on the main one. 
+- Commits include: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
 
 ## Reference docs
 

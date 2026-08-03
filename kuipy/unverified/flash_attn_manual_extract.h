@@ -6,7 +6,7 @@
 #include <kuiops_compat.h>
 
 void
-Kuiops_Sdpa_Flash_Inst_sdpa_flash_bf16_f32(uint32_t nblk,
+flash_attn_manual_extract_launch(uint32_t nblk,
                                            uint32_t nw,
                                            uint32_t nthr,
                                            uint32_t b,
