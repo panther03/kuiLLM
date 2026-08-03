@@ -13,6 +13,7 @@ import torch
 
 import pytest
 
+import kuipy
 from kuipy import kuiops
 from kuipy import compile as jit_compile
 
@@ -24,24 +25,17 @@ def _need_cuda():
         pytest.skip("CUDA not available")
 
 
-def _run(impl, func, args, kwargs):
-    spec = impl.supported(func, args, kwargs)
-    assert spec is not None, "expected a supported spec"
-    return impl.run(spec, args, kwargs)
-
-
 def test_cache_is_hot_on_second_call():
     _need_cuda()
     import kuipy.config
     kuipy.config.JIT_STRICTNESS = 2
-    impl = kuiops.MmImpl()
     A = torch.randn(64, 64, device="cuda")
     B = torch.randn(64, 64, device="cuda")
     # First call may compile; second must be served from the in-process cache.
-    _run(impl, aten.mm.default, (A, B), {})
+    kuipy.run(aten.mm.default)(A, B)
     ext_names_before = set(jit_compile._loaded.keys())
     t0 = time.time()
-    _run(impl, aten.mm.default, (A, B), {})
+    kuipy.run(aten.mm.default)(A, B)
     dt = time.time() - t0
     # No new extension compiled, and the call is fast (no nvcc/F*).
     assert set(jit_compile._loaded.keys()) == ext_names_before

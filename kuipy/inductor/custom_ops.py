@@ -17,23 +17,17 @@ from typing import Tuple
 import torch
 from torch import Tensor
 
-from .. import kuiops
+from .. import registry
 from .. import verify as V
 from .. import compile as _compile
 
 aten = torch.ops.aten
 
-# One singleton Impl per family.
-_MM = kuiops.MmImpl()
-_ADDMM = kuiops.AddmmImpl()
-_BMM = kuiops.BmmImpl()
-_SDPA = kuiops.SdpaImpl()
-
 _EFFICIENT_SDPA = aten._scaled_dot_product_efficient_attention.default
 _CUDNN_SDPA = aten._scaled_dot_product_cudnn_attention.default
 
 
-def _run_impl(impl, func, args, kwargs):
+def _run_impl(func, args, kwargs):
     """Run a kuiops Impl for a node the pass already claimed at compile time.
 
     A batch capture (``kuipy.batch_capture``) extracts + queues the kernel and
@@ -41,6 +35,7 @@ def _run_impl(impl, func, args, kwargs):
     pass still produces correct values while every kernel is collected for one
     combined build. When ``verify`` is active the reference is compared to the
     Kuiper output (host-side norm — eager, non-captured pass only)."""
+    impl = registry.impl_for(func)
     spec = impl.supported(func, args, kwargs)
     if spec is None:
         return func(*args, **kwargs)
@@ -59,7 +54,7 @@ def _run_impl(impl, func, args, kwargs):
 
 @torch.library.custom_op("kuiperjit::mm", mutates_args=())
 def mm(a: Tensor, b: Tensor) -> Tensor:
-    return _run_impl(_MM, aten.mm.default, (a, b), {})
+    return _run_impl(aten.mm.default, (a, b), {})
 
 
 @mm.register_fake
@@ -69,7 +64,7 @@ def _mm_fake(a, b):
 
 @torch.library.custom_op("kuiperjit::addmm", mutates_args=())
 def addmm(bias: Tensor, a: Tensor, b: Tensor, beta: float, alpha: float) -> Tensor:
-    return _run_impl(_ADDMM, aten.addmm.default, (bias, a, b),
+    return _run_impl(aten.addmm.default, (bias, a, b),
                      {"beta": beta, "alpha": alpha})
 
 
@@ -80,7 +75,7 @@ def _addmm_fake(bias, a, b, beta, alpha):
 
 @torch.library.custom_op("kuiperjit::bmm", mutates_args=())
 def bmm(a: Tensor, b: Tensor) -> Tensor:
-    return _run_impl(_BMM, aten.bmm.default, (a, b), {})
+    return _run_impl(aten.bmm.default, (a, b), {})
 
 
 @bmm.register_fake
@@ -92,7 +87,7 @@ def _bmm_fake(a, b):
 def sdpa(q: Tensor, k: Tensor, v: Tensor, bias: Tensor,
          scale: float, causal: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     args = (q, k, v, bias, False, 0.0, causal)
-    out = _run_impl(_SDPA, _EFFICIENT_SDPA, args, {"scale": scale})
+    out = _run_impl(_EFFICIENT_SDPA, args, {"scale": scale})
     return tuple(out)
 
 
@@ -111,7 +106,7 @@ def sdpa_cudnn(q: Tensor, k: Tensor, v: Tensor, bias: Tensor, scale: float,
                causal: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, int, int,
                                       Tensor, Tensor, Tensor]:
     args = (q, k, v, bias, False, 0.0, causal, False)
-    return tuple(_run_impl(_SDPA, _CUDNN_SDPA, args, {"scale": scale}))
+    return tuple(_run_impl(_CUDNN_SDPA, args, {"scale": scale}))
 
 
 @sdpa_cudnn.register_fake
@@ -133,7 +128,8 @@ def _fake(x):
     return x.meta.get("val") if isinstance(x, Node) else x
 
 
-def _supported(impl, func, args, kwargs):
+def _supported(func, args, kwargs):
+    impl = registry.impl_for(func)
     # Non-graph-safe families sync inside the kernel, which is illegal under CUDA
     # graph capture; never claim them from the compiled graph (they stay callable
     # directly, e.g. from the unit tests).
@@ -155,12 +151,12 @@ def claim(node):
 
     if t is aten.mm.default:
         a, b = node.args
-        if _supported(_MM, aten.mm.default, (_fake(a), _fake(b)), {}):
+        if _supported(aten.mm.default, (_fake(a), _fake(b)), {}):
             return (torch.ops.kuiperjit.mm.default, (a, b))
 
     elif t is aten.bmm.default:
         a, b = node.args
-        if _supported(_BMM, aten.bmm.default, (_fake(a), _fake(b)), {}):
+        if _supported(aten.bmm.default, (_fake(a), _fake(b)), {}):
             return (torch.ops.kuiperjit.bmm.default, (a, b))
 
     elif t is aten.addmm.default:
@@ -168,7 +164,7 @@ def claim(node):
         beta = float(node.kwargs.get("beta", 1))
         alpha = float(node.kwargs.get("alpha", 1))
         kw = {"beta": beta, "alpha": alpha}
-        if _supported(_ADDMM, aten.addmm.default, (_fake(bias), _fake(a), _fake(b)), kw):
+        if _supported(aten.addmm.default, (_fake(bias), _fake(a), _fake(b)), kw):
             return (torch.ops.kuiperjit.addmm.default, (bias, a, b, beta, alpha))
 
     elif t is _EFFICIENT_SDPA or t is _CUDNN_SDPA:
@@ -178,7 +174,7 @@ def claim(node):
         scale = node.kwargs.get("scale")
         sargs = (_fake(q), _fake(k), _fake(v), _fake(bias),
                  compute_lse, 0.0, causal, False)
-        if _supported(_SDPA, t, sargs, {"scale": scale}):
+        if _supported(t, sargs, {"scale": scale}):
             fq = _fake(q)
             if scale is None and fq is not None:
                 scale = 1.0 / math.sqrt(int(fq.shape[-1]))

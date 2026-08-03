@@ -1,4 +1,4 @@
-// TensorCore GEMM used as the linear/matmul reference in bench_tc_kernels.py.
+// TensorCore GEMM used as the linear/matmul reference in bench_ops.ipynb.
 //
 // This started as the fp16xfp16->fp16 Kuiper TensorCore2D instantiation, but has
 // been reworked into a mixed-precision GEMM:
@@ -22,7 +22,7 @@
 // accumulators cost twice the registers of fp16 ones, so the per-warp tile is
 // sized to keep the accumulator register footprint in budget.
 #include <kuiper.h>
-#include "tc_kernels.h"
+#include "kernels.h"
 #include <mma.h>
 #include <cuda_pipeline.h>
 
@@ -158,14 +158,14 @@ void gemm_pipe_kernel(const half* __restrict__ gA,
 // back as the additive term (in-place GEMM). Requires M%128==0, N%128==0,
 // K%32==0.
 void gemm_pipe_launch(const half* A, const half* B, half* C,
-                      int M, int N, int K, float alpha, float beta) {
+                      int M, int N, int K, float alpha, float beta,
+                      cudaStream_t stream) {
     if (M == 0 || N == 0 || K == 0) return;
     KPR_GUARD(M % BM == 0);
     KPR_GUARD(N % BN == 0);
     KPR_GUARD(K % BK == 0);
     dim3 grid((M / BM) * (N / BN));
-    gemm_pipe_kernel<float><<<grid, THREADS>>>(
+    gemm_pipe_kernel<float><<<grid, THREADS, 0, stream>>>(
         A, B, C, M, N, K, alpha, beta);
     MUST(cudaGetLastError());
-    MUST(cudaDeviceSynchronize());
 }

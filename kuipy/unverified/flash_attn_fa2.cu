@@ -1,6 +1,6 @@
 // FlashAttention-2 style forward with bf16 tensor cores (WMMA 16x16x16, fp32
 // accumulate), a drop-in replacement for the cuDNN flash_fprop SDPA in the
-// infer_golden.py trace (F.scaled_dot_product_attention). See tc_kernels.h for
+// infer_golden.py trace (F.scaled_dot_product_attention). See kernels.h for
 // the operator shape.
 //
 // The two regimes of the trace are handled by two kernels, both FA2-style:
@@ -74,7 +74,7 @@
 // that itself contains -inf is a separate obligation -- the golden's causal
 // generation uses is_causal with no mask tensor, so the clean path matters.)
 // ---------------------------------------------------------------------------
-#include "tc_kernels.h"
+#include "kernels.h"
 #include <mma.h>
 #include <cuda_runtime.h>
 #include <cuda_pipeline.h>

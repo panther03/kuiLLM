@@ -1,5 +1,5 @@
 // Hand-written Kuiper TensorCore2D GEMM, benchmarked against the JIT-dispatched
-// kuiops GEMM in bench_tc_kernels.py. The body is derived from the
+// kuiops GEMM in bench_ops.ipynb. The body is derived from the
 // `128x128x32_16x16x16_8x4` instantiation extracted from the Kuiper
 // distribution ($KUIPER_HOME/dist/Klas_GEMM_TensorCore2D.{cu,h}), retyped to
 // bf16 in/out to match the rest of the benchmark; the
@@ -24,7 +24,7 @@
 // The caller passes B already laid out as (K, N) (the transposed F.linear
 // weight); when beta != 0 the current contents of C are the additive term.
 #include <kuiper.h>
-#include "tc_kernels.h"
+#include "kernels.h"
 
 // Accumulator type, decoupled from the bf16 in/out matrices.
 using acc_t = float;
@@ -177,32 +177,30 @@ Klas_GEMM_TensorCore2D_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4(uint32_t rows,
                                                               __nv_bfloat16 *gB,
                                                               __nv_bfloat16 *gC,
                                                               float alpha,
-                                                              float beta)
+                                                              float beta,
+                                                              cudaStream_t s)
 {
     KPR_GUARD(rows % 128U == 0U);
     KPR_GUARD(shared % 32U == 0U);
     KPR_GUARD(cols % 128U == 0U);
     uint32_t nblk = rows / 128U * (cols / 128U);
     KPR_ASSERT(nblk <= 2097152U);
-    cudaStream_t s = KPR_FRESH_STREAM();
     KPR_SHMEM_FITS(24576U);
     MUST(cudaFuncSetAttribute
          (__hoisted_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4_0,
           cudaFuncAttributeMaxDynamicSharedMemorySize, 24576U));
     KPR_KCALL(__hoisted_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4_0, nblk, THREADS,
               24576U, s, shared, cols, gA, gB, gC, alpha, beta);
-    MUST(cudaStreamSynchronize(s));
-    MUST(cudaStreamDestroy(s));
 }
 
 // C = alpha*(A @ B) + beta*C, fp32-accumulate tensor-core GEMM. When beta != 0
 // the current contents of C are read back as the additive term (in-place GEMM).
 void gemm_hacky_epilogue_launch(const __nv_bfloat16* A, const __nv_bfloat16* B,
                              __nv_bfloat16* C, int M, int N, int K,
-                             float alpha, float beta) {
+                             float alpha, float beta, cudaStream_t stream) {
     if (M == 0 || N == 0 || K == 0) return;
     Klas_GEMM_TensorCore2D_g_gemm_bf16_bf16_128x128x32_16x16x16_8x4(
         (uint32_t)M, (uint32_t)K, (uint32_t)N,
         const_cast<__nv_bfloat16*>(A), const_cast<__nv_bfloat16*>(B), C,
-        alpha, beta);
+        alpha, beta, stream);
 }

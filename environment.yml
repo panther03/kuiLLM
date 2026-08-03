@@ -27,3 +27,7 @@ dependencies:
       - pytest-xdist
       - jinja2
       - filelock
+      # bench_ops.ipynb: the benchmark driver tabulates into a DataFrame.
+      - pandas
+      - notebook
+      - ipykernel

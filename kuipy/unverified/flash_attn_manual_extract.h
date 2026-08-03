@@ -1,9 +1,10 @@
 
-#ifndef Kuiops_Sdpa_Flash_Inst_H
-#define Kuiops_Sdpa_Flash_Inst_H
+#ifndef FLASH_ATTN_MANUAL_EXTRACT_H
+#define FLASH_ATTN_MANUAL_EXTRACT_H
 
-#include <kuiper.h>
-#include <kuiops_compat.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <cstdint>
 
 void
 flash_attn_manual_extract_launch(uint32_t nblk,
@@ -26,5 +27,5 @@ flash_attn_manual_extract_launch(uint32_t nblk,
                                            bool causal,
                                            float scale, cudaStream_t s);
 
-#define Kuiops_Sdpa_Flash_Inst_H_DEFINED
-#endif                          /* Kuiops_Sdpa_Flash_Inst_H */
+#define FLASH_ATTN_MANUAL_EXTRACT_H_DEFINED
+#endif                          /* FLASH_ATTN_MANUAL_EXTRACT_H */

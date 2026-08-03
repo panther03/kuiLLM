@@ -9,198 +9,221 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
-#include "tc_kernels.h"
+#include <cuda_fp16.h>
+#include "kernels.h"
 #include "flash_attn_manual_extract.h"
 
-static inline const __nv_bfloat16* bf16_ptr(const torch::Tensor& t) {
-    return reinterpret_cast<const __nv_bfloat16*>(t.data_ptr());
+template <typename T>
+static inline const T* cptr(const torch::Tensor& t) {
+    return reinterpret_cast<const T*>(t.data_ptr());
 }
-static inline __nv_bfloat16* bf16_ptr_mut(torch::Tensor& t) {
-    return reinterpret_cast<__nv_bfloat16*>(t.data_ptr());
+template <typename T>
+static inline T* mptr(torch::Tensor& t) {
+    return reinterpret_cast<T*>(t.data_ptr());
 }
 
-torch::Tensor gemm_hacky_epilogue(torch::Tensor A, torch::Tensor B,
-                          c10::optional<torch::Tensor> C_in,
-                          double alpha, double beta) {
-    TORCH_CHECK(A.dtype() == torch::kBFloat16 && B.dtype() == torch::kBFloat16,
-                "gemm_hacky_epilogue expects bf16 A/B");
-    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A/B must be 2D");
-    TORCH_CHECK(A.size(1) == B.size(0), "A.size(1) must equal B.size(0)");
+// ---------------------------------------------------------------------------
+// GEMM: torch.addmm(input, mat1, mat2, *, beta, alpha) = beta*input + alpha*(mat1@mat2)
+// ---------------------------------------------------------------------------
 
-    auto Ac = A.contiguous();
-    auto Bc = B.contiguous();
-    const int64_t M = Ac.size(0);
-    const int64_t K = Ac.size(1);
-    const int64_t N = Bc.size(1);
-    TORCH_CHECK(M % 128 == 0 && N % 128 == 0 && K % 32 == 0,
-                "gemm_hacky_epilogue requires M%128==0, N%128==0, K%32==0");
+// The kernels accumulate into their output buffer in place, so the epilogue term
+// is supplied by seeding the output with `input`.
+static torch::Tensor gemm_out(const torch::Tensor& input, int64_t M, int64_t N,
+                              double beta, torch::ScalarType dtype) {
+    TORCH_CHECK(input.dtype() == dtype, "input dtype must match mat1/mat2");
+    TORCH_CHECK(input.dim() == 2 && input.size(0) == M && input.size(1) == N,
+                "input must be (M, N); broadcasting is not supported");
+    return beta != 0.0 ? input.contiguous().clone()
+                       : torch::empty({M, N}, input.options());
+}
 
-    torch::Tensor C;
-    if (beta != 0.0) {
-        TORCH_CHECK(C_in.has_value() && C_in->defined(),
-                    "beta != 0 requires a C tensor");
-        TORCH_CHECK(C_in->dtype() == torch::kBFloat16, "C must be bf16");
-        TORCH_CHECK(C_in->dim() == 2 && C_in->size(0) == M && C_in->size(1) == N,
-                    "C must be (M, N)");
-        C = C_in->contiguous().clone();
-    } else {
-        C = torch::empty({M, N}, Ac.options());
-    }
+static void gemm_check(const torch::Tensor& A, const torch::Tensor& B,
+                       torch::ScalarType dtype) {
+    TORCH_CHECK(A.dtype() == dtype && B.dtype() == dtype, "unsupported dtype");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "mat1/mat2 must be 2D");
+    TORCH_CHECK(A.size(1) == B.size(0), "mat1.size(1) must equal mat2.size(0)");
+    TORCH_CHECK(A.size(0) % 128 == 0 && B.size(1) % 128 == 0 && A.size(1) % 32 == 0,
+                "requires M%128==0, N%128==0, K%32==0");
+}
+
+static torch::Tensor gemm_hacky_epilogue(torch::Tensor input, torch::Tensor A,
+                                         torch::Tensor B, double beta, double alpha) {
+    gemm_check(A, B, torch::kBFloat16);
+    auto Ac = A.contiguous(), Bc = B.contiguous();
+    const int64_t M = Ac.size(0), K = Ac.size(1), N = Bc.size(1);
+    auto out = gemm_out(input, M, N, beta, torch::kBFloat16);
 
     at::cuda::CUDAGuard g(A.device());
-    gemm_hacky_epilogue_launch(bf16_ptr(Ac), bf16_ptr(Bc), bf16_ptr_mut(C),
-                            (int)M, (int)N, (int)K, (float)alpha, (float)beta);
+    gemm_hacky_epilogue_launch(cptr<__nv_bfloat16>(Ac), cptr<__nv_bfloat16>(Bc),
+                               mptr<__nv_bfloat16>(out), (int)M, (int)N, (int)K,
+                               (float)alpha, (float)beta,
+                               c10::cuda::getCurrentCUDAStream().stream());
     C10_CUDA_CHECK(cudaGetLastError());
-    return C;
+    return out;
 }
 
-torch::Tensor gemm_pipe(torch::Tensor A, torch::Tensor B, c10::optional<torch::Tensor> C_in, double alpha, double beta)  { /* TODO: IMPLEMENT ME. call gemm_pipe_launch */}
+static torch::Tensor gemm_pipe(torch::Tensor input, torch::Tensor A,
+                               torch::Tensor B, double beta, double alpha) {
+    gemm_check(A, B, torch::kFloat16);
+    auto Ac = A.contiguous(), Bc = B.contiguous();
+    const int64_t M = Ac.size(0), K = Ac.size(1), N = Bc.size(1);
+    auto out = gemm_out(input, M, N, beta, torch::kFloat16);
 
-static torch::Tensor flash_attn_fa1(torch::Tensor q, torch::Tensor k, torch::Tensor v,
-                               c10::optional<torch::Tensor> mask, double scale,
-                               bool causal, bool force_decode_kernel) {
+    at::cuda::CUDAGuard g(A.device());
+    gemm_pipe_launch(cptr<half>(Ac), cptr<half>(Bc), mptr<half>(out),
+                     (int)M, (int)N, (int)K, (float)alpha, (float)beta,
+                     c10::cuda::getCurrentCUDAStream().stream());
+    C10_CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// SDPA: F.scaled_dot_product_attention(query, key, value, attn_mask, dropout_p,
+//                                      is_causal, scale)
+// ---------------------------------------------------------------------------
+
+struct SdpaShape {
+    int64_t B, Hq, Hkv, Sq, Sk, D;
+    torch::Tensor q, k, v;
+    double scale;
+};
+
+static SdpaShape sdpa_shape(const torch::Tensor& q, const torch::Tensor& k,
+                            const torch::Tensor& v, double dropout_p,
+                            c10::optional<double> scale) {
     TORCH_CHECK(q.dtype() == torch::kBFloat16 && k.dtype() == torch::kBFloat16 &&
-                    v.dtype() == torch::kBFloat16, "flash_attn_fa1 expects bf16 q/k/v");
-    TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "q/k/v must be 4D");
+                    v.dtype() == torch::kBFloat16, "expects bf16 query/key/value");
+    TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4,
+                "query/key/value must be 4D");
+    TORCH_CHECK(dropout_p == 0.0, "dropout is not implemented");
+    SdpaShape s;
+    s.q = q.contiguous(); s.k = k.contiguous(); s.v = v.contiguous();
+    s.B = s.q.size(0); s.Hq = s.q.size(1); s.Sq = s.q.size(2); s.D = s.q.size(3);
+    s.Hkv = s.k.size(1); s.Sk = s.k.size(2);
+    TORCH_CHECK(s.Hkv > 0 && s.Hq % s.Hkv == 0, "Hq must be a multiple of Hkv (GQA)");
+    TORCH_CHECK(s.k.size(3) == s.D && s.v.size(3) == s.D,
+                "key/value head_dim must match query");
+    s.scale = scale.has_value() ? *scale : 1.0 / std::sqrt((double)s.D);
+    return s;
+}
 
-    auto qc = q.contiguous(), kc = k.contiguous(), vc = v.contiguous();
-    const int64_t B = qc.size(0), Hq = qc.size(1), Sq = qc.size(2), D = qc.size(3);
-    const int64_t Hkv = kc.size(1), Sk = kc.size(2);
-    TORCH_CHECK(D <= 64 && D % 16 == 0, "flash_attn_fa1 supports head_dim <= 64, multiple of 16");
-    TORCH_CHECK(Hkv > 0 && Hq % Hkv == 0, "Hq must be a multiple of Hkv (GQA)");
-    TORCH_CHECK(kc.size(3) == D && vc.size(3) == D, "k/v head_dim must match q");
+template <typename Launch>
+static torch::Tensor flash_attn_fa(Launch launch, torch::Tensor q, torch::Tensor k,
+                                   torch::Tensor v,
+                                   c10::optional<torch::Tensor> attn_mask,
+                                   double dropout_p, bool is_causal,
+                                   c10::optional<double> scale,
+                                   bool force_decode_kernel) {
+    auto s = sdpa_shape(q, k, v, dropout_p, scale);
+    TORCH_CHECK(s.D <= 64 && s.D % 16 == 0, "supports head_dim <= 64, multiple of 16");
+    auto out = torch::empty({s.B, s.Hq, s.Sq, s.D}, s.q.options());
 
-    auto out = torch::empty({B, Hq, Sq, D}, qc.options());
-
-    const __nv_bfloat16* mptr = nullptr;
+    const __nv_bfloat16* mask_ptr = nullptr;
     int64_t ms_b = 0, ms_h = 0, ms_q = 0, ms_k = 0;
     torch::Tensor mc;
-    if (mask.has_value() && mask->defined()) {
-        mc = mask->contiguous();
-        TORCH_CHECK(mc.dtype() == torch::kBFloat16, "mask must be bf16");
-        TORCH_CHECK(mc.dim() == 4, "mask must be 4D (broadcast over B,Hq,Sq,Sk)");
+    if (attn_mask.has_value() && attn_mask->defined()) {
+        mc = attn_mask->contiguous();
+        TORCH_CHECK(mc.dtype() == torch::kBFloat16, "attn_mask must be bf16");
+        TORCH_CHECK(mc.dim() == 4, "attn_mask must be 4D (broadcast over B,Hq,Sq,Sk)");
         auto bc = [&](int d, int64_t want) -> int64_t {
-            TORCH_CHECK(mc.size(d) == want || mc.size(d) == 1, "mask dim not broadcastable");
+            TORCH_CHECK(mc.size(d) == want || mc.size(d) == 1,
+                        "attn_mask dim not broadcastable");
             return mc.size(d) == 1 ? 0 : mc.stride(d);
         };
-        ms_b = bc(0, B); ms_h = bc(1, Hq); ms_q = bc(2, Sq); ms_k = bc(3, Sk);
-        mptr = bf16_ptr(mc);
+        ms_b = bc(0, s.B); ms_h = bc(1, s.Hq); ms_q = bc(2, s.Sq); ms_k = bc(3, s.Sk);
+        mask_ptr = cptr<__nv_bfloat16>(mc);
     }
 
     at::cuda::CUDAGuard g(q.device());
-    auto stream = c10::cuda::getCurrentCUDAStream().stream();
-    flash_attn_fa1_launch(bf16_ptr(qc), bf16_ptr(kc), bf16_ptr(vc), mptr,
-           bf16_ptr_mut(out), (int)B, (int)Hq, (int)Hkv, (int)Sq,
-           (int)Sk, (int)D, (float)scale, causal,
-           ms_b, ms_h, ms_q, ms_k, force_decode_kernel, stream);
+    launch(cptr<__nv_bfloat16>(s.q), cptr<__nv_bfloat16>(s.k), cptr<__nv_bfloat16>(s.v),
+           mask_ptr, mptr<__nv_bfloat16>(out), (int)s.B, (int)s.Hq, (int)s.Hkv,
+           (int)s.Sq, (int)s.Sk, (int)s.D, (float)s.scale, is_causal,
+           ms_b, ms_h, ms_q, ms_k, force_decode_kernel,
+           c10::cuda::getCurrentCUDAStream().stream());
     C10_CUDA_CHECK(cudaGetLastError());
     return out;
+}
+
+static torch::Tensor flash_attn_fa1(torch::Tensor q, torch::Tensor k, torch::Tensor v,
+                                    c10::optional<torch::Tensor> attn_mask,
+                                    double dropout_p, bool is_causal,
+                                    c10::optional<double> scale,
+                                    bool force_decode_kernel) {
+    return flash_attn_fa(flash_attn_fa1_launch, q, k, v, attn_mask, dropout_p,
+                         is_causal, scale, force_decode_kernel);
 }
 
 static torch::Tensor flash_attn_fa2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
-                               c10::optional<torch::Tensor> mask, double scale,
-                               bool causal, bool force_decode_kernel) {
-    TORCH_CHECK(q.dtype() == torch::kBFloat16 && k.dtype() == torch::kBFloat16 &&
-                    v.dtype() == torch::kBFloat16, "flash_attn_fa1 expects bf16 q/k/v");
-    TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "q/k/v must be 4D");
-
-    auto qc = q.contiguous(), kc = k.contiguous(), vc = v.contiguous();
-    const int64_t B = qc.size(0), Hq = qc.size(1), Sq = qc.size(2), D = qc.size(3);
-    const int64_t Hkv = kc.size(1), Sk = kc.size(2);
-    TORCH_CHECK(D <= 64 && D % 16 == 0, "flash_attn_fa1 supports head_dim <= 64, multiple of 16");
-    TORCH_CHECK(Hkv > 0 && Hq % Hkv == 0, "Hq must be a multiple of Hkv (GQA)");
-    TORCH_CHECK(kc.size(3) == D && vc.size(3) == D, "k/v head_dim must match q");
-
-    auto out = torch::empty({B, Hq, Sq, D}, qc.options());
-
-    const __nv_bfloat16* mptr = nullptr;
-    int64_t ms_b = 0, ms_h = 0, ms_q = 0, ms_k = 0;
-    torch::Tensor mc;
-    if (mask.has_value() && mask->defined()) {
-        mc = mask->contiguous();
-        TORCH_CHECK(mc.dtype() == torch::kBFloat16, "mask must be bf16");
-        TORCH_CHECK(mc.dim() == 4, "mask must be 4D (broadcast over B,Hq,Sq,Sk)");
-        auto bc = [&](int d, int64_t want) -> int64_t {
-            TORCH_CHECK(mc.size(d) == want || mc.size(d) == 1, "mask dim not broadcastable");
-            return mc.size(d) == 1 ? 0 : mc.stride(d);
-        };
-        ms_b = bc(0, B); ms_h = bc(1, Hq); ms_q = bc(2, Sq); ms_k = bc(3, Sk);
-        mptr = bf16_ptr(mc);
-    }
-
-    at::cuda::CUDAGuard g(q.device());
-    auto stream = c10::cuda::getCurrentCUDAStream().stream();
-    flash_attn_fa2_launch(bf16_ptr(qc), bf16_ptr(kc), bf16_ptr(vc), mptr,
-           bf16_ptr_mut(out), (int)B, (int)Hq, (int)Hkv, (int)Sq,
-           (int)Sk, (int)D, (float)scale, causal,
-           ms_b, ms_h, ms_q, ms_k, force_decode_kernel, stream);
-    C10_CUDA_CHECK(cudaGetLastError());
-    return out;
+                                    c10::optional<torch::Tensor> attn_mask,
+                                    double dropout_p, bool is_causal,
+                                    c10::optional<double> scale,
+                                    bool force_decode_kernel) {
+    return flash_attn_fa(flash_attn_fa2_launch, q, k, v, attn_mask, dropout_p,
+                         is_causal, scale, force_decode_kernel);
 }
 
-torch::Tensor flash_attn_manual_extract(torch::Tensor q, torch::Tensor k, torch::Tensor v,
-                          torch::Tensor mask, double scale, bool causal,
-                          int64_t nwarps) {
-    TORCH_CHECK(q.dtype() == torch::kBFloat16 && k.dtype() == torch::kBFloat16 &&
-                    v.dtype() == torch::kBFloat16 && mask.dtype() == torch::kBFloat16,
-                "kuiper sdpa expects bf16 q/k/v/mask");
-    TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4 && mask.dim() == 4,
-                "q/k/v/mask must be 4D");
+// The extracted kernel reads the mask through a Kuiper tlayout, which is an
+// injection, so the mask must be dense (B,Hq,Sq,Sk) rather than broadcast.
+static torch::Tensor flash_attn_manual_extract(torch::Tensor q, torch::Tensor k,
+                                               torch::Tensor v, torch::Tensor attn_mask,
+                                               double dropout_p, bool is_causal,
+                                               c10::optional<double> scale,
+                                               int64_t nwarps) {
+    auto s = sdpa_shape(q, k, v, dropout_p, scale);
+    TORCH_CHECK(s.D % 16 == 0 && s.D > 0, "head_dim must be a positive multiple of 16");
+    TORCH_CHECK(s.Sq <= s.Sk, "Sq must be <= Sk");
+    auto mc = attn_mask.contiguous();
+    TORCH_CHECK(mc.dtype() == torch::kBFloat16, "attn_mask must be bf16");
+    TORCH_CHECK(mc.dim() == 4 && mc.size(0) == s.B && mc.size(1) == s.Hq &&
+                mc.size(2) == s.Sq && mc.size(3) == s.Sk,
+                "attn_mask must be dense (B,Hq,Sq,Sk)");
 
-    auto qc = q.contiguous(), kc = k.contiguous(), vc = v.contiguous(),
-         mc = mask.contiguous();
-    const int64_t B = qc.size(0), Hq = qc.size(1), Sq = qc.size(2), D = qc.size(3);
-    const int64_t Hkv = kc.size(1), Sk = kc.size(2);
-    TORCH_CHECK(D % 16 == 0 && D > 0, "head_dim must be a positive multiple of 16");
-    TORCH_CHECK(Hkv > 0 && Hq % Hkv == 0, "Hq must be a multiple of Hkv (GQA)");
-    TORCH_CHECK(kc.size(3) == D && vc.size(3) == D, "k/v head_dim must match q");
-    TORCH_CHECK(mc.size(0) == B && mc.size(1) == Hq && mc.size(2) == Sq &&
-                mc.size(3) == Sk, "mask must be dense (B,Hq,Sq,Sk)");
-    TORCH_CHECK(Sq <= Sk, "Sq must be <= Sk");
-
-    const int64_t group = Hq / Hkv;
-    const int64_t rows = group * Sq;
+    const int64_t group = s.Hq / s.Hkv;
+    const int64_t rows = group * s.Sq;
     const int64_t tiles = (rows + 15) / 16;
-    const int64_t nblk = B * Hkv * tiles;
+    const int64_t nblk = s.B * s.Hkv * tiles;
 
-    auto out = torch::empty({B, Hq, Sq, D}, qc.options());
+    auto out = torch::empty({s.B, s.Hq, s.Sq, s.D}, s.q.options());
 
     at::cuda::CUDAGuard g(q.device());
-    auto stream = c10::cuda::getCurrentCUDAStream().stream();
     flash_attn_manual_extract_launch(
-        (uint32_t)nblk, (uint32_t)nwarps, (uint32_t)(nwarps * 32), (uint32_t)B,
-        (uint32_t)Hq, (uint32_t)Hkv, (uint32_t)group, (uint32_t)Sq,
-        (uint32_t)rows, (uint32_t)tiles, (uint32_t)Sk, (uint32_t)D,
-        const_cast<__nv_bfloat16*>(bf16_ptr(qc)),
-        const_cast<__nv_bfloat16*>(bf16_ptr(kc)),
-        const_cast<__nv_bfloat16*>(bf16_ptr(vc)),
-        const_cast<__nv_bfloat16*>(bf16_ptr(mc)),
-        bf16_ptr_mut(out), causal, (float)scale, stream);
+        (uint32_t)nblk, (uint32_t)nwarps, (uint32_t)(nwarps * 32), (uint32_t)s.B,
+        (uint32_t)s.Hq, (uint32_t)s.Hkv, (uint32_t)group, (uint32_t)s.Sq,
+        (uint32_t)rows, (uint32_t)tiles, (uint32_t)s.Sk, (uint32_t)s.D,
+        const_cast<__nv_bfloat16*>(cptr<__nv_bfloat16>(s.q)),
+        const_cast<__nv_bfloat16*>(cptr<__nv_bfloat16>(s.k)),
+        const_cast<__nv_bfloat16*>(cptr<__nv_bfloat16>(s.v)),
+        const_cast<__nv_bfloat16*>(cptr<__nv_bfloat16>(mc)),
+        mptr<__nv_bfloat16>(out), is_causal, (float)s.scale,
+        c10::cuda::getCurrentCUDAStream().stream());
     C10_CUDA_CHECK(cudaGetLastError());
     return out;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("gemm_hacky_epilogue", &gemm_hacky_epilogue,
-          "Extracted instance of Kuiper TensorCore2D with hacked on epilogue. "
-          "D = alpha*(A@B) + beta*C",
-          py::arg("A"), py::arg("B"), py::arg("C") = c10::nullopt,
-          py::arg("alpha") = 1.0, py::arg("beta") = 0.0);
-    m.def("gemm_pipe", &gemm_hacky_epilogue,
-          "Optimized GEMM with software pipelining."
-          "D = alpha*(A@B) + beta*C",
-          py::arg("A"), py::arg("B"), py::arg("C") = c10::nullopt,
-          py::arg("alpha") = 1.0, py::arg("beta") = 0.0);
-    m.def("flash_attn_fa1", &flash_attn_fa1, 
+          "Extracted instance of Kuiper TensorCore2D with a hacked-on epilogue (bf16).",
+          py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+          py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
+    m.def("gemm_pipe", &gemm_pipe,
+          "GEMM with software pipelining (fp16 in/out, fp32 accumulate).",
+          py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+          py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
+    m.def("flash_attn_fa1", &flash_attn_fa1,
           "semi-fast FlashAttention using tensor cores.",
-          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = c10::nullopt,
-          py::arg("scale"), py::arg("causal"), py::arg("force_decode_kernel") = false);
-    m.def("flash_attn_fa2", &flash_attn_fa1, 
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          py::arg("attn_mask") = c10::nullopt, py::arg("dropout_p") = 0.0,
+          py::arg("is_causal") = false, py::arg("scale") = c10::nullopt,
+          py::arg("force_decode_kernel") = false);
+    m.def("flash_attn_fa2", &flash_attn_fa2,
           "FlashAttention2-like impl using software pipelining, register caching, etc.",
-          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask") = c10::nullopt,
-          py::arg("scale"), py::arg("causal"), py::arg("force_decode_kernel") = false);
+          py::arg("query"), py::arg("key"), py::arg("value"),
+          py::arg("attn_mask") = c10::nullopt, py::arg("dropout_p") = 0.0,
+          py::arg("is_causal") = false, py::arg("scale") = c10::nullopt,
+          py::arg("force_decode_kernel") = false);
     m.def("flash_attn_manual_extract", &flash_attn_manual_extract,
           "Extracted instance of Kuiops.Sdpa.Flash.",
-          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("mask"),
-          py::arg("scale"), py::arg("causal"), py::arg("nwarps") = 4);
+          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("attn_mask"),
+          py::arg("dropout_p") = 0.0, py::arg("is_causal") = false,
+          py::arg("scale") = c10::nullopt, py::arg("nwarps") = 4);
 }

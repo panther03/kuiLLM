@@ -13,6 +13,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import kuipy
 from kuipy import kuiops
 
 aten = torch.ops.aten
@@ -29,13 +30,6 @@ def _need_tensor_cores(dtype):
     minimum = (8, 0) if dtype == torch.bfloat16 else (7, 0)
     if torch.cuda.get_device_capability() < minimum:
         pytest.skip(f"{dtype} tensor cores require sm_{minimum[0]}{minimum[1]}+")
-
-
-def _run(impl, func, args, kwargs=None):
-    kwargs = kwargs or {}
-    spec = impl.supported(func, args, kwargs)
-    assert spec is not None, "expected a supported spec"
-    return impl.run(spec, args, kwargs)
 
 
 def _assert_close(out, ref, dtype):
@@ -138,12 +132,11 @@ def test_mm_backend_selection():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_bmm(dtype):
     _need_cuda()
-    impl = kuiops.BmmImpl()
     torch.manual_seed(0)
     # BlockTiling2D (now the batched GEMM) needs tile-divisible dims.
     A = torch.randn(5, 64, 32, device="cuda", dtype=dtype)
     B = torch.randn(5, 32, 64, device="cuda", dtype=dtype)
-    out = _run(impl, aten.bmm.default, (A, B))
+    out = kuipy.run(aten.bmm.default)(A, B)
     ref = torch.bmm(A, B)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -175,14 +168,13 @@ def test_bmm_unsupported():
 @pytest.mark.skip(reason="broadcasting currently disabled")
 def test_addmm_1d_bias(dtype, alpha, beta):
     _need_cuda()
-    impl = kuiops.AddmmImpl()
     torch.manual_seed(0)
     M, K, N = 64, 64, 64
     A = torch.randn(M, K, device="cuda", dtype=dtype)
     B = torch.randn(K, N, device="cuda", dtype=dtype)
     bias = torch.randn(N, device="cuda", dtype=dtype)  # broadcast 1D bias
     kw = dict(alpha=alpha, beta=beta)
-    out = _run(impl, aten.addmm.default, (bias, A, B), kw)
+    out = kuipy.run(aten.addmm.default)(bias, A, B, **kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -262,11 +254,10 @@ def test_addmm_rejects_broadcast_bias():
 @pytest.mark.skip(reason="RowSoftmax extraction takes ~6min per instantiation")
 def test_softmax(dtype, shape):
     _need_cuda()
-    impl = kuiops.SoftmaxImpl()
     torch.manual_seed(0)
     X = torch.randn(*shape, device="cuda", dtype=dtype)
     dim = X.dim() - 1
-    out = _run(impl, aten._softmax.default, (X, dim, False))
+    out = kuipy.run(aten._softmax.default)(X, dim, False)
     ref = torch.softmax(X, dim=dim)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -297,13 +288,12 @@ def test_softmax_non_last_dim_unsupported():
 ])
 def test_hreduce_poly(func, dtype, kwargs):
     _need_cuda()
-    impl = kuiops.HReducePolyImpl()
     X = torch.tensor(
         [[[1, 2, 0, 3], [2, 1, 1, 2], [1, 1, 1, 1]],
          [[3, 1, 2, 1], [0, 2, 1, 3], [2, 2, 1, 1]]],
         device="cuda", dtype=dtype)
     args = (X, -1, False)
-    out = _run(impl, func, args, kwargs)
+    out = kuipy.run(func)(*args, **kwargs)
     ref = func(*args, **kwargs)
     assert out.dtype == ref.dtype
     assert out.shape == ref.shape
@@ -312,11 +302,9 @@ def test_hreduce_poly(func, dtype, kwargs):
 
 def test_hreduce_poly_dtype_conversion():
     _need_cuda()
-    impl = kuiops.HReducePolyImpl()
     X = torch.arange(8, device="cuda", dtype=torch.int8).reshape(2, 4)
     args = (X, [1], False)
-    out = _run(
-        impl, aten.sum.dim_IntList, args, {"dtype": torch.uint16})
+    out = kuipy.run(aten.sum.dim_IntList)(*args, dtype=torch.uint16)
     ref = torch.tensor([6, 22], device="cuda", dtype=torch.uint16)
     assert torch.equal(out, ref)
     assert out.dtype == torch.uint16
@@ -374,7 +362,6 @@ def _sdpa_ref(Q, K, V, bias, scale, causal):
 @pytest.mark.parametrize("causal", [False, True])
 def test_sdpa(dtype, causal):
     _need_tensor_cores(dtype)
-    impl = kuiops.SdpaImpl()
     torch.manual_seed(0)
     b, hq, hkv, sq, sk, d = 2, 4, 2, 3, 24, 32
     Q = torch.randn(b, hq, sq, d, device="cuda", dtype=dtype)
@@ -385,7 +372,7 @@ def test_sdpa(dtype, causal):
     scale = 0.3
     func = aten._scaled_dot_product_efficient_attention.default
     args = (Q, K, V, bias, False, 0.0, causal)
-    out, lse, seed, off = _run(impl, func, args, {"scale": scale})
+    out, lse, seed, off = kuipy.run(func)(*args, scale=scale)
     assert out.shape == (b, hq, sq, d) and out.dtype == dtype
     assert lse.shape == (b, hq, 0) and lse.dtype == torch.float32
     assert seed.shape == off.shape == ()
@@ -437,13 +424,12 @@ def test_sdpa_unsupported():
 @pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
 def test_gather(dtype, shape, dim):
     _need_cuda()
-    impl = kuiops.GatherImpl()
     torch.manual_seed(0)
     Inp = torch.randn(*shape, device="cuda", dtype=dtype)
     idx_shape = list(shape)
     idx_shape[dim] = max(1, shape[dim] - 1)  # index pointwise <= input
     Idx = torch.randint(0, shape[dim], idx_shape, device="cuda", dtype=torch.int64)
-    out = _run(impl, aten.gather.default, (Inp, dim, Idx))
+    out = kuipy.run(aten.gather.default)(Inp, dim, Idx)
     ref = torch.gather(Inp, dim, Idx)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -472,7 +458,6 @@ def test_gather_unsupported():
 @pytest.mark.parametrize("shape,dim", [((8, 5), 1), ((8, 5), 0), ((4, 3, 6), 2)])
 def test_scatter(dtype, shape, dim):
     _need_cuda()
-    impl = kuiops.ScatterImpl()
     torch.manual_seed(0)
     Self = torch.randn(*shape, device="cuda", dtype=dtype)
     Src = torch.randn(*shape, device="cuda", dtype=dtype)
@@ -486,7 +471,7 @@ def test_scatter(dtype, shape, dim):
                         for _ in range(Self.numel() // n)])
     Idx = perm.reshape([s for d, s in enumerate(shape) if d != dim] + [n])
     Idx = Idx.movedim(-1, dim).contiguous()
-    out = _run(impl, aten.scatter.src, (Self, dim, Idx, Src))
+    out = kuipy.run(aten.scatter.src)(Self, dim, Idx, Src)
     ref = Self.clone().scatter_(dim, Idx, Src)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -518,14 +503,13 @@ def test_scatter_unsupported():
 @pytest.mark.parametrize("dim", [0, 1, 2])
 def test_cat(dtype, dim):
     _need_cuda()
-    impl = kuiops.CatImpl()
     torch.manual_seed(0)
     a_shape = [4, 3, 6]
     b_shape = list(a_shape)
     b_shape[dim] = a_shape[dim] + 2  # differ only along `dim`
     A = torch.randn(*a_shape, device="cuda", dtype=dtype)
     B = torch.randn(*b_shape, device="cuda", dtype=dtype)
-    out = _run(impl, aten.cat.default, ([A, B], dim))
+    out = kuipy.run(aten.cat.default)([A, B], dim)
     ref = torch.cat([A, B], dim=dim)
     assert out.shape == ref.shape
     _assert_close(out, ref, dtype)
@@ -556,11 +540,10 @@ def test_cat_unsupported():
 ])
 def test_elem_binary(dtype, func, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(3, 5, 7, device="cuda", dtype=dtype)
     B = torch.randn(3, 5, 7, device="cuda", dtype=dtype).abs() + 0.5
-    out = _run(impl, func, (A, B))
+    out = kuipy.run(func)(A, B)
     _assert_close(out, ref(A, B), dtype)
 
 
@@ -570,22 +553,20 @@ def test_elem_binary(dtype, func, ref):
 ])
 def test_elem_scalar(func, c, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(4, 9, device="cuda", dtype=torch.float32)
-    out = _run(impl, func, (A, c))
+    out = kuipy.run(func)(A, c)
     _assert_close(out, ref(A), torch.float32)
 
 
 def test_elem_bitwise():
     _need_cuda()
-    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
     B = torch.randint(0, 2, (2, 6, 4), device="cuda", dtype=torch.bool)
-    assert torch.equal(_run(impl, aten.bitwise_not.default, (A,)), ~A)
-    assert torch.equal(_run(impl, aten.bitwise_and.Tensor, (A, B)), A & B)
-    assert torch.equal(_run(impl, aten.bitwise_or.Tensor, (A, B)), A | B)
+    assert torch.equal(kuipy.run(aten.bitwise_not.default)(A), ~A)
+    assert torch.equal(kuipy.run(aten.bitwise_and.Tensor)(A, B), A & B)
+    assert torch.equal(kuipy.run(aten.bitwise_or.Tensor)(A, B), A | B)
 
 
 @pytest.mark.parametrize("func,c,ref", [
@@ -595,10 +576,9 @@ def test_elem_bitwise():
 ])
 def test_elem_compare_scalar(func, c, ref):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     A = torch.randn(5, 8, device="cuda", dtype=torch.float32)
-    out = _run(impl, func, (A, c))
+    out = kuipy.run(func)(A, c)
     assert out.dtype == torch.bool
     assert torch.equal(out, ref(A))
 
@@ -606,12 +586,11 @@ def test_elem_compare_scalar(func, c, ref):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_elem_where(dtype):
     _need_cuda()
-    impl = kuiops.ElementwiseImpl()
     torch.manual_seed(0)
     C = torch.randint(0, 2, (3, 4, 5), device="cuda", dtype=torch.bool)
     X = torch.randn(3, 4, 5, device="cuda", dtype=dtype)
     Y = torch.randn(3, 4, 5, device="cuda", dtype=dtype)
-    out = _run(impl, aten.where.self, (C, X, Y))
+    out = kuipy.run(aten.where.self)(C, X, Y)
     _assert_close(out, torch.where(C, X, Y), dtype)
 
 

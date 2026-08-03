@@ -8,9 +8,11 @@ void gemm_hacky_epilogue_launch(
     const __nv_bfloat16* B,
     __nv_bfloat16* C,
     int M, int N, int K,
-    float alpha, float beta);
+    float alpha, float beta,
+    cudaStream_t stream);
 
-void gemm_pipe_launch(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta);
+void gemm_pipe_launch(const half* A, const half* B, half* C, int M, int N, int K,
+                      float alpha, float beta, cudaStream_t stream);
 
 void flash_attn_fa1_launch(
     const __nv_bfloat16* q,

@@ -1,6 +1,6 @@
 // FlashAttention forward with bf16 tensor cores, drop-in for the cuDNN
-// flash_fprop SDPA in the trace (F.scaled_dot_product_attention). See
-// tc_kernels.h for the operator shape.
+// flash_fprop SDPA in the trace (F.scaled_dot_product_attention). See kernels.h for
+// the operator shape.
 //
 // One block owns a 16-row query tile for a single (batch, KV head) and holds
 // NWARPS warps that split the KEY dimension. Crucially the 16 rows batch the
@@ -58,7 +58,7 @@
 // causal generation uses is_causal with no mask tensor, so the clean path is
 // the one that matters.)
 // ---------------------------------------------------------------------------
-#include "tc_kernels.h"
+#include "kernels.h"
 #include <mma.h>
 #include <cuda_runtime.h>
 #include <math.h>

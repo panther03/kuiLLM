@@ -30,6 +30,13 @@ Organization:
   - `kuipy/kuiops.py` holds one `*Impl` class per operator family (subclasses of
     `_Family`). `supported()` returns `None` if no kernel parameterization fits,
     else a spec; `run()` instantiates templates, compiles via `_mod`, and invokes.
+  - `kuipy/registry.py` maps each aten op to its family; `kuipy.run(op, **kwargs)`
+    returns a drop-in replacement for `op` that always goes through the Kuiper
+    kernel (raising instead of falling back), which is what tests and benchmarks use.
+  - `kuipy/unverified/` holds unverified CUDA kernels used as benchmarking
+    references (see its docstring for conventions).
+  - `kuipy/benchmarking.py` is the generic benchmark driver; the benchmarks
+    themselves live in `bench_ops.ipynb` at the repo root.
 - `kuiops/`: Where the supporting F* and CUDA files for each operator lives. Each
    operator lives in `kuiops/<op>` and gets a `Kuiops.<Op>.Inst.fst.j2` (F*
    instantiation) and `wrapper_<op>.cu.j2` (Torch-tensor glue). Support F* code
@@ -40,6 +47,7 @@ Organization:
 - `etc/`: Experiments and miscellaneous support files.
 - `tests/`: Unit tests for kuipy.
 - `infer.py`: Where the main Qwen2.5 integration test lives.
+- `bench_ops.ipynb`: Kernel benchmarks (verified + unverified) against stock PyTorch.
 
 You can expect the upstream kuiper source to live at $KUIPER_HOME. You can use this for searching for lemmas
 and the kernel sources.

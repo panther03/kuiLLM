@@ -8,6 +8,8 @@ untouched.
 
 Public surface:
   * ``enable()`` / ``disable()`` / ``is_enabled()`` — install/remove the backend.
+  * ``run(op, **kwargs)`` — a drop-in replacement for an ATen op that always
+    goes through the Kuiper kernel (no fallback), for tests and benchmarks.
   * ``register_fusion_rule(fn)`` — register a custom post-grad graph fusion rule.
   * ``batch_capture()`` — warm-up context that extracts every matched kernel and
     builds them in one combined compilation.
@@ -24,6 +26,14 @@ def is_available() -> bool:
     if C.KUIPER_INST is None:
         return False
     return (C.KUIPER_INST / "bin" / "fstar.exe").exists()
+
+
+def run(op, **kwargs):
+    """Return a callable behaving like ``op`` but backed by its Kuiper kernel.
+
+    See ``kuipy.registry.run``."""
+    from .registry import run as _run
+    return _run(op, **kwargs)
 
 
 # ---------------------------------------------------------------------------

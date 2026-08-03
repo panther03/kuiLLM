@@ -1,5 +1,7 @@
 
-#include "Kuiops_Sdpa_Flash_Inst.h"
+#include <kuiper.h>
+#include <kuiops_compat.h>
+#include "flash_attn_manual_extract.h"
 
 __device__ static uint32_t szlt16(uint32_t i)
 {
