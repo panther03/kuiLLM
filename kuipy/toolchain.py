@@ -53,7 +53,7 @@ def _ensure_built():
         # -j: verify.mk's per-module CHECK rules are dependency-ordered, so the
         # independent ones verify in parallel (~5min -> ~1m45 on a 128-core box).
         _run(["make", "-C", str(C._REPO_ROOT), "verify-kuiops",
-              f"-j{C.SEED_JOBS}"], "repo-build")
+              f"-j{C.SEED_JOBS}"], "ADMIT=1", "repo-build")
     finally:
         lock.release()
     C.ensure_dirs()

@@ -349,8 +349,9 @@ class ElementwiseImpl(_Family):
 # Three Kuiper GEMM backends, all row-major:
 #   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at
 #            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one).
-#   tc2d     TensorCore2D, accumulates in `acc` and writes `acc` in place.
-#   tc2d_to  TensorCore2D.To, accumulates in `acc` and casts to `out`.
+#   tc2d     TensorCore2D, accumulates in `acc` and combines into `out` in place.
+#   tc2d_to  TensorCore2D.To, accumulates in `acc` and combines into a separate
+#            `out` buffer.
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
@@ -370,6 +371,8 @@ _TC_ACC_DTYPES = {
     torch.float16: (torch.float16, torch.float32),
     torch.bfloat16: (torch.float32,),
 }
+
+_TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
 _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "bt2d": "Bt2D"}
 
@@ -466,8 +469,7 @@ def _backend_supports(backend, in_dtype, acc_dtype, out_dtype, device):
             or acc_dtype not in _TC_ACC_DTYPES[in_dtype]):
         return False
     if backend == "tc2d":
-        # TensorCore2D writes the accumulator itself; no cast on the way out.
-        return out_dtype == acc_dtype
+        return out_dtype in _TC_FRAG_ACC_DTYPES
     return out_dtype in _VEC_CPY_DTYPES
 
 

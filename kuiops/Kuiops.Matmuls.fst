@@ -250,8 +250,9 @@ fn tc2d_to_async
 #push-options "--split_queries always"
 inline_for_extraction noextract
 fn tc2d_async
-  (et_ab et_c : Type0)
+  (et_ab et_acc et_c : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
+  {| scalar et_acc, real_like et_acc |}
   {| scalar et_c, real_like et_c |}
   (bm bn bk : szp)
   (#_ : squash (chunk et_ab /?+ bk))
@@ -268,12 +269,12 @@ fn tc2d_async
   (#_ : squash (SZ.fits (wn * tn)))
   (#_ : squash (valid_frag_et_dims et_ab FragA tm tn tk))
   (#_ : squash (valid_frag_et_dims et_ab FragB tm tn tk))
-  (#_ : squash (valid_frag_et_dims et_c FragAcc tm tn tk))
-  (#_ : squash (valid_frag_et_comb et_ab et_c))
+  (#_ : squash (valid_frag_et_dims et_acc FragAcc tm tn tk))
+  (#_ : squash (valid_frag_et_comb et_ab et_acc))
   (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
   (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
   (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
-  (comb : et_c -> et_c -> et_c)
+  (comb : et_c -> et_acc -> et_c)
   (comb_r : binop real { approx2 comb comb_r })
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
