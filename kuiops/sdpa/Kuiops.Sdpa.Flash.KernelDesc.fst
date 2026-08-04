@@ -5,6 +5,7 @@ module Kuiops.Sdpa.Flash.KernelDesc
 
 #lang-pulse
 
+// TODO: BAD!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #set-options "--z3rlimit 60"
 
 open Kuiper

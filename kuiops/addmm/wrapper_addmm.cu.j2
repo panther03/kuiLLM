@@ -15,7 +15,11 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
     auto Bc = B.contiguous();
+{% if backend == "tc2d" %}
     auto Cout = kuiops::clone_in(C);
+{% else %}
+    auto Cout = torch::empty({M, N}, C.options());
+{% endif %}
 
     at::cuda::CUDAGuard g(A.device());
 
@@ -26,7 +30,8 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
 {% if backend == "tc2d_to" %}
-        // C and D alias; the kernel reads C before writing the result to D.
+        reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),
+{% else %}
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
 {% endif %}
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
