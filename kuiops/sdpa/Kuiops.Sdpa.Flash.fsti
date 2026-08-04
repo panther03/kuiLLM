@@ -8,12 +8,11 @@ open Kuiper.Tensor
 open Kuiper.Tensor.Layout
 open Kuiper.TensorCore
 open Pulse.Lib.Pledge
-open Kuiops.Sdpa.Flash.KfSub
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
-module FD = Kuiops.Sdpa.Flash.KernelDesc
 
 inline_for_extraction noextract
 fn sdpa_flash_async
@@ -24,7 +23,7 @@ fn sdpa_flash_async
   {| FC.float_cast et_acc et_ab |}
   (nblk : szp { SZ.v nblk <= max_blocks })
   (nw nthr : szp {
-    SZ.v nthr == FD.block_threads nw /\
+    SZ.v nthr == block_threads nw /\
     SZ.v nthr <= max_threads })
   (b hq hkv group sq rows tiles sk : szp {
     SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\

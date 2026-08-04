@@ -1,12 +1,10 @@
-// TODO: this shoud have more of the actual kernel_desc? move from Kuiops.Sdpa.Flash
-// agent forgot to put setup teardown etc. here
-
 module Kuiops.Sdpa.Flash.KernelDesc
+
+(* The [kernel_desc] obligations: block setup and teardown, grid setup and
+   teardown, and the descriptor's view of the barrier's initial state. *)
 
 #lang-pulse
 
-// TODO: BAD!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-#set-options "--z3rlimit 60"
 
 open Kuiper
 open Kuiper.Bijection
@@ -21,839 +19,1002 @@ open Kuiper.Tensor.Tiling
 open Kuiper.Array2.Strided
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
+open Kuiper.TensorCore
+open Pulse.Lib.Pledge
+open Kuiops.Sdpa.Flash.Split
+open Kuiops.Sdpa.Flash.Shmem
+
 module SZ = Kuiper.SizeT
+module FC = Kuiper.Float.Casts
+module Trade = Pulse.Lib.Trade
 module BW = Kuiper.Barrier.Warp
 
-let stride_partition_bij
-  (rows cols : nat) (nthr : pos)
-  : ((tid : natlt nthr & stride_index2 rows cols nthr tid)
-      =~ (natlt rows & natlt cols))
-= {
-  ff = (fun (x : (tid : natlt nthr & stride_index2 rows cols nthr tid)) ->
-    x._2)
-    <: ((tid : natlt nthr & stride_index2 rows cols nthr tid) ->
-        GTot (natlt rows & natlt cols));
-  gg = (fun (ij : natlt rows & natlt cols) ->
-    (| ((ij._1 * cols + ij._2) % nthr), ij |))
-    <: ((natlt rows & natlt cols) ->
-        GTot (tid : natlt nthr & stride_index2 rows cols nthr tid));
-}
-
-let abs1_eq (len : nat)
-  : Lemma (abs (len @| INil) == (natlt len & unit))
-      [SMTPat (abs (len @| INil))]
-= ()
-
-unfold
-let abs1_bij (#len : nat) : (abs (len @| INil) =~ natlt len) =
-{
-  ff = (fun (i, ()) -> i);
-  gg = (fun i -> idx1 i);
-}
 
 ghost
-fn cells2_gather
-  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
-  (a : array2 et l)
+fn flash_setup
+  (#et_ab : Type0)
+  (nblk : szp)
+  (b hq hkv group sq rows tiles sk d : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : layout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : array4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  ()
+  norewrite
   requires
-    pure (SZ.fits (tlayout_ulen l)) **
-    (forall+ (i : natlt rows) (j : natlt cols).
-      exists* (v : et). Cell a (idx2 i j) |-> Frac 1.0R v)
+    (gQ |-> Frac fQ eQ) **
+    (gK |-> Frac fK eK) **
+    (gV |-> Frac fV eV) **
+    (gmask |-> Frac fmask emask) **
+    live gout
   ensures
-    exists* (e : chest2 et rows cols). a |-> Frac 1.0R e
+    (forall+ (bid : natlt (SZ.v nblk)).
+      flash_block_state nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid) **
+    emp
 {
-  let vf = forevery_exists_2
-    (fun (i : natlt rows) (j : natlt cols) (v : et) ->
-      Cell a (idx2 i j) |-> Frac 1.0R v);
-  let e : chest2 et rows cols = mk2 vf;
-  forevery_map_2
-    (fun (i : natlt rows) (j : natlt cols) ->
-      Cell a (idx2 i j) |-> Frac 1.0R (vf i j))
-    (fun (i : natlt rows) (j : natlt cols) ->
-      Cell a (idx2 i j) |-> Frac 1.0R (acc e (idx2 i j)))
-    fn i j {
-      assert pure (acc e (idx2 i j) == vf i j);
-      rewrite
-        (Cell a (idx2 i j) |-> Frac 1.0R (vf i j))
-        as
-        (Cell a (idx2 i j) |-> Frac 1.0R (acc e (idx2 i j)));
-    };
-  tensor_iraise2 a #1.0R #e;
-}
-
-ghost
-fn cells1_gather
-  (#et : Type0) (#len : nat) (#l : layout1 len)
-  (a : array1 et l)
-  requires
-    pure (SZ.fits (tlayout_ulen l)) **
-    (forall+ (i : natlt len).
-      exists* (v : et). Cell a (idx1 i) |-> Frac 1.0R v)
-  ensures
-    exists* (e : chest1 et len). a |-> Frac 1.0R e
-{
-  let vf = forevery_exists
-    (fun (i : natlt len) (v : et) ->
-      Cell a (idx1 i) |-> Frac 1.0R v);
-  let e : chest1 et len = mk1 vf;
-  forevery_map #(natlt len)
-    (fun i -> Cell a (idx1 i) |-> Frac 1.0R (vf i))
-    (fun i -> Cell a (idx1 i) |-> Frac 1.0R (acc e (idx1 i)))
-    fn i {
-      assert pure (acc e (idx1 i) == vf i);
-      rewrite
-        (Cell a (idx1 i) |-> Frac 1.0R (vf i))
-        as
-        (Cell a (idx1 i) |-> Frac 1.0R (acc e (idx1 i)));
-    };
-  forevery_iso_back (abs1_bij #len)
-    (fun i -> Cell a i |-> Frac 1.0R (acc e i));
-  forevery_map #(abs (len @| INil))
-    (fun i -> Cell a i |-> Frac 1.0R (acc e i))
-    (fun i -> pts_to_cell (core a) #1.0R (l.imap.f i) (acc e i))
-    fn i {
-      tensor_pts_to_cell_eq a i 1.0R (acc e i);
-      rewrite
-        (Cell a i |-> Frac 1.0R (acc e i))
-        as
-        (pts_to_cell (core a) #1.0R (l.imap.f i) (acc e i));
-    };
-  tensor_iraise a #1.0R #e;
-}
-
-ghost
-fn strided_cells2_gather
-  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
-  (a : array2 et l) (nthr : pos)
-  requires
-    pure (SZ.fits (tlayout_ulen l)) **
-    (forall+ (tid : natlt nthr). strided_cells2 a nthr tid)
-  ensures
-    exists* (e : chest2 et rows cols). a |-> Frac 1.0R e
-{
-  forevery_map #(natlt nthr)
-    (fun tid -> strided_cells2 a nthr tid)
-    (fun tid ->
-      forall+ (ij : stride_index2 rows cols nthr tid).
-        exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v)
-    fn tid {
-      unfold strided_cells2 a nthr tid;
-    };
-  forevery_flatten_dep
-    (fun (tid : natlt nthr) (ij : stride_index2 rows cols nthr tid) ->
-      exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v);
-  forevery_iso (stride_partition_bij rows cols nthr)
-    (fun x ->
-      exists* (v : et). Cell a (idx2 x._2._1 x._2._2) |-> Frac 1.0R v);
-  forevery_map #(natlt rows & natlt cols)
-    (fun ij ->
-      exists* (v : et).
-        Cell a
-          (idx2
-            ((stride_partition_bij rows cols nthr).gg ij)._2._1
-            ((stride_partition_bij rows cols nthr).gg ij)._2._2)
-          |-> Frac 1.0R v)
-    (fun ij ->
-      exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v)
-    fn ij {
-      with v. assert (
-        tensor_pts_to_cell a #1.0R
-          (idx2
-            ((stride_partition_bij rows cols nthr).gg ij)._2._1
-            ((stride_partition_bij rows cols nthr).gg ij)._2._2)
-          v);
-      assert pure (
-        ((stride_partition_bij rows cols nthr).gg ij)._2 == ij);
-      rewrite
-        (tensor_pts_to_cell a #1.0R
-          (idx2
-            ((stride_partition_bij rows cols nthr).gg ij)._2._1
-            ((stride_partition_bij rows cols nthr).gg ij)._2._2)
-          v)
-        as
-        (tensor_pts_to_cell a #1.0R (idx2 ij._1 ij._2) v);
-    };
-  forevery_unflatten'
-    (fun (ij : natlt rows & natlt cols) ->
-      exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v);
-  cells2_gather a;
-}
-
-ghost
-fn b0_o_transform
-  (#et : Type0) (nw d : szp)
-  (#_ : squash (16 /?+ SZ.v d))
-  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
-  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
-  requires
-    forall+ (tid : natlt (block_threads nw)).
-      strided_cells2
-        (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-        BW.warp_size (thread_lane nw tid)
-  ensures
-    forall+ (tid : natlt (block_threads nw)).
-      exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          warp_row_span 16
-          (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-          |-> Frac 1.0R e
-{
-  forevery_factor' (block_threads nw) (SZ.v nw) BW.warp_size
-    (fun w lane ->
-      strided_cells2
-        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-        BW.warp_size lane);
-  forevery_map #(natlt (SZ.v nw))
-    (fun w ->
+  tensor_share_n gQ (SZ.v nblk);
+  tensor_share_n gK (SZ.v nblk);
+  tensor_share_n gV (SZ.v nblk);
+  tensor_share_n gmask (SZ.v nblk);
+  flash_split_output b hq hkv group sq rows tiles d gout;
+  forevery_rw_size
+    (SZ.v b * SZ.v hkv * SZ.v tiles) (SZ.v nblk)
+    #(fun bid ->
+      flash_block_output b hq hkv group sq rows tiles d gout bid);
+  forevery_map
+    (fun (bid : natlt (SZ.v nblk)) ->
       forall+ (lane : natlt BW.warp_size).
-        strided_cells2
-          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-          BW.warp_size lane)
-    (fun w ->
-      forall+ (lane : natlt BW.warp_size).
-        exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-            warp_row_span 16 (lane / 16) (lane % 16)
-            |-> Frac 1.0R e)
-    fn w {
-      strided_cells2_gather
-        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-        BW.warp_size;
-      with e. assert (
-        array2_subtile shO 16 (SZ.v d <: pos) w 0 |-> Frac 1.0R e);
-      array2_stride_tile
-        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-        warp_row_span 16;
-      forevery_map_2
-        (fun (tr : natlt warp_row_span) (tc : natlt 16) ->
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-            warp_row_span 16 tr tc
-            |-> Frac 1.0R (ematrix_stride_subtile e warp_row_span 16 tr tc))
-        (fun (tr : natlt warp_row_span) (tc : natlt 16) ->
-          exists* (x : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-            array2_stride_subtile
-              (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-              warp_row_span 16 tr tc
-              |-> Frac 1.0R x)
-        fn tr tc { () };
-      forevery_unfactor' BW.warp_size warp_row_span 16
-        (fun tr tc ->
-          exists* (x : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-            array2_stride_subtile
-              (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-              warp_row_span 16 tr tc
-              |-> Frac 1.0R x);
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    fn bid {
+      fold flash_block_output
+        b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles));
     };
-  forevery_unfactor' (block_threads nw) (SZ.v nw) BW.warp_size
-    (fun w lane ->
-      exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-          warp_row_span 16 (lane / 16) (lane % 16)
-          |-> Frac 1.0R e);
+  forevery_zip
+    (fun _ -> gmask |-> Frac (fmask /. (SZ.v nblk)) emask)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      forall+ (lane : natlt BW.warp_size).
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane);
+  forevery_zip
+    (fun _ -> gV |-> Frac (fV /. (SZ.v nblk)) eV)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      (forall+ (lane : natlt BW.warp_size).
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane));
+  forevery_zip
+    (fun _ -> gK |-> Frac (fK /. (SZ.v nblk)) eK)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      (forall+ (lane : natlt BW.warp_size).
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane));
+  forevery_zip
+    (fun _ -> gQ |-> Frac (fQ /. (SZ.v nblk)) eQ)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      (forall+ (lane : natlt BW.warp_size).
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane));
+  forevery_map #(natlt (SZ.v nblk))
+    (fun bid ->
+      (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      (forall+ (lane : natlt BW.warp_size).
+        out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane))
+    (fun bid ->
+      flash_block_state nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid)
+    fn bid {
+      fold flash_block_output
+        b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles));
+      fold flash_block_state nblk
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid;
+    };
 }
 
 ghost
-fn row_cell_to_matrix
-  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
-  (a : array2 et l) (r : natlt rows) (c : natlt cols)
-  requires cell_full (row a r) c
+fn flash_teardown
+  (#et_ab : Type0)
+  (nblk : szp)
+  (b hq hkv group sq rows tiles sk d : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : layout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lout |}
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : array4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  ()
+  norewrite
+  requires
+    (forall+ (bid : natlt (SZ.v nblk)).
+      flash_block_state nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid) **
+    emp
   ensures
-    exists* (v : et). Cell a (idx2 r c) |-> Frac 1.0R v
+    (gQ |-> Frac fQ eQ) **
+    (gK |-> Frac fK eK) **
+    (gV |-> Frac fV eV) **
+    (gmask |-> Frac fmask emask) **
+    live gout
 {
-  unfold cell_full (row a r) c;
-  with v. assert (tensor_pts_to_cell (row a r) #1.0R (idx1 c) v);
-  rewrite each (row a r) as (sliceof a 0 r);
-  tensor_slice_cell_eq a 0 r (idx1 c) 1.0R v;
-  rewrite
-    (tensor_pts_to_cell (sliceof a 0 r) #1.0R (idx1 c) v)
-    as
-    (tensor_pts_to_cell a #1.0R
-      ((abs_bring_forward_bij 0 (rows @| cols @| INil)).gg (r, idx1 c))
-      v);
-  assert pure (
-    (abs_bring_forward_bij 0 (rows @| cols @| INil)).gg (r, idx1 c)
-      == idx2 r c);
-  rewrite
-    (tensor_pts_to_cell a #1.0R
-      ((abs_bring_forward_bij 0 (rows @| cols @| INil)).gg (r, idx1 c))
-      v)
-    as
-    (tensor_pts_to_cell a #1.0R (idx2 r c) v);
+  assert pure (SZ.fits (tlayout_ulen lout));
+  forevery_map #(natlt (SZ.v nblk))
+    (fun bid ->
+      flash_block_state nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid)
+    (fun bid ->
+      (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    fn bid {
+      unfold flash_block_state nblk
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask bid;
+    };
+  forevery_unzip
+    (fun _ -> gQ |-> Frac (fQ /. (SZ.v nblk)) eQ)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gK |-> Frac (fK /. (SZ.v nblk)) eK)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gV |-> Frac (fV /. (SZ.v nblk)) eV)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gmask |-> Frac (fmask /. (SZ.v nblk)) emask)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  tensor_gather_n gQ (SZ.v nblk) #fQ;
+  tensor_gather_n gK (SZ.v nblk) #fK;
+  tensor_gather_n gV (SZ.v nblk) #fV;
+  tensor_gather_n gmask (SZ.v nblk) #fmask;
+  forevery_rw_size
+    (SZ.v nblk) (SZ.v b * SZ.v hkv * SZ.v tiles)
+    #(fun (bid : natlt (SZ.v nblk)) ->
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_map
+    (fun (bid : natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      flash_block_output b hq hkv group sq rows tiles d gout
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (fun bid ->
+      flash_block_output b hq hkv group sq rows tiles d gout bid)
+    fn bid {
+      rewrite
+        (flash_block_output b hq hkv group sq rows tiles d gout
+          (bid <: natlt
+            (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        as
+        (flash_block_output b hq hkv group sq rows tiles d gout bid);
+    };
+  flash_gather_output b hq hkv group sq rows tiles d gout;
 }
 
 ghost
-fn b1_matrix_transform
-  (#et : Type0) (nw : szp)
+fn flash_block_setup
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab |} {| scalar et_acc |}
+  (nblk : szp)
+  (nw nthr : szp {
+    SZ.v nthr == block_threads nw })
+  (b hq hkv group sq rows tiles sk : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) /\
+    SZ.fits (SZ.v hkv * SZ.v group + SZ.v rows) })
+  (d : szp { 16 /?+ SZ.v d })
+  (#_ : squash (warp_row_span /?+ 16))
+  (#_ : squash (SZ.fits (16 * SZ.v d)))
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
-  (a : array2 et (l2_row_major (SZ.v nw) 16))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * 16)))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : layout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : array4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (sh : c_shmems (flash_shmems et_ab et_acc nw d))
+  (bid : natlt (SZ.v nblk))
+  ()
+  norewrite
   requires
-    forall+ (tid : natlt (block_threads nw)).
-      b1_pre_one nw a tid
+    live_c_shmems sh **
+    flash_block_state nblk b hq hkv group sq rows tiles sk d
+      gQ gK gV gmask gout #fQ #fK #fV #fmask
+      #eQ #eK #eV #emask bid
   ensures
-    forall+ (_tid : natlt (block_threads nw)).
-      exists* (e : chest2 et (SZ.v nw) 16).
-        a |-> Frac (1.0R /. (block_threads nw)) e
+    (forall+ (tid : natlt (SZ.v nthr)).
+      flash_thread_pre nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout (flash_views_of nw d sh)
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        (tid / BW.warp_size) (tid % BW.warp_size)) **
+    emp
 {
-  forevery_map #(natlt (block_threads nw))
-    (fun tid -> b1_pre_one nw a tid)
-    (fun tid ->
-      when__ (thread_lane nw tid < 16) (fun _ ->
-        cell_full (row a (thread_w nw tid))
-          (thread_lane nw tid <: natlt 16)))
-    fn tid {
-      unfold b1_pre_one nw a tid;
-    };
-  forevery_factor' (block_threads nw) (SZ.v nw) BW.warp_size
-    (fun w lane ->
+  unfold flash_block_state nblk
+    b hq hkv group sq rows tiles sk d
+    gQ gK gV gmask gout #fQ #fK #fV #fmask
+    #eQ #eK #eV #emask bid;
+  tensor_share_n gQ (SZ.v nthr);
+  tensor_share_n gK (SZ.v nthr);
+  tensor_share_n gV (SZ.v nthr);
+  tensor_share_n gmask (SZ.v nthr);
+  forevery_factor (SZ.v nthr) (SZ.v nw) BW.warp_size
+    (fun _ ->
+      gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ);
+  forevery_factor (SZ.v nthr) (SZ.v nw) BW.warp_size
+    (fun _ ->
+      gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK);
+  forevery_factor (SZ.v nthr) (SZ.v nw) BW.warp_size
+    (fun _ ->
+      gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV);
+  forevery_factor (SZ.v nthr) (SZ.v nw) BW.warp_size
+    (fun _ ->
+      gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask);
+  forevery_zip4_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ)
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK)
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV)
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask);
+
+  flash_output_add_warps nw
+    b hq hkv group sq rows tiles d gout
+    (bid <: natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles));
+  flash_open_shmems nw d sh;
+  let v = flash_views_of nw d sh;
+  rewrite each (flash_views_of nw d sh) as v;
+  unfold flash_views_live v;
+  flash_split_b0 nw d v;
+  flash_split_ml nw v.shMv;
+  flash_split_ml nw v.shLv;
+  forevery_zip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
       when__ (lane < 16) (fun _ ->
-        cell_full (row a w) (lane <: natlt 16)));
-  forevery_map #(natlt (SZ.v nw))
-    (fun w ->
-      forall+ (lane : natlt BW.warp_size).
+        cell_full (row v.shMv w) lane))
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      when__ (lane < 16) (fun _ ->
+        cell_full (row v.shLv w) lane));
+  flash_split_jt nw d v;
+  flash_split_combine nw v.shscalev v.shgmv v.shglv;
+  forevery_zip4_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_b0_local nw d v w lane)
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      when__ (lane < 16) (fun _ ->
+        cell_full (row v.shMv w) lane) **
+      when__ (lane < 16) (fun _ ->
+        cell_full (row v.shLv w) lane))
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_jt_local d
+        (flash_warp_k v w) (flash_warp_v v w)
+        (flash_warp_s v w) (flash_warp_p v w)
+        (flash_warp_pv v w) (flash_warp_cw v w) lane)
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_combine_local nw
+        v.shscalev v.shgmv v.shglv w lane);
+  forevery_zip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      (gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ) **
+      (gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK) **
+      (gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV) **
+      (gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask))
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_b0_local nw d v w lane **
+      (when__ (lane < 16) (fun _ ->
+        cell_full (row v.shMv w) lane) **
+       when__ (lane < 16) (fun _ ->
+        cell_full (row v.shLv w) lane)) **
+      flash_jt_local d
+        (flash_warp_k v w) (flash_warp_v v w)
+        (flash_warp_s v w) (flash_warp_p v w)
+        (flash_warp_pv v w) (flash_warp_cw v w) lane **
+      flash_combine_local nw
+        v.shscalev v.shgmv v.shglv w lane);
+  forevery_zip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      ((gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ) **
+       (gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK) **
+       (gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV) **
+       (gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask)) **
+      (flash_b0_local nw d v w lane **
+       (when__ (lane < 16) (fun _ ->
+          cell_full (row v.shMv w) lane) **
         when__ (lane < 16) (fun _ ->
-          cell_full (row a w) (lane <: natlt 16)))
-    (fun w ->
-      forall+ (c : natlt 16).
-        exists* (v : et). Cell a (idx2 w c) |-> Frac 1.0R v)
-    fn w {
-      forevery_map #(natlt BW.warp_size)
-        (fun lane ->
-          when__ (lane < 16) (fun _ ->
-            cell_full (row a w) (lane <: natlt 16)))
-        (fun lane ->
-          when_ (lane < 16)
-            (cell_full (row a w) (clamp_nat_lt 16 lane)))
-        fn lane {
-          rewrite
-            (when__ (lane < 16) (fun _ ->
-              cell_full (row a w) (lane <: natlt 16)))
-            as
-            (when_ (lane < 16)
-              (cell_full (row a w) (clamp_nat_lt 16 lane)));
-        };
-      forevery_refine_pred
-        (fun (lane : natlt BW.warp_size) ->
-          cell_full (row a w) (clamp_nat_lt 16 lane))
-        (fun (lane : natlt BW.warp_size) -> lane < 16);
-      forevery_map #(lane : natlt BW.warp_size { lane < 16 })
-        (fun lane -> cell_full (row a w) (clamp_nat_lt 16 lane))
-        (fun lane -> cell_full (row a w) (lane <: natlt 16))
-        fn lane {
-          rewrite
-            (cell_full (row a w) (clamp_nat_lt 16 lane))
-            as
-            (cell_full (row a w) (lane <: natlt 16));
-        };
-      forevery_natlt_restrict BW.warp_size
-        (fun (c : natlt 16) -> cell_full (row a w) c);
-      forevery_map #(natlt 16)
-        (fun c -> cell_full (row a w) c)
-        (fun c ->
-          exists* (v : et). Cell a (idx2 w c) |-> Frac 1.0R v)
-        fn c {
-          row_cell_to_matrix a w c;
-        };
-    };
-  cells2_gather a;
-  with e. assert (a |-> Frac 1.0R e);
-  tensor_share_n a (block_threads nw);
-  forevery_map #(natlt (block_threads nw))
-    (fun _ -> a |-> Frac (1.0R /. (block_threads nw)) e)
-    (fun _ ->
-      exists* (x : chest2 et (SZ.v nw) 16).
-        a |-> Frac (1.0R /. (block_threads nw)) x)
-    fn tid { () };
-}
-
-ghost
-fn b2_o_transform
-  (#et : Type0) (nw d : szp)
-  (#_ : squash (16 /?+ SZ.v d))
-  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
-  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
-  requires
-    forall+ (tid : natlt (block_threads nw)).
-      b2_o_pre nw d shO tid
-  ensures
-    forall+ (_tid : natlt (block_threads nw)).
-      exists* (e : chest2 et (SZ.v nw * 16) (SZ.v d)).
-        shO |-> Frac (1.0R /. (block_threads nw)) e
-{
-  forevery_map #(natlt (block_threads nw))
-    (fun tid -> b2_o_pre nw d shO tid)
-    (fun tid ->
-      exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          warp_row_span 16
-          (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-          |-> Frac 1.0R e)
-    fn tid {
-      unfold b2_o_pre nw d shO tid;
-    };
-  forevery_factor' (block_threads nw) (SZ.v nw) BW.warp_size
-    (fun w lane ->
-      exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-          warp_row_span 16 (lane / 16) (lane % 16)
-          |-> Frac 1.0R e);
-  forevery_map #(natlt (SZ.v nw))
-    (fun w ->
-      forall+ (lane : natlt BW.warp_size).
-        exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-            warp_row_span 16 (lane / 16) (lane % 16)
-            |-> Frac 1.0R e)
-    (fun w ->
-      exists* (e : chest2 et 16 (SZ.v d)).
-        array2_subtile shO 16 (SZ.v d <: pos) w 0 |-> Frac 1.0R e)
-    fn w {
-      forevery_factor' BW.warp_size warp_row_span 16
-        (fun tr tc ->
-          exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-            array2_stride_subtile
-              (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-              warp_row_span 16 tr tc
-              |-> Frac 1.0R e);
-      let tf = forevery_exists_2
-        (fun (tr : natlt warp_row_span) (tc : natlt 16)
-          (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)) ->
-            array2_stride_subtile
-              (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-              warp_row_span 16 tr tc
-              |-> Frac 1.0R e);
-      array2_stride_untile'
-        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-        warp_row_span 16 tf #1.0R;
-    };
-  let rf = forevery_exists
-    (fun (w : natlt (SZ.v nw)) (e : chest2 et 16 (SZ.v d)) ->
-      array2_subtile shO 16 (SZ.v d <: pos) w 0 |-> Frac 1.0R e);
-  forevery_map #(natlt (SZ.v nw))
-    (fun w ->
-      array2_subtile shO 16 (SZ.v d <: pos) w 0 |-> Frac 1.0R (rf w))
-    (fun w ->
-      forall+ (tc : natlt 1).
-        array2_subtile shO 16 (SZ.v d <: pos) w tc |-> Frac 1.0R (rf w))
-    fn w {
-      forevery_singleton_intro
-        (fun (tc : natlt 1) ->
-          array2_subtile shO 16 (SZ.v d <: pos) w tc |-> Frac 1.0R (rf w));
-    };
-  forevery_rw_size2
-    (SZ.v nw) (SZ.v nw * 16 / 16)
-    1 (SZ.v d / SZ.v d)
-    #(fun tr tc ->
-      array2_subtile shO 16 (SZ.v d <: pos) tr tc |-> Frac 1.0R (rf tr));
-  array2_untile' shO 16 (SZ.v d <: pos) (fun w _tc -> rf w) #1.0R;
-  with e. assert (shO |-> Frac 1.0R e);
-  tensor_share_n shO (block_threads nw);
-  forevery_map #(natlt (block_threads nw))
-    (fun _ -> shO |-> Frac (1.0R /. (block_threads nw)) e)
-    (fun _ ->
-      exists* (x : chest2 et (SZ.v nw * 16) (SZ.v d)).
-        shO |-> Frac (1.0R /. (block_threads nw)) x)
-    fn tid { () };
-}
-
-let b2_active_idx (nw : szp) : Type0 =
-  wl : (natlt (SZ.v nw) & natlt BW.warp_size) {
-    wl._1 == 0 /\ wl._2 < 16}
-
-let b2_active_lane_bij (nw : szp)
-  : (b2_active_idx nw =~ natlt 16)
-= {
-  ff = (fun (wl : b2_active_idx nw) -> wl._2 <: natlt 16)
-    <: (b2_active_idx nw -> GTot (natlt 16));
-  gg = (fun (lane : natlt 16) -> (0, lane))
-    <: (natlt 16 -> GTot (b2_active_idx nw));
-}
-
-unfold
-let scale_tile
-  (#et : Type0) (nw : szp)
-  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
-  (lane : natlt 16) : slprop
-= exists* (e : chest2 et (SZ.v nw) 1).
-    tensor_pts_to (array2_stride_subtile shscale 1 16 0 lane) e
-
-ghost
-fn b2_scale_transform
-  (#et : Type0) (nw : szp)
-  (#_ : squash (SZ.fits (SZ.v nw * 16)))
-  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
-  (shgl : array1 et (l1_forward 16))
-  requires
-    forall+ (tid : natlt (block_threads nw)).
-      b2_scale_pre nw shscale shgl tid
-  ensures
-    (forall+ (_tid : natlt (block_threads nw)).
-      exists* (e : chest2 et (SZ.v nw) 16).
-        shscale |-> Frac (1.0R /. (block_threads nw)) e) **
-    (forall+ (_tid : natlt (block_threads nw)).
-      exists* (e : chest1 et 16).
-        shgl |-> Frac (1.0R /. (block_threads nw)) e)
-{
-  forevery_map #(natlt (block_threads nw))
-    (fun tid -> b2_scale_pre nw shscale shgl tid)
-    (fun tid ->
-      if_ (b2_active nw tid)
-        (scale_tile nw shscale
-          (clamp_nat_lt 16 (thread_lane nw tid)) **
-         cell_full shgl (clamp_nat_lt 16 (thread_lane nw tid))))
-    fn tid {
-      unfold b2_scale_pre nw shscale shgl tid;
-    };
-  forevery_factor' (block_threads nw) (SZ.v nw) BW.warp_size
-    (fun w lane ->
-      if_ (t2b (w = 0 /\ lane < 16))
-        (scale_tile nw shscale (clamp_nat_lt 16 lane) **
-         cell_full shgl (clamp_nat_lt 16 lane)));
-  forevery_flatten
-    (fun (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size) ->
-      if_ (t2b (w = 0 /\ lane < 16))
-        (scale_tile nw shscale (clamp_nat_lt 16 lane) **
-         cell_full shgl (clamp_nat_lt 16 lane)));
-  forevery_map #(natlt (SZ.v nw) & natlt BW.warp_size)
-    (fun wl ->
-      if_ (t2b (wl._1 = 0 /\ wl._2 < 16))
-        (scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-         cell_full shgl (clamp_nat_lt 16 wl._2)))
-    (fun wl ->
-      when_ (wl._1 = 0 /\ wl._2 < 16)
-        (scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-         cell_full shgl (clamp_nat_lt 16 wl._2)))
-    fn wl {
-      rewrite
-        (if_ (t2b (wl._1 = 0 /\ wl._2 < 16))
-          (scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-           cell_full shgl (clamp_nat_lt 16 wl._2)))
-        as
-        (when_ (wl._1 = 0 /\ wl._2 < 16)
-          (scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-           cell_full shgl (clamp_nat_lt 16 wl._2)));
-    };
-  forevery_refine_pred
-    (fun (wl : natlt (SZ.v nw) & natlt BW.warp_size) ->
-      scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-      cell_full shgl (clamp_nat_lt 16 wl._2))
-    (fun wl -> wl._1 = 0 /\ wl._2 < 16);
-  forevery_rw_type
-    (wl : (natlt (SZ.v nw) & natlt BW.warp_size) {
-      wl._1 = 0 /\ wl._2 < 16})
-    (b2_active_idx nw)
-    (fun wl ->
-      scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-      cell_full shgl (clamp_nat_lt 16 wl._2));
-  forevery_iso (b2_active_lane_bij nw)
-    (fun wl ->
-      scale_tile nw shscale (clamp_nat_lt 16 wl._2) **
-      cell_full shgl (clamp_nat_lt 16 wl._2));
-  forevery_map #(natlt 16)
-    (fun lane ->
-      scale_tile nw shscale
-        (clamp_nat_lt 16 ((b2_active_lane_bij nw).gg lane)._2) **
-      cell_full shgl
-        (clamp_nat_lt 16 ((b2_active_lane_bij nw).gg lane)._2))
-    (fun lane ->
-      scale_tile nw shscale lane **
-      cell_full shgl lane)
-    fn lane {
-      rewrite
-        (scale_tile nw shscale
-          (clamp_nat_lt 16 ((b2_active_lane_bij nw).gg lane)._2) **
-         cell_full shgl
-          (clamp_nat_lt 16 ((b2_active_lane_bij nw).gg lane)._2))
-        as
-        (scale_tile nw shscale lane **
-         cell_full shgl lane);
-    };
-  forevery_unzip #(natlt 16)
-    (fun lane -> scale_tile nw shscale lane)
-    (fun lane -> cell_full shgl lane);
-
-  forevery_map #(natlt 16)
-    (fun tc -> scale_tile nw shscale tc)
-    (fun tc ->
-      forall+ (_tr : natlt 1).
-        scale_tile nw shscale tc)
-    fn tc {
-      forevery_singleton_intro
-        (fun (_tr : natlt 1) -> scale_tile nw shscale tc);
-    };
-  forevery_commute
-    (fun (_tc : natlt 16) (_tr : natlt 1) ->
-      scale_tile nw shscale _tc);
+          cell_full (row v.shLv w) lane)) **
+       flash_jt_local d
+        (flash_warp_k v w) (flash_warp_v v w)
+        (flash_warp_s v w) (flash_warp_p v w)
+        (flash_warp_pv v w) (flash_warp_cw v w) lane **
+       flash_combine_local nw
+        v.shscalev v.shgmv v.shglv w lane))
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      when_ (w = 0)
+        (out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane));
   forevery_map_2
-    (fun (_tr : natlt 1) (tc : natlt 16) ->
-      scale_tile nw shscale tc)
-    (fun (tr : natlt 1) (tc : natlt 16) ->
-      exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to (array2_stride_subtile shscale 1 16 tr tc) e)
-    fn tr tc {
-      unfold scale_tile nw shscale tc;
-      with e. assert (
-        tensor_pts_to (array2_stride_subtile shscale 1 16 0 tc) e);
-      rewrite
-        (tensor_pts_to (array2_stride_subtile shscale 1 16 0 tc) e)
-        as
-        (tensor_pts_to (array2_stride_subtile shscale 1 16 tr tc) e);
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      (((gQ |-> Frac
+          (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ) **
+        (gK |-> Frac
+          (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK) **
+        (gV |-> Frac
+          (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV) **
+        (gmask |-> Frac
+          (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask)) **
+       (flash_b0_local nw d v w lane **
+        (when__ (lane < 16) (fun _ ->
+           cell_full (row v.shMv w) lane) **
+         when__ (lane < 16) (fun _ ->
+           cell_full (row v.shLv w) lane)) **
+        flash_jt_local d
+          (flash_warp_k v w) (flash_warp_v v w)
+          (flash_warp_s v w) (flash_warp_p v w)
+          (flash_warp_pv v w) (flash_warp_cw v w) lane **
+        flash_combine_local nw
+          v.shscalev v.shgmv v.shglv w lane)) **
+      when_ (w = 0)
+        (out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane))
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_thread_pre nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane)
+    fn w lane {
+      fold flash_thread_pre nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane;
     };
-  let sf = forevery_exists_2
-    (fun (tr : natlt 1) (tc : natlt 16)
-      (e : chest2 et (SZ.v nw) 1) ->
-        tensor_pts_to (array2_stride_subtile shscale 1 16 tr tc) e);
-  array2_stride_untile' shscale 1 16 sf #1.0R;
-
-  forevery_map #(natlt 16)
-    (fun lane -> cell_full shgl lane)
-    (fun lane ->
-      exists* (v : et). Cell shgl (idx1 lane) |-> Frac 1.0R v)
-    fn lane {
-      unfold cell_full shgl lane;
-    };
-  cells1_gather shgl;
-
-  with es. assert (shscale |-> Frac 1.0R es);
-  tensor_share_n shscale (block_threads nw);
-  forevery_map #(natlt (block_threads nw))
-    (fun _ -> shscale |-> Frac (1.0R /. (block_threads nw)) es)
-    (fun _ ->
-      exists* (e : chest2 et (SZ.v nw) 16).
-        shscale |-> Frac (1.0R /. (block_threads nw)) e)
-    fn tid { () };
-  with egl. assert (shgl |-> Frac 1.0R egl);
-  tensor_share_n shgl (block_threads nw);
-  forevery_map #(natlt (block_threads nw))
-    (fun _ -> shgl |-> Frac (1.0R /. (block_threads nw)) egl)
-    (fun _ ->
-      exists* (e : chest1 et 16).
-        shgl |-> Frac (1.0R /. (block_threads nw)) e)
-    fn tid { () };
+  rewrite each v as (flash_views_of nw d sh);
+  flash_unfactor_threads nw
+    (fun w lane ->
+      flash_thread_pre nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout (flash_views_of nw d sh)
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane);
+  forevery_rw_size
+    (SZ.v nw * BW.warp_size) (SZ.v nthr)
+    #(fun (tid : natlt
+      (SZ.v nw * BW.warp_size)) ->
+      flash_thread_pre nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout (flash_views_of nw d sh)
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        (tid / BW.warp_size) (tid % BW.warp_size));
 }
 
 ghost
-fn barrier_ok
+fn flash_block_teardown
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab |} {| scalar et_acc |}
+  (nblk : szp)
+  (nw nthr : szp {
+    SZ.v nthr == block_threads nw })
+  (b hq hkv group sq rows tiles sk : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) /\
+    SZ.fits (SZ.v hkv * SZ.v group + SZ.v rows) })
+  (d : szp { 16 /?+ SZ.v d })
+  (#_ : squash (warp_row_span /?+ 16))
+  (#_ : squash (SZ.fits (16 * SZ.v d)))
+  (#_ : squash (SZ.fits (SZ.v nw * 16)))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * 16)))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : layout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : array4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (sh : c_shmems (flash_shmems et_ab et_acc nw d))
+  (bid : natlt (SZ.v nblk))
+  ()
+  norewrite
+  requires
+    (forall+ (tid : natlt (SZ.v nthr)).
+      flash_thread_post nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout (flash_views_of nw d sh)
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        (tid / BW.warp_size) (tid % BW.warp_size)) **
+    emp
+  ensures
+    live_c_shmems sh **
+    flash_block_state nblk b hq hkv group sq rows tiles sk d
+      gQ gK gV gmask gout #fQ #fK #fV #fmask
+      #eQ #eK #eV #emask bid
+{
+  let v = flash_views_of nw d sh;
+  rewrite each (flash_views_of nw d sh) as v;
+  forevery_rw_size
+    (SZ.v nthr) (SZ.v nw * BW.warp_size)
+    #(fun (tid : natlt (SZ.v nthr)) ->
+      flash_thread_post nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        (tid / BW.warp_size) (tid % BW.warp_size));
+  flash_factor_threads nw
+    (fun w lane ->
+      flash_thread_post nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane);
+  forevery_map_2
+    (fun w lane ->
+      flash_thread_post nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane)
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      (gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ) **
+      (gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK) **
+      (gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV) **
+      (gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask) **
+      (exists* (e : chest2 et_ab 16 (SZ.v d)).
+        v.shQv |-> Frac
+          (1.0R /. (block_threads nw)) e) **
+      b1_post nw v.shMv v.shLv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)) **
+      b2_post nw d v.shscalev v.shOv v.shglv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)) **
+      flash_jt_local d
+        (flash_warp_k v w) (flash_warp_v v w)
+        (flash_warp_s v w) (flash_warp_p v w)
+        (flash_warp_pv v w) (flash_warp_cw v w) lane **
+      when_ (w = 0)
+        (out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane) **
+      when_ (w = 0 /\ lane < 16)
+        (cell_full v.shgmv (clamp_nat_lt 16 lane)))
+    fn w lane {
+      unfold flash_thread_post nw nthr
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout v
+        #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fK /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fV /. (SZ.v nblk) /. (SZ.v nthr))
+        #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
+        #eQ #eK #eV #emask
+        (bid <: natlt
+          (SZ.v b * SZ.v hkv * SZ.v tiles))
+        w lane;
+    };
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gQ |-> Frac
+        (fQ /. (SZ.v nblk) /. (SZ.v nthr)) eQ)
+    _;
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gK |-> Frac
+        (fK /. (SZ.v nblk) /. (SZ.v nthr)) eK)
+    _;
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gV |-> Frac
+        (fV /. (SZ.v nblk) /. (SZ.v nthr)) eV)
+    _;
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      gmask |-> Frac
+        (fmask /. (SZ.v nblk) /. (SZ.v nthr)) emask)
+    _;
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      exists* (e : chest2 et_ab 16 (SZ.v d)).
+        v.shQv |-> Frac
+          (1.0R /. (block_threads nw)) e)
+    _;
+  forevery_unzip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      b1_post nw v.shMv v.shLv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)))
+    _;
+  forevery_unzip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      b2_post nw d v.shscalev v.shOv v.shglv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)))
+    _;
+  forevery_unzip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      flash_jt_local d
+        (flash_warp_k v w) (flash_warp_v v w)
+        (flash_warp_s v w) (flash_warp_p v w)
+        (flash_warp_pv v w) (flash_warp_cw v w) lane)
+    _;
+  forevery_unzip_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      when_ (w = 0)
+        (out_store_cells b hq sq 16sz d rows gout
+          (flash_bid_bi
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (flash_bid_kvh
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)))
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles)
+            (bid <: natlt
+              (SZ.v b * SZ.v hkv * SZ.v tiles)) * 16)
+          lane))
+    _;
+
+  flash_gather_thread_tensor nw nthr gQ
+    #(fQ /. (SZ.v nblk)) #eQ;
+  flash_gather_thread_tensor nw nthr gK
+    #(fK /. (SZ.v nblk)) #eK;
+  flash_gather_thread_tensor nw nthr gV
+    #(fV /. (SZ.v nblk)) #eV;
+  flash_gather_thread_tensor nw nthr gmask
+    #(fmask /. (SZ.v nblk)) #emask;
+
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest2 et_ab 16 (SZ.v d)).
+        v.shQv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shQv (block_threads nw);
+
+  forevery_map_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      b1_post nw v.shMv v.shLv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)))
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      (exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shMv |-> Frac
+          (1.0R /. (block_threads nw)) e) **
+      (exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shLv |-> Frac
+          (1.0R /. (block_threads nw)) e))
+    fn w lane {
+      unfold b1_post nw v.shMv v.shLv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw));
+    };
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shMv |-> Frac
+          (1.0R /. (block_threads nw)) e)
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shLv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shMv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shMv (block_threads nw);
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shLv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shLv (block_threads nw);
+
+  forevery_map_2
+    (fun (w : natlt (SZ.v nw))
+      (lane : natlt BW.warp_size) ->
+      b2_post nw d v.shscalev v.shOv v.shglv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw)))
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      (exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shscalev |-> Frac
+          (1.0R /. (block_threads nw)) e) **
+      (exists* (e : chest2 et_acc
+        (SZ.v nw * 16) (SZ.v d)).
+        v.shOv |-> Frac
+          (1.0R /. (block_threads nw)) e) **
+      (exists* (e : chest1 et_acc 16).
+        v.shglv |-> Frac
+          (1.0R /. (block_threads nw)) e))
+    fn w lane {
+      unfold b2_post nw d
+        v.shscalev v.shOv v.shglv
+        (w * BW.warp_size + lane
+          <: natlt (block_threads nw));
+    };
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shscalev |-> Frac
+          (1.0R /. (block_threads nw)) e)
+    _;
+  forevery_unzip_2
+    (fun (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size) ->
+      exists* (e : chest2 et_acc
+        (SZ.v nw * 16) (SZ.v d)).
+        v.shOv |-> Frac
+          (1.0R /. (block_threads nw)) e)
+    _;
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest2 et_acc (SZ.v nw) 16).
+        v.shscalev |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shscalev (block_threads nw);
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest2 et_acc
+        (SZ.v nw * 16) (SZ.v d)).
+        v.shOv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shOv (block_threads nw);
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      exists* (e : chest1 et_acc 16).
+        v.shglv |-> Frac
+          (1.0R /. (block_threads nw)) e);
+  flash_gather_tensor v.shglv (block_threads nw);
+
+  flash_gather_jt nw d v;
+  flash_output_remove_warps nw
+    b hq hkv group sq rows tiles d gout
+    (bid <: natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles));
+  flash_gather_gm nw v.shgmv;
+
+  fold flash_views_live v;
+  rewrite each v as (flash_views_of nw d sh);
+  flash_close_shmems nw d sh;
+  fold flash_block_state nblk
+    b hq hkv group sq rows tiles sk d
+    gQ gK gV gmask gout #fQ #fK #fV #fmask
+    #eQ #eK #eV #emask bid;
+}
+
+ghost
+fn flash_b0_to_descriptor
   (#et_ab #et_acc : Type0)
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
-  (#_ : squash (SZ.fits (16 * SZ.v d)))
-  (#_ : squash (SZ.fits (SZ.v nw * 16)))
-  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
-  (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
-  (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
-  (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
-  (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
-  (shgl : array1 et_acc (l1_forward 16))
-  (it : nat)
+  (v : flash_views et_ab et_acc (SZ.v nw) (SZ.v d))
+  (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size)
+  (tid : natlt (block_threads nw))
   requires
-    forall+ (tid : natlt (block_threads nw)).
-      barrier_rin nw d shQ shM shL shscale shO shgl it tid
-  ensures
-    forall+ (tid : natlt (block_threads nw)).
-      barrier_rout nw d shQ shM shL shscale shO shgl it tid
+    pure (thread_w nw tid == w /\
+          thread_lane nw tid == lane) **
+    flash_b0_local nw d v w lane
+  ensures b0_pre nw d v.shQv v.shOv tid
 {
-  if (it = 0) {
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> b0_pre nw d shQ shO tid)
-      fn tid {
-        rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-          as
-          (b0_pre nw d shQ shO tid);
-      };
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> b0_pre nw d shQ shO tid)
-      (fun tid ->
-        strided_cells2 shQ (block_threads nw) tid **
-        strided_cells2
-          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          BW.warp_size (thread_lane nw tid))
-      fn tid {
-        unfold b0_pre nw d shQ shO tid;
-      };
-    forevery_unzip #(natlt (block_threads nw))
-      (fun tid -> strided_cells2 shQ (block_threads nw) tid)
-      (fun tid ->
-        strided_cells2
-          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          BW.warp_size (thread_lane nw tid));
-
-    strided_cells2_gather shQ (block_threads nw);
-    with eQ. assert (shQ |-> Frac 1.0R eQ);
-    tensor_share_n shQ (block_threads nw);
-    forevery_map #(natlt (block_threads nw))
-      (fun _ -> shQ |-> Frac (1.0R /. (block_threads nw)) eQ)
-      (fun _ ->
-        exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e)
-      fn tid { () };
-
-    b0_o_transform nw d shO;
-    forevery_zip #(natlt (block_threads nw))
-      (fun _ ->
-        exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e)
-      (fun tid ->
-        exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-            warp_row_span 16
-            (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-            |-> Frac 1.0R e);
-    forevery_map #(natlt (block_threads nw))
-      (fun tid ->
-        (exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e) **
-        (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-            warp_row_span 16
-            (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-            |-> Frac 1.0R e))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
-      fn tid {
-        rewrite
-          ((exists* (e : chest2 et_ab 16 (SZ.v d)).
-              shQ |-> Frac (1.0R /. (block_threads nw)) e) **
-           (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-              array2_stride_subtile
-                (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-                warp_row_span 16
-                (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-                |-> Frac 1.0R e))
-          as
-          (b0_post nw d shQ shO tid);
-        rewrite
-          (b0_post nw d shQ shO tid)
-          as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
-      };
-  } else if (it = 1) {
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> b1_pre nw shM shL tid)
-      fn tid {
-        rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-          as
-          (b1_pre nw shM shL tid);
-      };
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> b1_pre nw shM shL tid)
-      (fun tid -> b1_pre_one nw shM tid ** b1_pre_one nw shL tid)
-      fn tid {
-        unfold b1_pre nw shM shL tid;
-      };
-    forevery_unzip #(natlt (block_threads nw))
-      (fun tid -> b1_pre_one nw shM tid)
-      (fun tid -> b1_pre_one nw shL tid);
-    b1_matrix_transform nw shM;
-    b1_matrix_transform nw shL;
-    forevery_zip #(natlt (block_threads nw))
-      (fun _ ->
-        exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shM |-> Frac (1.0R /. (block_threads nw)) e)
-      (fun _ ->
-        exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shL |-> Frac (1.0R /. (block_threads nw)) e);
-    forevery_map #(natlt (block_threads nw))
-      (fun _ ->
-        (exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shM |-> Frac (1.0R /. (block_threads nw)) e) **
-        (exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shL |-> Frac (1.0R /. (block_threads nw)) e))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
-      fn tid {
-        rewrite
-          ((exists* (e : chest2 et_acc (SZ.v nw) 16).
-              shM |-> Frac (1.0R /. (block_threads nw)) e) **
-           (exists* (e : chest2 et_acc (SZ.v nw) 16).
-              shL |-> Frac (1.0R /. (block_threads nw)) e))
-          as
-          (b1_post nw shM shL tid);
-        rewrite
-          (b1_post nw shM shL tid)
-          as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
-      };
-  } else if (it = 2) {
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> b2_pre nw d shscale shO shgl tid)
-      fn tid {
-        rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-          as
-          (b2_pre nw d shscale shO shgl tid);
-      };
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> b2_pre nw d shscale shO shgl tid)
-      (fun tid ->
-        b2_o_pre nw d shO tid ** b2_scale_pre nw shscale shgl tid)
-      fn tid {
-        unfold b2_pre nw d shscale shO shgl tid;
-      };
-    forevery_unzip #(natlt (block_threads nw))
-      (fun tid -> b2_o_pre nw d shO tid)
-      (fun tid -> b2_scale_pre nw shscale shgl tid);
-    b2_o_transform nw d shO;
-    b2_scale_transform nw shscale shgl;
-    forevery_zip #(natlt (block_threads nw))
-      (fun _ ->
-        exists* (e : chest2 et_acc (SZ.v nw * 16) (SZ.v d)).
-          shO |-> Frac (1.0R /. (block_threads nw)) e)
-      (fun _ ->
-        exists* (e : chest1 et_acc 16).
-          shgl |-> Frac (1.0R /. (block_threads nw)) e);
-    forevery_zip #(natlt (block_threads nw))
-      (fun _ ->
-        exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shscale |-> Frac (1.0R /. (block_threads nw)) e)
-      (fun _ ->
-        (exists* (e : chest2 et_acc (SZ.v nw * 16) (SZ.v d)).
-          shO |-> Frac (1.0R /. (block_threads nw)) e) **
-        (exists* (e : chest1 et_acc 16).
-          shgl |-> Frac (1.0R /. (block_threads nw)) e));
-    forevery_map #(natlt (block_threads nw))
-      (fun _ ->
-        (exists* (e : chest2 et_acc (SZ.v nw) 16).
-          shscale |-> Frac (1.0R /. (block_threads nw)) e) **
-        ((exists* (e : chest2 et_acc (SZ.v nw * 16) (SZ.v d)).
-          shO |-> Frac (1.0R /. (block_threads nw)) e) **
-         (exists* (e : chest1 et_acc 16).
-          shgl |-> Frac (1.0R /. (block_threads nw)) e)))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
-      fn tid {
-        rewrite
-          ((exists* (e : chest2 et_acc (SZ.v nw) 16).
-              shscale |-> Frac (1.0R /. (block_threads nw)) e) **
-           ((exists* (e : chest2 et_acc (SZ.v nw * 16) (SZ.v d)).
-              shO |-> Frac (1.0R /. (block_threads nw)) e) **
-            (exists* (e : chest1 et_acc 16).
-              shgl |-> Frac (1.0R /. (block_threads nw)) e)))
-          as
-          (b2_post nw d shscale shO shgl tid);
-        rewrite
-          (b2_post nw d shscale shO shgl tid)
-          as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
-      };
-  } else {
-    forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
-      fn tid {
-        rewrite (barrier_rin nw d shQ shM shL shscale shO shgl it tid) as emp;
-        rewrite emp as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
-      };
-  }
+  unfold flash_b0_local nw d v w lane;
+  rewrite each w as (thread_w nw tid);
+  rewrite each lane as (thread_lane nw tid);
+  FStar.Math.Lemmas.lemma_div_mod
+    (tid <: nat) BW.warp_size;
+  rewrite each
+    (thread_w nw tid * BW.warp_size +
+      thread_lane nw tid)
+    as tid;
+  fold b0_pre nw d v.shQv v.shOv tid;
 }
+
