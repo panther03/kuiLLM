@@ -185,7 +185,7 @@ def test_addmm_1d_bias(dtype, alpha, beta):
     _assert_close(out, ref, dtype)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
 def test_addmm(dtype, alpha, beta):
     _need_cuda()
