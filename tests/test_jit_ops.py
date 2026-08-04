@@ -51,10 +51,12 @@ def _assert_close(out, ref, dtype):
 @pytest.mark.parametrize("in_dtype,acc_dtype,out_dtype", [
     (torch.float16, torch.float16, torch.float16),
     (torch.float16, torch.float32, torch.float32),
+    (torch.float16, torch.float32, torch.float16),
     (torch.bfloat16, torch.float32, torch.float32),
 ])
 def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype):
-    """TensorCore2D wins whenever the accumulator *is* the output type."""
+    """TensorCore2D wins whenever wmma can hold the output in an accumulator
+    fragment; the accumulator and the output need not agree."""
     _need_tensor_cores(in_dtype)
     impl = kuiops.MmImpl()
     torch.manual_seed(0)
@@ -69,10 +71,10 @@ def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype):
     _assert_close(out, ref, out_dtype)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_mm_tensorcore2d_to(dtype):
-    """With the defaults (f32 accumulator, input-typed output) the cast-on-write
-    backend is the one that fits."""
+    """bf16 has no wmma accumulator fragment, so a bf16 output can only be
+    reached through the cast-on-write backend."""
     _need_tensor_cores(dtype)
     impl = kuiops.MmImpl()
     torch.manual_seed(0)
@@ -108,10 +110,13 @@ def test_mm_backend_selection():
         spec = impl.supported(aten.mm.default, (A, B), kwargs)
         return spec and spec["backend"]
 
-    assert backend(torch.float16) == "tc2d_to"
+    assert backend(torch.float16) == "tc2d"
     assert backend(torch.float16, acc_dtype=torch.float16) == "tc2d"
     assert backend(torch.bfloat16, out_dtype=torch.float32) == "tc2d"
     assert backend(torch.float32) == "bt2d"
+    # A bf16 output has no wmma accumulator fragment, so tc2d cannot combine
+    # into it and the cast-on-write backend takes over.
+    assert backend(torch.bfloat16) == "tc2d_to"
     # bf16 can only accumulate in f32 on a tensor core, so an explicit bf16
     # accumulator falls through to the block-tiled backend.
     assert backend(torch.bfloat16, acc_dtype=torch.bfloat16) == "bt2d"
@@ -192,12 +197,12 @@ def test_addmm(dtype, alpha, beta):
     bias = torch.randn(M, N, device="cuda", dtype=dtype)  # 2D bias/C matrix
     kw = dict(alpha=alpha, beta=beta)
     spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
-    expected = (
-        "tc2d_to"
-        if dtype in kuiops._TC_INPUT_DTYPES
-        and kuiops._tc_device_supported(dtype, A.device)
-        else "bt2d"
-    )
+    expected = "bt2d"
+    if (dtype in kuiops._TC_INPUT_DTYPES
+            and kuiops._tc_device_supported(dtype, A.device)):
+        # tc2d combines into C in place, so it needs an accumulator fragment of
+        # the output type; bf16 has none and falls through to cast-on-write.
+        expected = "tc2d" if dtype in kuiops._TC_FRAG_ACC_DTYPES else "tc2d_to"
     assert spec is not None and spec["backend"] == expected
     out = impl.run(spec, (bias, A, B), kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)

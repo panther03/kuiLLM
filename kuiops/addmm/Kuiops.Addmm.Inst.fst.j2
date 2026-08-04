@@ -14,9 +14,9 @@ module MS = Kuiper.Spec.GEMM
 
 {% if backend == "tc2d" %}
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
-    tc2d_async ({{ in_et }}) ({{ acc_et }})
+    tc2d_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.lincomb #({{ acc_et }}) alpha beta)
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
         rows shared cols
 {% elif backend == "tc2d_to" %}
