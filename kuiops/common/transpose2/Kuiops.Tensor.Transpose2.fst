@@ -41,6 +41,7 @@ open Pulse.Lib.Trade { (@==>) }
 
 module SZ = Kuiper.SizeT
 module CV2 = Kuiper.Kernel.GEMM.Copy.Vec2
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 (* ------------------------------------------------------------------ *)
 (* The rank-2 index-swap bijection.                                    *)
@@ -80,8 +81,8 @@ let ltranspose_cell (#rows #cols : erased nat) (l : layout2 rows cols)
 
 inline_for_extraction noextract
 let srm_of_scm (#rows #cols : erased nat) (#l : layout2 rows cols)
-  (scm : strided_col_major l)
-  : strided_row_major (ltranspose l)
+  (scm : strided_col_major (vtlayout_of_tlayout l))
+  : strided_row_major (vtlayout_of_tlayout (ltranspose l))
 = {
     offset = scm.offset;
     stride = scm.stride;
@@ -92,7 +93,7 @@ let srm_of_scm (#rows #cols : erased nat) (#l : layout2 rows cols)
 (* Alignment carries over verbatim, since [srm_of_scm] copies [offset] and
    [stride] unchanged. *)
 let lemma_aligned_srm_of_scm (#rows #cols : erased nat) (#l : layout2 rows cols)
-  (scm : strided_col_major l) (n : pos)
+  (scm : strided_col_major (vtlayout_of_tlayout l)) (n : pos)
   : Lemma (requires aligned_strided_col_major n scm)
           (ensures aligned_strided_row_major n (srm_of_scm scm))
 = ()
@@ -138,8 +139,8 @@ instance ctlayout_ltranspose_inst (#rows #cols : erased nat)
 
 inline_for_extraction noextract
 instance srm_of_scm_inst (#rows #cols : erased nat) (#l : layout2 rows cols)
-  {| scm : strided_col_major l |}
-  : strided_row_major (ltranspose l)
+  {| scm : strided_col_major (vtlayout_of_tlayout l) |}
+  : strided_row_major (vtlayout_of_tlayout (ltranspose l))
 = srm_of_scm scm
 
 (* ------------------------------------------------------------------ *)

@@ -34,6 +34,8 @@ module MS = Kuiper.Spec.GEMM
 open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
 open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState
+open Kuiper.TensorRO { vtlayout_of_tlayout }
+module RO = Kuiper.TensorRO
 
 inline_for_extraction noextract
 fn setup
@@ -63,7 +65,8 @@ ghost fn prepare_epilogue
   {| scalar et_ab, scalar et_cd, real_like et_cd,
      scalar et_acc, real_like et_acc |}
   (#m #n : szp)
-  (gC : array2 et_cd (rm m n))
+  (#lC : RO.vlayout2 m n)
+  (gC : RO.roarray2 et_cd lC)
   (fC : perm)
   (eC : chest2 et_cd m n)
   (rC : chest2 real m n)
@@ -188,8 +191,10 @@ fn finish
   (comb : et_cd -> et_acc -> et_cd)
   (comb_r : binop real { approx2 comb comb_r })
   (#m #n #k : szp)
-  {| str : strided_row_major (rm m n) |}
-  (gC : array2 et_cd (rm m n))
+  (#lC : RO.vlayout2 m n)
+  {| str : strided_row_major lC,
+     strD : strided_row_major (vtlayout_of_tlayout (rm m n)) |}
+  (gC : RO.roarray2 et_cd lC)
   (#eC : chest2 et_cd m n)
   (gD : array2 et_cd (rm m n))
   (bm bn bk tm tn tk wm wn : szp {
@@ -239,8 +244,9 @@ fn finish
         (warp_tile_j #m #n bm bn bk tm tn tk wm wn
           nthr bid (tid / warp_size))) })
   preserves
-    pure (aligned 16 (core gC) /\ aligned 16 (core gD) /\
-          aligned_strided_row_major (chunk et_cd) str)
+    pure (aligned 16 (RO.core gC) /\ aligned 16 (core gD) /\
+          aligned_strided_row_major (chunk et_cd) str /\
+          aligned_strided_row_major (chunk et_cd) strD)
   requires
     epilogue_frame #et_ab #et_cd #et_acc
       #_ #_ #_ #_ #_

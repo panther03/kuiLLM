@@ -125,7 +125,7 @@ flowchart LR
 | aten::add.Tensor | T(3,bf16,c), T(3,bf16,c) | T(3,bf16,c) |  |
 | aten::add.Tensor | T(3,f32,c), int | T(3,f32,c) |  |
 | aten::add.Tensor | T(1,int64,c), int | T(1,int64,c) |  |
-| aten::addmm | T(1,bf16,c), T(2,bf16,c), T(2,bf16,c) | T(2,bf16,c) |  |
+| aten::addmm | T(1,bf16,c), T(2,bf16,c), T(2,bf16,c) | T(2,bf16,c) | yes |
 | aten::argmax | T(3,bf16,c), int | T(2,int64,c) |  |
 | aten::cat | [T(4,bf16,c), T(4,bf16,c)], int | T(4,bf16,c) |  |
 | aten::copy_ | T(1,int64,c), T(1,int64,c) | T(1,int64,c) |  |

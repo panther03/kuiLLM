@@ -32,6 +32,7 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module KTN = Kuiops.GEMM.T.TensorCore2D.Kernel
 module CM = Kuiops.Array2.Strided.ColMajor
+module RO = Kuiper.TensorRO
 
 #push-options "--split_queries always"
 inline_for_extraction noextract
@@ -65,12 +66,14 @@ fn tc2d_tn_async
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
   (gB : array2 et_ab (l2_col_major (SZ.v shared) (SZ.v cols)) { is_global gB })
-  (gC : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gC })
+  (gC : RO.roarray2 et_cd
+          (RO.vtlayout_of_tlayout (l2_row_major (SZ.v rows) (SZ.v cols)))
+          { RO.is_global gC })
   (gD : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
   (s : stream_t)
   (#_ : squash (aligned 16 (core gA)))
   (#_ : squash (aligned 16 (core gB)))
-  (#_ : squash (aligned 16 (core gC)))
+  (#_ : squash (aligned 16 (RO.core gC)))
   (#_ : squash (aligned 16 (core gD)))
   (#_ : squash (chunk et_cd /?+ cols))
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
@@ -93,9 +96,11 @@ fn tc2d_tn_async
           pure (eD' %~ MS.mmcomb comb_r
                   (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
 {
+  lemma_aligned_strided_row_major_l2_row_major
+    #(SZ.v rows) #(SZ.v cols) (chunk et_cd);
   tensor_pts_to_ref_located gA;
   tensor_pts_to_ref_located gB;
-  tensor_pts_to_ref_located gC;
+  RO.tensor_pts_to_ref_located gC;
   tensor_pts_to_ref_located gD;
 
   dassert (bm %^ tm = 0sz);

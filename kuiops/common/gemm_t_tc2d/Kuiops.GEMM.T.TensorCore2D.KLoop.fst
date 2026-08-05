@@ -60,6 +60,7 @@ open Kuiops.GEMM.T.TensorCore2D.Fragments
 open Kuiops.Tensor.Transpose2
 open Kuiops.Array2.Strided.ColMajor
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoopInvariant
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 (* Folds the row-major chunk ownership of the transposed view back into the
    column-major predicate.  [own_strided_chunks_cm m em] is *definitionally*
@@ -149,8 +150,8 @@ fn k_loop_step
   (gA : array2 et_ab lA)
   (#eA : chest2 et_ab m k)
   (#lB : layout2 k n) {| T.ctlayout lB |}
-  {| str_A : strided_row_major lA |}
-  (str_B : strided_col_major lB)
+  {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
+  (str_B : strided_col_major (vtlayout_of_tlayout lB))
   (#_ : squash (aligned_strided_row_major (chunk et_ab) str_A))
   (#_ : squash (aligned_strided_col_major (chunk et_ab) str_B))
   (gB : array2 et_ab lB)
@@ -397,8 +398,8 @@ fn compute_acc
   (gA : array2 et_ab lA)
   (#eA : chest2 et_ab m k)
   (#lB : layout2 k n) {| T.ctlayout lB |}
-  {| str_A : strided_row_major lA |}
-  (str_B : strided_col_major lB)
+  {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
+  (str_B : strided_col_major (vtlayout_of_tlayout lB))
   (#_ : squash (aligned_strided_row_major (chunk et_ab) str_A))
   (#_ : squash (aligned_strided_col_major (chunk et_ab) str_B))
   (gB : array2 et_ab lB)

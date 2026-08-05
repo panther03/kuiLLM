@@ -28,6 +28,7 @@ module T = Kuiper.Tensor
 module KT = Kuiper.Kernel.GEMM.TensorCore2D
 module KTT = Kuiper.Kernel.GEMM.TensorCore2D.To
 module KB = Kuiper.Kernel.GEMM.BlockTiling2D
+module RO = Kuiper.TensorRO
 
 (* The batched row-major layout is affine in (page, row, col) with offset 0,
    page stride rows*cols and row stride cols; [l3_batched_row_major_imap] is the
@@ -135,7 +136,7 @@ fn bt2d_async
    from the C/D type. *)
 #push-options "--split_queries always"
 inline_for_extraction noextract
-fn tc2d_to_async
+fn tc2d_to_gen_async
   (et_ab et_acc et_cd : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
   {| scalar et_acc, real_like et_acc |}
@@ -167,12 +168,15 @@ fn tc2d_to_async
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
   (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
-  (gC : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gC })
+  (#lC : RO.vlayout2 (SZ.v rows) (SZ.v cols))
+  {| strC : strided_row_major lC |}
+  (#_ : squash (aligned_strided_row_major (chunk et_cd) strC))
+  (gC : RO.roarray2 et_cd lC { RO.is_global gC })
   (gD : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
   (s : stream_t)
   (#_ : squash (aligned 16 (core gA)))
   (#_ : squash (aligned 16 (core gB)))
-  (#_ : squash (aligned 16 (core gC)))
+  (#_ : squash (aligned 16 (RO.core gC)))
   (#_ : squash (aligned 16 (core gD)))
   (#_ : squash (chunk et_cd /?+ cols))
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
@@ -197,7 +201,7 @@ fn tc2d_to_async
 {
   tensor_pts_to_ref_located gA;
   tensor_pts_to_ref_located gB;
-  tensor_pts_to_ref_located gC;
+  RO.tensor_pts_to_ref_located gC;
   tensor_pts_to_ref_located gD;
 
   dassert (bm %^ tm = 0sz);
@@ -246,6 +250,74 @@ fn tc2d_to_async
   ) s};
 }
 #pop-options
+
+inline_for_extraction noextract
+fn tc2d_to_async
+  (et_ab et_acc et_cd : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
+  {| scalar et_acc, real_like et_acc |}
+  {| scalar et_cd, has_vec_cpy et_cd, real_like et_cd |}
+  {| float_cast et_cd et_acc, float_cast et_acc et_cd |}
+  (bm bn bk : szp)
+  (#_ : squash (chunk et_ab /?+ bk))
+  (#_ : squash (chunk et_ab /?+ bn))
+  (tm : szp{tm /?+ bm})
+  (tn : szp{tn /?+ bn})
+  (tk : szp{tk /?+ bk})
+  (wm : szp{wm * tm /?+ bm})
+  (wn : szp{wn * tn /?+ bn})
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bm * bk)))
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bk * bn)))
+  (#_ : squash (chunk et_cd /?+ tn))
+  (#_ : squash (SZ.fits (wm * wn)))
+  (#_ : squash (SZ.fits (wm * tm)))
+  (#_ : squash (SZ.fits (wn * tn)))
+  (#_ : squash (valid_frag_et_dims et_ab FragA tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_ab FragB tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_acc FragAcc tm tn tk))
+  (#_ : squash (valid_frag_et_comb et_ab et_acc))
+  (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
+  (comb : et_cd -> et_acc -> et_cd)
+  (comb_r : binop real { approx2 comb comb_r })
+  (rows shared cols : szp)
+  (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+  (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
+  (gC : RO.roarray2 et_cd (rmC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+  (gD : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
+  (s : stream_t)
+  (#_ : squash (aligned 16 (core gA)))
+  (#_ : squash (aligned 16 (core gB)))
+  (#_ : squash (aligned 16 (RO.core gC)))
+  (#_ : squash (aligned 16 (core gD)))
+  (#_ : squash (chunk et_cd /?+ cols))
+  (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
+  (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
+  (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
+  (#fA #fB #fC : perm)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires
+    pure ((rows/bm) * (cols/bn) <= max_blocks) **
+    pure (SZ.fits (rows * cols)) **
+    on gpu_loc (gA |-> Frac fA eA) **
+    on gpu_loc (gB |-> Frac fB eB) **
+    on gpu_loc (gC |-> Frac fC eC) **
+    on gpu_loc (live gD)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
+        (exists* eD'. (gD |-> eD') **
+          pure (eD' %~ MS.mmcomb comb_r
+                  (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
+
+{
+  lemma_aligned_strided_row_major_l2_row_major
+    #(SZ.v rows) #(SZ.v cols) (chunk et_cd);
+  tc2d_to_gen_async et_ab et_acc et_cd bm bn bk tm tn tk wm wn comb comb_r
+    rows shared cols gA gB gC gD s
+}
 
 #push-options "--split_queries always"
 inline_for_extraction noextract
@@ -353,3 +425,71 @@ fn tc2d_async
   ) s};
 }
 #pop-options
+
+inline_for_extraction noextract
+fn tc2d_to_bcast_async
+  (et_ab et_acc et_cd : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
+  {| scalar et_acc, real_like et_acc |}
+  {| scalar et_cd, has_vec_cpy et_cd, real_like et_cd |}
+  {| float_cast et_cd et_acc, float_cast et_acc et_cd |}
+  (bm bn bk : szp)
+  (#_ : squash (chunk et_ab /?+ bk))
+  (#_ : squash (chunk et_ab /?+ bn))
+  (tm : szp{tm /?+ bm})
+  (tn : szp{tn /?+ bn})
+  (tk : szp{tk /?+ bk})
+  (wm : szp{wm * tm /?+ bm})
+  (wn : szp{wn * tn /?+ bn})
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bm * bk)))
+  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bk * bn)))
+  (#_ : squash (chunk et_cd /?+ tn))
+  (#_ : squash (SZ.fits (wm * wn)))
+  (#_ : squash (SZ.fits (wm * tm)))
+  (#_ : squash (SZ.fits (wn * tn)))
+  (#_ : squash (valid_frag_et_dims et_ab FragA tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_ab FragB tm tn tk))
+  (#_ : squash (valid_frag_et_dims et_acc FragAcc tm tn tk))
+  (#_ : squash (valid_frag_et_comb et_ab et_acc))
+  (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
+  (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
+  (comb : et_cd -> et_acc -> et_cd)
+  (comb_r : binop real { approx2 comb comb_r })
+  (rows shared cols : szp)
+  (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+  (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
+  (gC : RO.roarray2 et_cd (bcastC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+  (gD : array2 et_cd (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
+  (s : stream_t)
+  (#_ : squash (aligned 16 (core gA)))
+  (#_ : squash (aligned 16 (core gB)))
+  (#_ : squash (aligned 16 (RO.core gC)))
+  (#_ : squash (aligned 16 (core gD)))
+  (#_ : squash (chunk et_cd /?+ cols))
+  (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
+  (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
+  (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
+  (#fA #fB #fC : perm)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires
+    pure ((rows/bm) * (cols/bn) <= max_blocks) **
+    pure (SZ.fits (rows * cols)) **
+    on gpu_loc (gA |-> Frac fA eA) **
+    on gpu_loc (gB |-> Frac fB eB) **
+    on gpu_loc (gC |-> Frac fC eC) **
+    on gpu_loc (live gD)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
+        (exists* eD'. (gD |-> eD') **
+          pure (eD' %~ MS.mmcomb comb_r
+                  (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
+
+{
+  lemma_aligned_strided_row_major_bcast_l1
+    #(SZ.v rows) #(SZ.v cols) (chunk et_cd);
+  tc2d_to_gen_async et_ab et_acc et_cd bm bn bk tm tn tk wm wn comb comb_r
+    rows shared cols gA gB gC gD s
+}

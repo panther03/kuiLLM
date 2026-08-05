@@ -380,7 +380,7 @@ _TC_ACC_DTYPES = {
 _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
 _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
-                "bt2d": "Bt2D"}
+                "tc2d_to_bcast": "Tc2DToBcast", "bt2d": "Bt2D"}
 
 
 def _tc_device_supported(dtype, device):
@@ -485,7 +485,9 @@ def _backend_supports(backend, in_dtype, acc_dtype, out_dtype, device):
             or acc_dtype not in _TC_ACC_DTYPES[in_dtype]):
         return False
     if backend == "tc2d":
-        return out_dtype in _TC_FRAG_ACC_DTYPES
+        # The epilogue stores the wmma accumulator fragment straight into C,
+        # so C's element type has to be the accumulator's.
+        return out_dtype == acc_dtype and out_dtype in _TC_FRAG_ACC_DTYPES
     return out_dtype in _VEC_CPY_DTYPES
 
 class _MatmulFamily(_Family):
@@ -671,7 +673,7 @@ class AddmmImpl(_MatmulFamily):
 
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    backends = ("tc2d", "tc2d_to", "bt2d")
+    backends = ("tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.addmm.default"
 
     @staticmethod
@@ -688,14 +690,23 @@ class AddmmImpl(_MatmulFamily):
         if len(args) != 3:
             return None
         Cin, A, B = args
-        if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 2
+        if not all(isinstance(t, torch.Tensor) and t.is_cuda
                    for t in (Cin, A, B)):
             return None
-        if A.dtype != B.dtype:
+        if A.dim() != 2 or B.dim() != 2 or A.dtype != B.dtype:
             return None
         M, K = (int(x) for x in A.shape)
         K2, N = (int(x) for x in B.shape)
-        if K != K2 or tuple(int(x) for x in Cin.shape) != (M, N):
+        if K != K2:
+            return None
+        cshape = tuple(int(x) for x in Cin.shape)
+        if cshape == (M, N):
+            backends = tuple(b for b in self.backends if b != "tc2d_to_bcast")
+        elif cshape in ((N,), (1, N)):
+            # A row bias. Only the broadcast-layout epilogue can read it; every
+            # other backend needs C to have a cell per output element.
+            backends = ("tc2d_to_bcast",)
+        else:
             return None
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
@@ -703,7 +714,8 @@ class AddmmImpl(_MatmulFamily):
             return None
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
-            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            for backend, acc_dtype, out_dtype
+            in self._plans(kwargs, A.dtype, A.device, backends)
             # C is the output buffer, so it already has to be the output type.
             if Cin.dtype == out_dtype
             for tile in _tiles(backend, A.dtype, 1, M, N, K)

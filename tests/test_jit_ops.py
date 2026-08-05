@@ -48,15 +48,17 @@ def _assert_close(out, ref, dtype):
 # mm
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("in_dtype,acc_dtype,out_dtype", [
-    (torch.float16, torch.float16, torch.float16),
-    (torch.float16, torch.float32, torch.float32),
-    (torch.float16, torch.float32, torch.float16),
-    (torch.bfloat16, torch.float32, torch.float32),
+@pytest.mark.parametrize("in_dtype,acc_dtype,out_dtype,backend", [
+    (torch.float16, torch.float16, torch.float16, "tc2d"),
+    (torch.float16, torch.float32, torch.float32, "tc2d"),
+    (torch.bfloat16, torch.float32, torch.float32, "tc2d"),
+    # An output that is not the accumulator type cannot be stored from the
+    # accumulator fragment, so it goes through the cast-on-write backend.
+    (torch.float16, torch.float32, torch.float16, "tc2d_to"),
 ])
-def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype):
+def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype, backend):
     """TensorCore2D wins whenever wmma can hold the output in an accumulator
-    fragment; the accumulator and the output need not agree."""
+    fragment."""
     _need_tensor_cores(in_dtype)
     impl = kuiops.MmImpl()
     torch.manual_seed(0)
@@ -64,7 +66,7 @@ def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype):
     B = torch.randn(64, 64, device="cuda", dtype=in_dtype)
     kwargs = {"acc_dtype": acc_dtype, "out_dtype": out_dtype}
     spec = impl.supported(aten.mm.default, (A, B), kwargs)
-    assert spec is not None and spec["backend"] == "tc2d"
+    assert spec is not None and spec["backend"] == backend
     out = impl.run(spec, (A, B), kwargs)
     ref = torch.mm(A.float(), B.float()).to(out_dtype)
     assert out.dtype == out_dtype
@@ -110,7 +112,9 @@ def test_mm_backend_selection():
         spec = impl.supported(aten.mm.default, (A, B), kwargs)
         return spec and spec["backend"]
 
-    assert backend(torch.float16) == "tc2d"
+    # The default f32 accumulator cannot be stored into an f16 C, so an f16
+    # output only comes out of the cast-on-write backend.
+    assert backend(torch.float16) == "tc2d_to"
     assert backend(torch.float16, acc_dtype=torch.float16) == "tc2d"
     assert backend(torch.bfloat16, out_dtype=torch.float32) == "tc2d"
     assert backend(torch.float32) == "bt2d"
@@ -168,9 +172,10 @@ def test_bmm_unsupported():
 # addmm
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+# The broadcast bias is read through the TensorCore2D.To epilogue, so it is
+# available exactly for the tensor-core input dtypes.
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0)])
-@pytest.mark.skip(reason="broadcasting currently disabled")
 def test_addmm_1d_bias(dtype, alpha, beta):
     _need_cuda()
     torch.manual_seed(0)
@@ -200,9 +205,9 @@ def test_addmm(dtype, alpha, beta):
     expected = "bt2d"
     if (dtype in kuiops._TC_INPUT_DTYPES
             and kuiops._tc_device_supported(dtype, A.device)):
-        # tc2d combines into C in place, so it needs an accumulator fragment of
-        # the output type; bf16 has none and falls through to cast-on-write.
-        expected = "tc2d" if dtype in kuiops._TC_FRAG_ACC_DTYPES else "tc2d_to"
+        # tc2d stores the accumulator fragment into C, so it needs the output
+        # to be the (f32) accumulator type; a 16-bit output goes cast-on-write.
+        expected = "tc2d_to"
     assert spec is not None and spec["backend"] == expected
     out = impl.run(spec, (bias, A, B), kw)
     ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)

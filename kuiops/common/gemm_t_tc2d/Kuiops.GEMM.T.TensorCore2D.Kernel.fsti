@@ -2,7 +2,7 @@ module Kuiops.GEMM.T.TensorCore2D.Kernel
 
 (* Fork of [Kuiper.Kernel.GEMM.TensorCore2D.To] for the transposed-B ("TN")
    GEMM: [mk_kernel] takes B as [array2 et_ab lB] with an explicit
-   [strided_col_major lB] witness (leading dimension k) instead of a
+   [strided_col_major (vtlayout_of_tlayout lB)] witness (leading dimension k) instead of a
    [strided_row_major] instance.
 
    The MATHEMATICAL SPECIFICATION IS UNCHANGED from upstream: the
@@ -37,6 +37,8 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 
 open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { constraints }
+open Kuiper.TensorRO { vtlayout_of_tlayout }
+module RO = Kuiper.TensorRO
 // ^ Only opened here for `constraints`? If so would be nice
 // to factor out.
 
@@ -53,13 +55,16 @@ val mk_kernel
   (gA : array2 et_ab lA { is_global gA })
   (#eA : chest2 et_ab m k)
   (#lB : layout2 k n) {| T.ctlayout lB |}
-  {| str_A : strided_row_major lA |}
-  (str_B : strided_col_major lB)
+  {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
+  (str_B : strided_col_major (vtlayout_of_tlayout lB))
   (#_ : squash (aligned_strided_row_major (chunk et_ab) str_A))
   (#_ : squash (aligned_strided_col_major (chunk et_ab) str_B))
   (gB : array2 et_ab lB { is_global gB })
   (#eB : chest2 et_ab k n)
-  (gC : array2 et_cd (rm m n) { is_global gC })
+  (#lC : RO.vlayout2 m n)
+  {| strC : strided_row_major lC |}
+  (#_ : squash (aligned_strided_row_major (chunk et_cd) strC))
+  (gC : RO.roarray2 et_cd lC { RO.is_global gC })
   (#_ : squash (SZ.fits (m * n)))
   (#eC : chest2 et_cd m n)
   (gD : array2 et_cd (rm m n) { is_global gD })
@@ -74,7 +79,7 @@ val mk_kernel
   (#_: squash (SZ.fits (bm * bk) /\ SZ.fits (bk * bn)))
   (#_ : squash (aligned 16 (core gA)))
   (#_ : squash (aligned 16 (core gB)))
-  (#_ : squash (aligned 16 (core gC)))
+  (#_ : squash (aligned 16 (RO.core gC)))
   (#_ : squash (aligned 16 (core gD)))
   (#_ : squash (chunk et_cd /?+ n))
   (#_ : squash (chunk et_cd /?+ tn))
