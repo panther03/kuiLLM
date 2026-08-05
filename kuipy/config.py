@@ -49,7 +49,7 @@ JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
 
 # Bump this whenever a change makes previously selected tuning parameters stale.
-TUNING_SCHEMA_VERSION = 3
+TUNING_SCHEMA_VERSION = 4
 AUTOTUNE = os.environ.get("KUIPY_AUTOTUNE", "0") == "1"
 AUTOTUNE_WARMUP = int(os.environ.get("KUIPY_AUTOTUNE_WARMUP", "3"))
 AUTOTUNE_REPEATS = int(os.environ.get("KUIPY_AUTOTUNE_REPEATS", "10"))
