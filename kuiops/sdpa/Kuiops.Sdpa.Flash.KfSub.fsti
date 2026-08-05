@@ -15,6 +15,7 @@ open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -25,7 +26,7 @@ let jt_rest
   (d sk : szp) (b hq sq : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lcw #lm #ll : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
   (#lS #lP #lPVc : layout2 16 16)
@@ -40,7 +41,7 @@ let jt_rest
   (shcw : array1 et_acc lcw)
   (shm : array1 et_acc lm)
   (shl : array1 et_acc ll)
-  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : array4 et_ab lgmask)
+  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : TRO.roarray4 et_ab lgmask)
   (#fQ #fKg #fVg #fmask : perm)
   (#eQ : chest2 et_ab 16 (SZ.v d))
   (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
@@ -72,7 +73,7 @@ fn sdpa_flash_jt_body
   {| FC.float_cast et_acc et_ab |}
   (d sk : szp) (b hq sq : szp)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lcw #lm #ll : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
   (#lS #lP #lPVc : layout2 16 16)
@@ -85,7 +86,7 @@ fn sdpa_flash_jt_body
   (#_ : squash (valid_frag_et_dims et_ab FragA 16 16 16))
   (#_ : squash (valid_frag_et_dims et_ab FragB 16 16 16))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc 16 16 16))
-  {| ctlayout lgK |} {| ctlayout lgV |} {| ctlayout lgmask |}
+  {| ctlayout lgK |} {| ctlayout lgV |} {| TRO.cvtlayout lgmask |}
   {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |} {| ctlayout lO |}
@@ -105,10 +106,10 @@ fn sdpa_flash_jt_body
   (shl : array1 et_acc ll)
   (gK : array2 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
-  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fQ #fKg #fVg #fmask : perm)
   (#eQ : chest2 et_ab 16 (SZ.v d))
   (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))

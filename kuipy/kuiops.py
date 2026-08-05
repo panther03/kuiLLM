@@ -735,12 +735,15 @@ class SdpaImpl(_Family):
     One fused kernel, no internal synchronization, so it is graph-safe. The
     Kuiper kernel is generic in the element types but the tensor-core fragment
     typeclasses admit only ``(bf16 in, f32 acc)`` and ``(f16 in, f32 acc)`` for
-    a floating accumulator at 16x16x16. The additive mask is read through a
-    ``tlayout``, which is an injection, so a broadcast (stride-0) or absent mask
-    cannot be expressed: a dense ``(B, Hq, Sq, Sk)`` mask of the input dtype is
-    required. That rules out HF's decode mask, which is ``(1, 1, 1, Sk)``;
-    materializing it here would be exactly the kind of unverified patching the
-    wrappers must not do, so lifting the restriction belongs in Kuiper.
+    a floating accumulator at 16x16x16.
+
+    The additive mask is read through a ``rotensor``, whose ``vtlayout`` need not
+    be an injection. An absent mask is therefore a broadcast layout mapping every
+    index to cell 0, paired with ``has_mask=False`` so the kernel skips the read
+    entirely. A *present* mask must still be a dense ``(B, Hq, Sq, Sk)`` tensor of
+    the input dtype: the instantiation template only emits the dense row-major
+    layout, so HF's ``(1, 1, 1, Sk)`` decode mask is still rejected rather than
+    being materialized here.
     """
 
     fst_template = "sdpa/Kuiops.Sdpa.Flash.Inst.fst.j2"
@@ -797,23 +800,24 @@ class SdpaImpl(_Family):
         # has no dropout.
         if compute_log_sumexp or dropout_p != 0.0:
             return None
-        # A dense additive mask is mandatory (see the class docstring).
-        if bias is None:
-            return None
+        # An absent mask is supported via the broadcast layout (see the class
+        # docstring); a present one must be dense (B, Hq, Sq, Sk).
+        tensors = (Q, Kt, V) if bias is None else (Q, Kt, V, bias)
         if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 4
-                   and t.is_contiguous() for t in (Q, Kt, V, bias)):
+                   and t.is_contiguous() for t in tensors):
             return None
-        if not all(t.device == Q.device for t in (Kt, V, bias)):
+        if not all(t.device == Q.device for t in tensors[1:]):
             return None
         if Q.dtype not in self._SUPPORTED_IN:
             return None
-        if not all(t.dtype == Q.dtype for t in (Kt, V, bias)):
+        if not all(t.dtype == Q.dtype for t in tensors[1:]):
             return None
         b, hq, sq, d = (int(x) for x in Q.shape)
         bk, hkv, sk, dk = (int(x) for x in Kt.shape)
         if tuple(int(x) for x in V.shape) != (bk, hkv, sk, dk):
             return None
-        if tuple(int(x) for x in bias.shape) != (b, hq, sq, sk):
+        if bias is not None and \
+                tuple(int(x) for x in bias.shape) != (b, hq, sq, sk):
             return None
         if b != bk or d != dk or min(b, hq, hkv, sq, sk, d) <= 0:
             return None
@@ -840,26 +844,32 @@ class SdpaImpl(_Family):
         if scale is None:
             scale = 1.0 / _math.sqrt(d)
         return dict(dtype=Q.dtype, nw=nw, variant=variant,
-                    scale=float(scale), causal=bool(is_causal))
+                    scale=float(scale), causal=bool(is_causal),
+                    has_mask=bias is not None)
 
     def run(self, spec, args, kwargs):
         dtype = spec["dtype"]
+        has_mask = spec["has_mask"]
         et_ab = torch_dtype_to_fstar(dtype)
         et_acc = torch_dtype_to_fstar(self._ACC)
-        module = f"Kuiops.Sdpa.Flash.{et_ab.title()}.{et_acc.title()}"
+        # The mask layout (dense row-major vs. broadcast-to-cell-0) is baked
+        # into the instantiation, so it has to key the module name.
+        module = (f"Kuiops.Sdpa.Flash.{et_ab.title()}.{et_acc.title()}."
+                  f"{'Mask' if has_mask else 'Nomask'}")
         name = "sdpa_flash_jit"
         fst_ctx = dict(
-            module=module, name=name,
+            module=module, name=name, has_mask=has_mask,
             et_ab=torch_dtype_to_fstar_namespace(dtype) + ".t",
             et_acc=torch_dtype_to_fstar_namespace(self._ACC) + ".t")
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
-            name=name,
+            name=name, has_mask=has_mask,
             cpp_et_ab=torch_dtype_to_ctype(dtype),
             cpp_et_acc=torch_dtype_to_ctype(self._ACC))
         Q, Kt, V, bias = args[:4]
+        call_args = (Q, Kt, V) if not has_mask else (Q, Kt, V, bias)
         out = self._mod(module, fst_ctx, wrapper_ctx).run(
-            Q, Kt, V, bias, spec["scale"], spec["causal"], spec["nw"])
+            *call_args, spec["scale"], spec["causal"], spec["nw"])
         # With compute_log_sumexp=False the LSE and the RNG state are unused.
         b, hq, sq, _ = out.shape
         lse = torch.empty((b, hq, 0), dtype=torch.float32, device=out.device)

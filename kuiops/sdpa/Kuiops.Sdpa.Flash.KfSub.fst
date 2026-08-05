@@ -25,6 +25,7 @@ open Kuiper.Ghost.TensorTranspose
 open Kuiper.EMatrix
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
@@ -338,6 +339,35 @@ inline_for_extraction noextract
 let sel_prob (#et : Type0) {| floating et |} (sv mnew : et) : et =
   if eq sv (neg infinity) then zero else fexp (sv `sub` mnew)
 
+(* Read the additive mask bias for one (row, key) pair, or [zero] when the
+   caller supplied no mask tensor (flash_attn_fa1.cu:162, [if (mask)]).
+
+   This owns the [has_mask] branch in a function with an explicit signature,
+   rather than inlining it in [sdpa_flash_softmax_upd]: the two arms are then
+   each checked against the same fixed frame.  Inlined, the arm that performs
+   the read contributes an [exists*] over the value read while the other does
+   not, and the automatic join of the two shapes fails. *)
+inline_for_extraction noextract
+fn sdpa_flash_mask_bias
+  (#et_ab : Type0)
+  {| scalar et_ab |}
+  (b hq sq sk : szp)
+  (#lmask : TRO.vlayout4 b hq sq sk) {| TRO.cvtlayout lmask |}
+  (gmask : TRO.roarray4 et_ab lmask)
+  (has_mask : bool)
+  (bi : szlt b) (qh : szlt hq) (qpos : szlt sq) (kjb : szlt sk)
+  (#fmask : perm)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  preserves (gmask |-> Frac fmask emask)
+  returns v : et_ab
+{
+  if has_mask {
+    TRO.tensor_read gmask (cidx4 bi qh qpos kjb)
+  } else {
+    zero #et_ab
+  }
+}
+
 (* One lane's online-softmax update.  Ownership at this point in the program:
 
    - [shS] : row [i] of the [BM x BN] score matrix [Ssh].  Read+write, full
@@ -361,17 +391,18 @@ fn sdpa_flash_softmax_upd
   (bn : szp)
   (b hq sq sk : szp)
   (#lshS #lshP : layout1 bn)
-  (#lmask : layout4 b hq sq sk)
-  {| ctlayout lshS, ctlayout lshP, ctlayout lmask |}
+  (#lmask : TRO.vlayout4 b hq sq sk)
+  {| ctlayout lshS, ctlayout lshP, TRO.cvtlayout lmask |}
   (shS : array1 et_acc lshS)
   (shP : array1 et_ab lshP)
-  (gmask : array4 et_ab lmask)
+  (gmask : TRO.roarray4 et_ab lmask)
   (shm shl shcw : ref et_acc)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz { SZ.fits (SZ.v k0 + SZ.v bn) })
   (cbound : sz)
   (row_active : bool)
   (causal : bool)
+  (has_mask : bool)
   (scale : et_acc)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (#fmask : perm)
@@ -397,11 +428,12 @@ fn sdpa_flash_softmax_upd
     let kj = k0 +^ vj;
     let sc = tensor_read shS (cidx1 jj);
     // The only conditional memory access is the mask read; it is in bounds iff
-    // [kj <^ sk].  Since we have no functional spec, we always read an in-bounds
-    // mask cell (clamping the key index) and select the score purely: the mask
-    // value is discarded whenever the key is invalid.
+    // [kj <^ sk].  Since we have no functional spec, we read an in-bounds mask
+    // cell (clamping the key index) and select the score purely: the mask value
+    // is discarded whenever the key is invalid.  With [has_mask] false there is
+    // no mask tensor and the read is skipped, yielding a zero bias.
     let kjb : szlt sk = clamp_lt sk kj;
-    let mv = tensor_read gmask (cidx4 bi qh qpos kjb);
+    let mv = sdpa_flash_mask_bias b hq sq sk gmask has_mask bi qh qpos kjb;
     let s : et_acc =
       if (row_active && (not (causal && (kj >^ cbound))) && (kj <^ sk)) {
         (sc `mul` scale) `add` (FC.fcast mv)
@@ -1650,7 +1682,7 @@ fn sdpa_flash_softmax_active
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
   (b hq sq sk : szp)
-  (#lgmask : layout4 b hq sq sk) {| ctlayout lgmask |}
+  (#lgmask : TRO.vlayout4 b hq sq sk) {| TRO.cvtlayout lgmask |}
   (#lcw #lm #ll : layout1 16) {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   (#lS #lP : layout2 16 16)
   {| cS : ctlayout lS |} {| cP : ctlayout lP |}
@@ -1659,11 +1691,11 @@ fn sdpa_flash_softmax_active
   (shcw : array1 et_acc lcw)
   (shm : array1 et_acc lm)
   (shl : array1 et_acc ll)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (lane16 : szlt 16)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
-  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fmask : perm)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   preserves (gmask |-> Frac fmask emask)
@@ -1710,7 +1742,7 @@ fn sdpa_flash_softmax_active
     #solve
     (mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0)
     (mrow (array2_subtile shP 1 16 (SZ.v lane16) 0) 0)
-    gmask rm rl rcw bi qh qpos k0 cbound row_active causal scale;
+    gmask rm rl rcw bi qh qpos k0 cbound row_active causal has_mask scale;
 
   with vSr. assert ((mrow (array2_subtile shS 1 16 (SZ.v lane16) 0) 0
                      <: array1 et_acc (mrow_layout (array2_subtile shS 1 16 (SZ.v lane16) 0) 0))
@@ -1763,7 +1795,7 @@ fn sdpa_flash_softmax_maybe
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
   (b hq sq sk : szp)
-  (#lgmask : layout4 b hq sq sk) {| ctlayout lgmask |}
+  (#lgmask : TRO.vlayout4 b hq sq sk) {| TRO.cvtlayout lgmask |}
   (#lcw #lm #ll : layout1 16) {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   (#lS #lP : layout2 16 16)
   {| ctlayout lS |} {| ctlayout lP |}
@@ -1772,11 +1804,11 @@ fn sdpa_flash_softmax_maybe
   (shcw : array1 et_acc lcw)
   (shm : array1 et_acc lm)
   (shl : array1 et_acc ll)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (lane : szlt warp_size)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
-  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fmask : perm)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   preserves (gmask |-> Frac fmask emask)
@@ -1802,7 +1834,7 @@ fn sdpa_flash_softmax_maybe
     when__elim_true (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
 
     sdpa_flash_softmax_active b hq sq sk shS shP shcw shm shl gmask
-      (szlt16 lane) bi qh qpos k0 cbound row_active causal scale;
+      (szlt16 lane) bi qh qpos k0 cbound row_active causal has_mask scale;
 
     when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
     when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
@@ -1834,7 +1866,7 @@ fn sdpa_flash_jt_body
   {| FC.float_cast et_acc et_ab |}
   (d sk : szp) (b hq sq : szp)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lcw #lm #ll : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
   (#lS #lP #lPVc : layout2 16 16)
@@ -1847,7 +1879,7 @@ fn sdpa_flash_jt_body
   (#_ : squash (valid_frag_et_dims et_ab FragA 16 16 16))
   (#_ : squash (valid_frag_et_dims et_ab FragB 16 16 16))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc 16 16 16))
-  {| ctlayout lgK |} {| ctlayout lgV |} {| ctlayout lgmask |}
+  {| ctlayout lgK |} {| ctlayout lgV |} {| TRO.cvtlayout lgmask |}
   {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |} {| ctlayout lO |}
@@ -1867,10 +1899,10 @@ fn sdpa_flash_jt_body
   (shl : array1 et_acc ll)
   (gK : array2 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
-  (cbound : sz) (row_active : bool) (causal : bool) (scale : et_acc)
+  (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fQ #fKg #fVg #fmask : perm)
   (#eQ : chest2 et_ab 16 (SZ.v d))
   (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
@@ -1904,7 +1936,7 @@ fn sdpa_flash_jt_body
 
   (* Online-softmax update on the 16 active lanes (guarded wrapper owns the if). *)
   sdpa_flash_softmax_maybe b hq sq sk shS shP shcw shm shl gmask
-    lane bi qh qpos k0 cbound row_active causal scale;
+    lane bi qh qpos k0 cbound row_active causal has_mask scale;
 
   (* Bridge S/P rows + cw cell to the barrier residue, run barrier 3
      (rows/cells -> whole tiles). *)

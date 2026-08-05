@@ -12,6 +12,7 @@ open Kuiops.Sdpa.Flash
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 
 let {{ name }}
   (nblk : szp { SZ.v nblk <= max_blocks })
@@ -43,10 +44,19 @@ let {{ name }}
     #(l4_batched_row_major b hq sq d)
     #(l4_batched_row_major b hkv sk d)
     #(l4_batched_row_major b hkv sk d)
-    #(l4_batched_row_major b hq sq sk)
+{%- if has_mask %}
+    #(TRO.vtlayout_of_tlayout (l4_batched_row_major b hq sq sk))
+{%- else %}
+    #(vl4_broadcast0 (SZ.v b) (SZ.v hq) (SZ.v sq) (SZ.v sk))
+{%- endif %}
     #(l4_batched_row_major b hq sq d)
     #(c_l4_batched_row_major _ hq sq d)
     #(c_l4_batched_row_major _ hkv sk d)
     #(c_l4_batched_row_major _ hkv sk d)
-    #(c_l4_batched_row_major _ hq sq sk)
+{%- if has_mask %}
+    #(TRO.cvtlayout_of_ctlayout (l4_batched_row_major b hq sq sk)
+        #(c_l4_batched_row_major _ hq sq sk))
+{%- else %}
+    #(cvl4_broadcast0 (SZ.v b) (SZ.v hq) (SZ.v sq) (SZ.v sk))
+{%- endif %}
     #(c_l4_batched_row_major _ hq sq d)

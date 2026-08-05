@@ -25,6 +25,7 @@ open Kuiops.Sdpa.Flash.Split
 open Kuiops.Sdpa.Flash.Shmem
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module FC = Kuiper.Float.Casts
 module Trade = Pulse.Lib.Trade
 module BW = Kuiper.Barrier.Warp
@@ -42,12 +43,12 @@ fn flash_setup
     SZ.fits (SZ.v tiles * 16) })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -71,7 +72,7 @@ fn flash_setup
   tensor_share_n gQ (SZ.v nblk);
   tensor_share_n gK (SZ.v nblk);
   tensor_share_n gV (SZ.v nblk);
-  tensor_share_n gmask (SZ.v nblk);
+  TRO.tensor_share_n gmask (SZ.v nblk);
   flash_split_output b hq hkv group sq rows tiles d gout;
   forevery_rw_size
     (SZ.v b * SZ.v hkv * SZ.v tiles) (SZ.v nblk)
@@ -225,13 +226,13 @@ fn flash_teardown
     SZ.fits (SZ.v tiles * 16) })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   {| ctlayout lout |}
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -305,7 +306,7 @@ fn flash_teardown
   tensor_gather_n gQ (SZ.v nblk) #fQ;
   tensor_gather_n gK (SZ.v nblk) #fK;
   tensor_gather_n gV (SZ.v nblk) #fV;
-  tensor_gather_n gmask (SZ.v nblk) #fmask;
+  TRO.tensor_gather_n gmask (SZ.v nblk) #fmask;
   forevery_rw_size
     (SZ.v nblk) (SZ.v b * SZ.v hkv * SZ.v tiles)
     #(fun (bid : natlt (SZ.v nblk)) ->
@@ -353,12 +354,12 @@ fn flash_block_setup
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -395,7 +396,7 @@ fn flash_block_setup
   tensor_share_n gQ (SZ.v nthr);
   tensor_share_n gK (SZ.v nthr);
   tensor_share_n gV (SZ.v nthr);
-  tensor_share_n gmask (SZ.v nthr);
+  TRO.tensor_share_n gmask (SZ.v nthr);
   forevery_factor (SZ.v nthr) (SZ.v nw) BW.warp_size
     (fun _ ->
       gQ |-> Frac
@@ -653,12 +654,12 @@ fn flash_block_teardown
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -864,7 +865,7 @@ fn flash_block_teardown
     #(fK /. (SZ.v nblk)) #eK;
   flash_gather_thread_tensor nw nthr gV
     #(fV /. (SZ.v nblk)) #eV;
-  flash_gather_thread_tensor nw nthr gmask
+  flash_gather_thread_rotensor nw nthr gmask
     #(fmask /. (SZ.v nblk)) #emask;
 
   flash_unfactor_threads nw
