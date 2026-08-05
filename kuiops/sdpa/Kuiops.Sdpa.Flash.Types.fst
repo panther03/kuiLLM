@@ -1128,3 +1128,28 @@ instance cvl4_broadcast0 (d0 d1 d2 d3 : nat {
     all_fit = ();
     cimap = (fun _ -> 0sz);
   }
+
+(* Additive-mask layout broadcast over batch, head and query.
+
+   HF hands the decode step a [1 x 1 x 1 x sk] mask, so only the key index
+   selects a cell and the backing store is [sk] elements wide. Like
+   [vl4_broadcast0] this is a non-injective [vtlayout], which is precisely what
+   lets a broadcast mask be read in place instead of being materialized into a
+   dense [b x hq x sq x sk] buffer by the caller. *)
+inline_for_extraction noextract
+let vl4_bcast_keys (d0 d1 d2 d3 : nat)
+  : TRO.vlayout4 d0 d1 d2 d3
+= { ulen = d3;
+    imap = (fun (i : abs (d0 @| d1 @| d2 @| d3 @| INil)) ->
+              let (_, (_, (_, (l, ())))) = i in l) }
+
+inline_for_extraction noextract
+instance cvl4_bcast_keys (d0 d1 d2 d3 : nat {
+    SZ.fits d0 /\ SZ.fits d1 /\ SZ.fits d2 /\ SZ.fits d3 })
+  : TRO.cvtlayout (vl4_bcast_keys d0 d1 d2 d3)
+= {
+    ulen_fits = ();
+    all_fit = ();
+    cimap = (fun (i : conc (d0 @| d1 @| d2 @| d3 @| INil)) ->
+               let (_, (_, (_, (l, ())))) = i in l);
+  }

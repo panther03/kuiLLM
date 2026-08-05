@@ -829,12 +829,11 @@ class SdpaImpl(_Family):
     a floating accumulator at 16x16x16.
 
     The additive mask is read through a ``rotensor``, whose ``vtlayout`` need not
-    be an injection. An absent mask is therefore a broadcast layout mapping every
-    index to cell 0, paired with ``has_mask=False`` so the kernel skips the read
-    entirely. A *present* mask must still be a dense ``(B, Hq, Sq, Sk)`` tensor of
-    the input dtype: the instantiation template only emits the dense row-major
-    layout, so HF's ``(1, 1, 1, Sk)`` decode mask is still rejected rather than
-    being materialized here.
+    be an injection, so a broadcast mask is read in place rather than being
+    materialized here. Three mask layouts are instantiated: ``dense`` for a full
+    ``(B, Hq, Sq, Sk)`` tensor, ``keys`` for one broadcast over batch/head/query
+    (HF's ``(1, 1, 1, Sk)`` decode mask), and ``none``, which maps every index to
+    cell 0 and pairs with ``has_mask=False`` so the kernel skips the read.
     """
 
     fst_template = "sdpa/Kuiops.Sdpa.Flash.Inst.fst.j2"
@@ -847,6 +846,10 @@ class SdpaImpl(_Family):
 
     # ``KPR_SHMEM_FITS`` budget emitted by the kernel.
     _MAX_SHMEM = 101376
+
+    # Mask layout -> module-name tag. The layout is baked into the
+    # instantiation, so it has to key the module.
+    _MASK_TAG = {"none": "Nomask", "dense": "Mask", "keys": "MaskBcastK"}
 
     @classmethod
     def _shmem(cls, nw, d):
@@ -892,7 +895,8 @@ class SdpaImpl(_Family):
         if compute_log_sumexp or dropout_p != 0.0:
             return None
         # An absent mask is supported via the broadcast layout (see the class
-        # docstring); a present one must be dense (B, Hq, Sq, Sk).
+        # docstring); a present one must be dense (b, hq, sq, sk) or broadcast
+        # over batch/head/query as (1, 1, 1, sk).
         tensors = (Q, Kt, V) if bias is None else (Q, Kt, V, bias)
         if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 4
                    and t.is_contiguous() for t in tensors):
@@ -907,9 +911,16 @@ class SdpaImpl(_Family):
         bk, hkv, sk, dk = (int(x) for x in Kt.shape)
         if tuple(int(x) for x in V.shape) != (bk, hkv, sk, dk):
             return None
-        if bias is not None and \
-                tuple(int(x) for x in bias.shape) != (b, hq, sq, sk):
-            return None
+        if bias is None:
+            mask = "none"
+        else:
+            bshape = tuple(int(x) for x in bias.shape)
+            if bshape == (b, hq, sq, sk):
+                mask = "dense"
+            elif bshape == (1, 1, 1, sk):
+                mask = "keys"
+            else:
+                return None
         if b != bk or d != dk or min(b, hq, hkv, sq, sk, d) <= 0:
             return None
         # 16 /?+ d, hq == hkv * group, sq <= sk.
@@ -936,25 +947,27 @@ class SdpaImpl(_Family):
             scale = 1.0 / _math.sqrt(d)
         return dict(dtype=Q.dtype, nw=nw, variant=variant,
                     scale=float(scale), causal=bool(is_causal),
-                    has_mask=bias is not None)
+                    mask=mask)
 
     def run(self, spec, args, kwargs):
         dtype = spec["dtype"]
-        has_mask = spec["has_mask"]
+        mask = spec["mask"]
+        has_mask = mask != "none"
         et_ab = torch_dtype_to_fstar(dtype)
         et_acc = torch_dtype_to_fstar(self._ACC)
-        # The mask layout (dense row-major vs. broadcast-to-cell-0) is baked
-        # into the instantiation, so it has to key the module name.
+        # The mask layout (dense row-major, broadcast-over-keys, or
+        # broadcast-to-cell-0) is baked into the instantiation, so it has to key
+        # the module name.
         module = (f"Kuiops.Sdpa.Flash.{et_ab.title()}.{et_acc.title()}."
-                  f"{'Mask' if has_mask else 'Nomask'}")
+                  f"{self._MASK_TAG[mask]}")
         name = "sdpa_flash_jit"
         fst_ctx = dict(
-            module=module, name=name, has_mask=has_mask,
+            module=module, name=name, has_mask=has_mask, mask=mask,
             et_ab=torch_dtype_to_fstar_namespace(dtype) + ".t",
             et_acc=torch_dtype_to_fstar_namespace(self._ACC) + ".t")
         wrapper_ctx = dict(
             module=module.replace(".", "_"),
-            name=name, has_mask=has_mask,
+            name=name, has_mask=has_mask, mask=mask,
             cpp_et_ab=torch_dtype_to_ctype(dtype),
             cpp_et_acc=torch_dtype_to_ctype(self._ACC))
         Q, Kt, V, bias = args[:4]
@@ -962,16 +975,21 @@ class SdpaImpl(_Family):
         out = self._mod(module, fst_ctx, wrapper_ctx).run(
             *call_args, spec["scale"], spec["causal"], spec["nw"])
         # With compute_log_sumexp=False the LSE and the RNG state are unused.
+        # Each slot needs a distinct tensor: a custom op may not return the same
+        # tensor twice (torch rejects aliasing between returns).
         b, hq, sq, _ = out.shape
         lse = torch.empty((b, hq, 0), dtype=torch.float32, device=out.device)
-        empty = torch.empty([], dtype=torch.int64)
         if spec["variant"] == "cudnn":
             # (output, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k,
             #  philox_seed, philox_offset, debug_attn_mask)
-            e0 = torch.empty((0,), dtype=torch.int64, device=out.device)
-            return (out, lse, e0, e0, 0, 0, empty, empty,
+            def e0():
+                return torch.empty((0,), dtype=torch.int64, device=out.device)
+            return (out, lse, e0(), e0(), 0, 0,
+                    torch.empty([], dtype=torch.int64),
+                    torch.empty([], dtype=torch.int64),
                     torch.empty((0,), dtype=out.dtype, device=out.device))
-        return (out, lse, empty, empty)
+        return (out, lse, torch.empty([], dtype=torch.int64),
+                torch.empty([], dtype=torch.int64))
 
 
 # ---------------------------------------------------------------------------

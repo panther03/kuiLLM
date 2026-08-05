@@ -383,16 +383,18 @@ def _sdpa_ref(Q, K, V, bias, scale, causal):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("has_mask", [True, False])
-def test_sdpa(dtype, causal, has_mask):
+@pytest.mark.parametrize("mask", ["none", "dense", "keys"])
+def test_sdpa(dtype, causal, mask):
     _need_tensor_cores(dtype)
     torch.manual_seed(0)
     b, hq, hkv, sq, sk, d = 2, 4, 2, 3, 24, 32
     Q = torch.randn(b, hq, sq, d, device="cuda", dtype=dtype)
     K = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
     V = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
-    bias = torch.randn(b, hq, sq, sk, device="cuda", dtype=dtype) \
-        if has_mask else None
+    # "keys" is HF's decode mask: broadcast over batch, head and query.
+    bshape = {"dense": (b, hq, sq, sk), "keys": (1, 1, 1, sk)}.get(mask)
+    bias = None if bshape is None else \
+        torch.randn(*bshape, device="cuda", dtype=dtype)
     original_bias = None if bias is None else bias.clone()
     scale = 0.3
     func = aten._scaled_dot_product_efficient_attention.default
@@ -401,9 +403,10 @@ def test_sdpa(dtype, causal, has_mask):
     assert out.shape == (b, hq, sq, d) and out.dtype == dtype
     assert lse.shape == (b, hq, 0) and lse.dtype == torch.float32
     assert seed.shape == off.shape == ()
-    if has_mask:
+    if bias is not None:
         assert torch.equal(bias, original_bias)
-    _assert_close(out, _sdpa_ref(Q, K, V, bias, scale, causal), dtype)
+    ref_bias = None if bias is None else bias.expand(b, hq, sq, sk)
+    _assert_close(out, _sdpa_ref(Q, K, V, ref_bias, scale, causal), dtype)
 
 
 def test_sdpa_unsupported():
@@ -421,12 +424,16 @@ def test_sdpa_unsupported():
     # LSE computation and dropout have no kernel support.
     assert impl.supported(func, (Q, K, V, bias, True), {}) is None
     assert impl.supported(func, (Q, K, V, bias, False, 0.1, False), {}) is None
-    # The mask is read through a rotensor, so it may be absent; a present one
-    # must still be dense (the template only emits the row-major layout) and
-    # share the input dtype.
+    # The mask is read through a rotensor, so it may be absent, dense, or
+    # broadcast over batch/head/query as (1, 1, 1, sk). Any other shape, and
+    # any expanded (non-contiguous) view, is rejected; it must share the input
+    # dtype.
     assert impl.supported(func, (Q, K, V, None, False), {}) is not None
+    assert impl.supported(func, (Q, K, V, mk((1, 1, 1, sk)), False), {}) is not None
     assert impl.supported(
         func, (Q, K, V, mk((b, 1, 1, sk)).expand(b, hq, sq, sk), False), {}) is None
+    assert impl.supported(
+        func, (Q, K, V, mk((1, 1, sq, sk)), False), {}) is None
     assert impl.supported(
         func, (Q, K, V, mk((b, hq, sq, sk), torch.float32), False), {}) is None
     # Tensor-core fragments admit only bf16/f16 inputs with an f32 accumulator.
