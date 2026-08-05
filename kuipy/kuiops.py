@@ -423,6 +423,21 @@ def _bt2d_tiles(dtype, M, N, K):
     return tiles
 
 
+_ACC_FRAG_REGS = 8   # one 16x16x16 f32 accumulator fragment, per thread
+_AB_FRAG_REGS = 4    # one 16x16x16 16-bit a/b fragment, per thread
+_REG_BUDGET = 224    # 255 architectural minus headroom for addressing
+
+
+def _tc2d_frag_regs(wm, wn):
+    """Per-thread registers a warp's fragments occupy.
+
+    TensorCore2D keeps wm*wn accumulators plus wm A- and wn B-fragments live
+    across the whole k-loop. Past the hardware file they spill to local memory,
+    which costs far more than any tiling gain: at 4096^3 the wm8_wn4 tiling
+    spills and runs 2x slower than tilings that fit."""
+    return wm * wn * _ACC_FRAG_REGS + (wm + wn) * _AB_FRAG_REGS
+
+
 def _tc2d_tiles(dtype, M, N, K, tn=False):
     """Every legal TensorCore2D parameterization for this problem, ranges listed
     in preference order. The fragment dims are fixed at the 16x16x16 shape.
@@ -461,6 +476,7 @@ def _tc2d_tiles(dtype, M, N, K, tn=False):
                             continue
                         tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
                                           tk=tk, wm=wm, wn=wn))
+    tiles.sort(key=lambda t: _tc2d_frag_regs(t["wm"], t["wn"]) > _REG_BUDGET)
     return tiles
 
 
