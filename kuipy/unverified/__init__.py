@@ -27,6 +27,7 @@ from .. import config as C
 
 _HERE = Path(__file__).resolve().parent
 _SOURCES = ["wrapper.cpp", "gemm_hacky_epilogue.cu", "gemm_pipe.cu",
+            "gemm_bcast_bias_epilogue.cu", "gemm_bcast_bias_epilogue2.cu",
             "flash_attn_fa1.cu", "flash_attn_fa2.cu",
             "flash_attn_manual_extract.cu"]
 

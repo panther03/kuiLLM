@@ -12,6 +12,8 @@
 #include <cuda_fp16.h>
 #include "kernels.h"
 #include "flash_attn_manual_extract.h"
+#include "gemm_bcast_bias_epilogue.h"
+#include "gemm_bcast_bias_epilogue2.h"
 
 template <typename T>
 static inline const T* cptr(const torch::Tensor& t) {
@@ -73,6 +75,51 @@ static torch::Tensor gemm_pipe(torch::Tensor input, torch::Tensor A,
     gemm_pipe_launch(cptr<half>(Ac), cptr<half>(Bc), mptr<half>(out),
                      (int)M, (int)N, (int)K, (float)alpha, (float)beta,
                      c10::cuda::getCurrentCUDAStream().stream());
+    C10_CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+// The epilogue takes the bias as a length-N row vector and broadcasts it over
+// the rows, so unlike the kernels above there is nothing to seed the output
+// with: it is written, not accumulated into.
+static torch::Tensor gemm_bcast_bias_epilogue(torch::Tensor input, torch::Tensor A,
+                                              torch::Tensor B, double beta,
+                                              double alpha) {
+    gemm_check(A, B, torch::kFloat16);
+    TORCH_CHECK(input.dtype() == torch::kFloat16, "input dtype must match mat1/mat2");
+    TORCH_CHECK(input.dim() == 1 && input.size(0) == B.size(1),
+                "input must be a length-N row vector");
+    auto Ac = A.contiguous(), Bc = B.contiguous(), bias = input.contiguous();
+    const int64_t M = Ac.size(0), K = Ac.size(1), N = Bc.size(1);
+    auto out = torch::empty({M, N}, Ac.options());
+
+    at::cuda::CUDAGuard g(A.device());
+    gemm_bcast_bias_epilogue_launch((float)alpha, (float)beta, (uint32_t)M,
+                                    (uint32_t)N, (uint32_t)K, mptr<half>(Ac),
+                                    mptr<half>(Bc), mptr<half>(bias),
+                                    mptr<half>(out),
+                                    c10::cuda::getCurrentCUDAStream().stream());
+    C10_CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+static torch::Tensor gemm_bcast_bias_epilogue2(torch::Tensor input, torch::Tensor A,
+                                               torch::Tensor B, double beta,
+                                               double alpha) {
+    gemm_check(A, B, torch::kFloat16);
+    TORCH_CHECK(input.dtype() == torch::kFloat16, "input dtype must match mat1/mat2");
+    TORCH_CHECK(input.dim() == 1 && input.size(0) == B.size(1),
+                "input must be a length-N row vector");
+    auto Ac = A.contiguous(), Bc = B.contiguous(), bias = input.contiguous();
+    const int64_t M = Ac.size(0), K = Ac.size(1), N = Bc.size(1);
+    auto out = torch::empty({M, N}, Ac.options());
+
+    at::cuda::CUDAGuard g(A.device());
+    gemm_bcast_bias_epilogue2_launch((float)alpha, (float)beta, (uint32_t)M,
+                                     (uint32_t)N, (uint32_t)K, mptr<half>(Ac),
+                                     mptr<half>(Bc), mptr<half>(bias),
+                                     mptr<half>(out),
+                                     c10::cuda::getCurrentCUDAStream().stream());
     C10_CUDA_CHECK(cudaGetLastError());
     return out;
 }
@@ -207,6 +254,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
     m.def("gemm_pipe", &gemm_pipe,
           "GEMM with software pipelining (fp16 in/out, fp32 accumulate).",
+          py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+          py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
+    m.def("gemm_bcast_bias_epilogue", &gemm_bcast_bias_epilogue,
+          "Extracted instance of Kuiper TensorCore2D (fp16 in/out, fp32 "
+          "accumulate) whose epilogue broadcasts a length-N bias vector over "
+          "the rows, as nn.Linear's addmm needs.",
+          py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+          py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
+    m.def("gemm_bcast_bias_epilogue2", &gemm_bcast_bias_epilogue2,
+          "As gemm_bcast_bias_epilogue, but derived from TensorCore2D.To, whose "
+          "out-of-place epilogue makes the broadcast a one-line change.",
           py::arg("input"), py::arg("mat1"), py::arg("mat2"),
           py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
     m.def("flash_attn_fa1", &flash_attn_fa1,
