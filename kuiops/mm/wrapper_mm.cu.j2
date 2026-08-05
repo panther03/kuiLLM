@@ -11,7 +11,21 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
+{% if backend == "tc2d_tn" %}
+    // The whole point of the TN backend: B is already column-major with
+    // leading dimension K, which is what the kernel wants, so there is NO
+    // `B.contiguous()` copy here. `supported()` has already checked
+    // B.stride() == (1, K) and 16-byte alignment of B.data_ptr(); both are
+    // preconditions of the verified kernel, so re-check them cheaply rather
+    // than trusting the dispatcher.
+    TORCH_CHECK(B.stride(0) == 1 && B.stride(1) == K,
+                "kuiops tc2d_tn: B must be column-major with ld == K");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0,
+                "kuiops tc2d_tn: B must be 16-byte aligned");
+    auto &Bc = B;
+{% else %}
     auto Bc = B.contiguous();
+{% endif %}
     auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
 
     at::cuda::CUDAGuard g(A.device());
@@ -20,7 +34,7 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
         (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-{% if backend == "tc2d_to" %}
+{% if backend in ("tc2d_to", "tc2d_tn") %}
         // `comb2_to` ignores C, so C and D can share the output buffer.
         reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),
 {% endif %}
