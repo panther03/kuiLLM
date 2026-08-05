@@ -72,5 +72,15 @@ class KuiperPostGradPass(CustomGraphPass):
             graph.lint()
 
     def uuid(self):
-        files = (custom_ops.__file__, tracing.__file__, __file__)
+        # Inductor caches the *transformed* graph, so this must cover every
+        # module that can change what the pass claims. `kuiops` (the `supported`
+        # predicates), `registry` (op -> family) and `config` (strictness, dtype
+        # gating) all do; omitting them lets a stale graph -- possibly one where
+        # nothing was claimable -- be replayed after the claim logic changes,
+        # silently running the model with no Kuiper kernels at all.
+        from .. import config as _config
+        from .. import kuiops as _kuiops
+        from .. import registry as _registry
+        files = (custom_ops.__file__, tracing.__file__, __file__,
+                 _kuiops.__file__, _registry.__file__, _config.__file__)
         return get_hash_for_files(files) + (b":trace" if not self.replace else b"")
