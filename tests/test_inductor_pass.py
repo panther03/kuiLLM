@@ -64,9 +64,10 @@ def test_cpu_ops_not_replaced():
     assert "aten.mm.default" in _targets(graph)
 
 
-def test_broadcast_addmm_not_claimed():
-    """F.linear-style addmm has a 1-D bias (broadcast); the Kuiper addmm kernel
-    does not broadcast, so it must be left on cuBLAS."""
+def test_broadcast_addmm_claimed():
+    """nn.Linear emits addmm with a 1-D (broadcast) bias. C is read through a
+    virtual layout, which need not be injective, so a stride-0 row axis is
+    expressible and the kernel serves it."""
     _need_cuda()
     dev, dt = "cuda", torch.bfloat16
 
@@ -79,7 +80,7 @@ def test_broadcast_addmm_not_claimed():
     graph = _fake_graph(fn, bias, a, b)
     passes.clear_fusion_rules()
     passes.KuiperPostGradPass()(graph)
-    assert "kuiperjit.addmm.default" not in _targets(graph)
+    assert "kuiperjit.addmm.default" in _targets(graph)
 
 
 def test_tracer_records_inventory(tmp_path):
