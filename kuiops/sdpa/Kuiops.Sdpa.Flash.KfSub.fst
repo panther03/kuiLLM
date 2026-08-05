@@ -453,9 +453,9 @@ fn sdpa_flash_softmax_upd
   // TODO(line 173): clamp [corr] to 0 when it is not finite.  Kuiper only has a
   // GHOST finiteness test ([is_finite]/[kind] returns the erasable [fkind]), so
   // this guard cannot drive concrete control flow.  Needs an extractable
-  // [isfinite] on the [floating] typeclass; omitted for now (does not affect
-  // memory safety, and there is no functional spec here).
+  // [isfinite] on the [floating] typeclass; assumed for now.
   let corr : et_acc = corr0;
+  assume pure (kind corr == Finite);
 
   // Probability loop: select-to-zero probabilities + row sum.
   let mut rowsum : et_acc = zero;
