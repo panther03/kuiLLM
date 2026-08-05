@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module Trade = Pulse.Lib.Trade
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 inline_for_extraction noextract
 fn sdpa_flash_kf
@@ -51,9 +52,9 @@ fn sdpa_flash_kf
   {| TRO.cvtlayout lgmask |} {| ctlayout lout |} {| ctlayout lcw |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |}
-  {| strided_row_major lK |} {| strided_row_major lV |}
-  {| strided_row_major lS |} {| strided_row_major lP |}
-  {| strided_row_major lPVc |}
+  {| strided_row_major (vtlayout_of_tlayout lK) |} {| strided_row_major (vtlayout_of_tlayout lV) |}
+  {| strided_row_major (vtlayout_of_tlayout lS) |} {| strided_row_major (vtlayout_of_tlayout lP) |}
+  {| strided_row_major (vtlayout_of_tlayout lPVc) |}
   (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
   (gK : array2 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })

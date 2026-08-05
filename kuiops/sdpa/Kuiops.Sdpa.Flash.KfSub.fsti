@@ -19,6 +19,7 @@ module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 unfold
 let jt_rest
@@ -90,9 +91,9 @@ fn sdpa_flash_jt_body
   {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |} {| ctlayout lO |}
-  {| strided_row_major lK |} {| strided_row_major lV |}
-  {| strided_row_major lS |} {| strided_row_major lP |}
-  {| strided_row_major lPVc |}
+  {| strided_row_major (vtlayout_of_tlayout lK) |} {| strided_row_major (vtlayout_of_tlayout lV) |}
+  {| strided_row_major (vtlayout_of_tlayout lS) |} {| strided_row_major (vtlayout_of_tlayout lP) |}
+  {| strided_row_major (vtlayout_of_tlayout lPVc) |}
   (lane : szlt warp_size) (nthr : szp) (tid : szlt nthr)
   (shK : array2 et_ab lK)
   (shV : array2 et_ab lV)

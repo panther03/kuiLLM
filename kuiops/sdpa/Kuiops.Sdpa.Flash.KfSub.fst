@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 let flash_transpose_bij (#rows #cols : nat)
   : (abs (rows @| cols @| INil) =~ abs (cols @| rows @| INil)) =
@@ -65,8 +66,8 @@ inline_for_extraction noextract
 instance flash_row2col_strided
   (#rows #cols : erased nat)
   (l : layout2 rows cols)
-  {| srm : strided_row_major l |}
-  : strided_col_major (flash_row2col_layout l) =
+  {| srm : strided_row_major (vtlayout_of_tlayout l) |}
+  : strided_col_major (vtlayout_of_tlayout (flash_row2col_layout l)) =
 {
   offset = srm.offset;
   stride = srm.stride;
@@ -515,9 +516,9 @@ fn sdpa_flash_qk_mm
   (#lKT : layout2 hd 16)
   (#lS : layout2 16 16)
   {| ctlayout lQ |} {| ctlayout lKT |} {| ctlayout lS |}
-  {| strided_row_major lQ |}
-  {| strided_col_major lKT |}
-  {| strided_row_major lS |}
+  {| strided_row_major (vtlayout_of_tlayout lQ) |}
+  {| strided_col_major (vtlayout_of_tlayout lKT) |}
+  {| strided_row_major (vtlayout_of_tlayout lS) |}
   (shQ  : array2 et_ab lQ)
   (shKT : array2 et_ab lKT)
   (shS  : array2 et_acc lS)
@@ -662,9 +663,9 @@ fn sdpa_flash_pv_mm
   (#lPVc : layout2 16 16)
   (#lO : layout2 16 (SZ.v hd))
   {| ctlayout lP |} {| ctlayout lV |} {| cPVc : ctlayout lPVc |} {| ctlayout lO |}
-  {| strided_row_major lP |}
-  {| strided_row_major lV |}
-  {| strided_row_major lPVc |}
+  {| strided_row_major (vtlayout_of_tlayout lP) |}
+  {| strided_row_major (vtlayout_of_tlayout lV) |}
+  {| strided_row_major (vtlayout_of_tlayout lPVc) |}
   (shP   : array2 et_ab lP)
   (shV   : array2 et_ab lV)
   (shPVc : array2 et_acc lPVc)
@@ -1883,9 +1884,9 @@ fn sdpa_flash_jt_body
   {| ctlayout lcw |} {| ctlayout lm |} {| ctlayout ll |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |} {| ctlayout lO |}
-  {| strided_row_major lK |} {| strided_row_major lV |}
-  {| strided_row_major lS |} {| strided_row_major lP |}
-  {| strided_row_major lPVc |}
+  {| strided_row_major (vtlayout_of_tlayout lK) |} {| strided_row_major (vtlayout_of_tlayout lV) |}
+  {| strided_row_major (vtlayout_of_tlayout lS) |} {| strided_row_major (vtlayout_of_tlayout lP) |}
+  {| strided_row_major (vtlayout_of_tlayout lPVc) |}
   (lane : szlt warp_size) (nthr : szp) (tid : szlt nthr)
   (shK : array2 et_ab lK)
   (shV : array2 et_ab lV)

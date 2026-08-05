@@ -346,15 +346,24 @@ class ElementwiseImpl(_Family):
 # Matmul family (mm / addmm / bmm)
 # ---------------------------------------------------------------------------
 #
-# Three Kuiper GEMM backends, all row-major:
+# Four Kuiper GEMM backends. All take A row-major; the first three take B
+# row-major, the last takes B column-major.
 #   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at
 #            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one).
 #   tc2d     TensorCore2D, accumulates in `acc` and combines into `out` in place.
 #   tc2d_to  TensorCore2D.To, accumulates in `acc` and combines into a separate
 #            `out` buffer.
+#   tc2d_tn  Kuiops.GEMM.T.TensorCore2D, the transposed-B variant of tc2d_to.
+#            Same spec, but B is COLUMN-major with leading dimension K, so the
+#            `B.contiguous()` copy the other backends force is not needed.
+#            Divisibility lands on k/bk instead of n/bn.
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
+
+# Warps per block an untuned tensor-core tiling aims for (8 warps = 256
+# threads), the occupancy sweet spot on the tested Ampere parts.
+_PREFERRED_WARPS = 8
 _MAX_BLOCKS = 2097152
 _WARP = 32
 
@@ -374,7 +383,8 @@ _TC_ACC_DTYPES = {
 
 _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
-_BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "bt2d": "Bt2D"}
+_BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
+                "tc2d_to_bcast": "Tc2DToBcast", "bt2d": "Bt2D"}
 
 
 def _tc_device_supported(dtype, device):
@@ -417,45 +427,66 @@ def _bt2d_tiles(dtype, M, N, K):
     return tiles
 
 
-def _tc2d_tiles(dtype, M, N, K):
-    """Every legal TensorCore2D parameterization for this problem, ranges listed
-    in preference order. The fragment dims are fixed at the 16x16x16 shape."""
+def _tc2d_tiles(dtype, M, N, K, tn=False):
+    """Every legal TensorCore2D parameterization for this problem, in preference
+    order: block shapes as listed, warp shapes by ``_PREFERRED_WARPS``. The fragment dims are fixed at the 16x16x16 shape.
+
+    ``tn`` selects the transposed-B backend. Its staging copy runs along k
+    rather than n, so the vector-chunk divisibility lands on ``bk`` (which is
+    required either way) and NOT on ``bn``. Keeping the ``bn % chunk`` filter
+    for TN would reject tilings the verified kernel accepts."""
     tiles = []
     chunk = 16 // dtype.itemsize
-    tm = tn = tk = 16
+    tm = tn_ = tk = 16
     for bm in (128, 64):
         if M % bm or bm % tm:
             continue
         for bn in (128, 64):
-            if N % bn or bn % chunk or bn % tn:
+            if N % bn or bn % tn_:
+                continue
+            if not tn and bn % chunk:
                 continue
             for bk in (32, 64, 16):
                 if K % bk or bk % chunk or bk % tk:
                     continue
                 if 2 * (bm * bk + bk * bn) > _SHMEM_BYTES:
                     continue
+                inner = []
                 for wm in (8, 4, 2, 16):
                     if bm % (wm * tm):
                         continue
                     for wn in (4, 8, 2, 16):
-                        if bn % (wn * tn):
+                        if bn % (wn * tn_):
                             continue
-                        warps = (bm // (wm * tm)) * (bn // (wn * tn))
+                        warps = (bm // (wm * tm)) * (bn // (wn * tn_))
                         if warps * _WARP > _MAX_THREADS:
                             continue
                         fill = chunk * warps * _WARP
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn,
-                                          tk=tk, wm=wm, wn=wn))
+                        inner.append(((abs(warps - _PREFERRED_WARPS), -wn),
+                                      dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
+                                           tk=tk, wm=wm, wn=wn)))
+                # An untuned call takes the first candidate, so order the warp
+                # shapes rather than leaving them in enumeration order. The
+                # widest legal one would otherwise win with a 64-thread block
+                # and leave most of the SM idle, so sort by distance from a
+                # full 8 warps; among equals prefer the larger `wn`, whose
+                # wider n footprint gives the row-major epilogue longer
+                # contiguous stores.
+                inner.sort(key=lambda w: w[0])
+                tiles.extend(t for _, t in inner)
     return tiles
 
 
 def _tiles(backend, dtype, batch, M, N, K):
     """Legal tilings, in priority order, whose grid also fits in one launch."""
-    enumerate_tiles = _bt2d_tiles if backend == "bt2d" else _tc2d_tiles
+    if backend == "bt2d":
+        candidates = _bt2d_tiles(dtype, M, N, K)
+    else:
+        candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend == "tc2d_tn"))
     return [
-        tile for tile in enumerate_tiles(dtype, M, N, K)
+        tile for tile in candidates
         if batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
     ]
 
@@ -469,9 +500,10 @@ def _backend_supports(backend, in_dtype, acc_dtype, out_dtype, device):
             or acc_dtype not in _TC_ACC_DTYPES[in_dtype]):
         return False
     if backend == "tc2d":
-        return out_dtype in _TC_FRAG_ACC_DTYPES
+        # The epilogue stores the wmma accumulator fragment straight into C,
+        # so C's element type has to be the accumulator's.
+        return out_dtype == acc_dtype and out_dtype in _TC_FRAG_ACC_DTYPES
     return out_dtype in _VEC_CPY_DTYPES
-
 
 class _MatmulFamily(_Family):
     """Backend selection shared by mm / addmm / bmm.
@@ -485,15 +517,16 @@ class _MatmulFamily(_Family):
     backends = ()
     operation = None
 
-    def _plans(self, kwargs, in_dtype, device):
+    def _plans(self, kwargs, in_dtype, device, backends=None):
         """The (backend, acc_dtype, out_dtype) triples this call admits."""
+        backends = self.backends if backends is None else backends
         requested = kwargs.get("impl")
         if requested is not None and requested not in self.backends:
             return []
         acc_dtype = kwargs.get("acc_dtype")
         out_dtype = kwargs.get("out_dtype", in_dtype)
         plans = []
-        for backend in self.backends:
+        for backend in backends:
             if requested is not None and backend != requested:
                 continue
             acc = acc_dtype
@@ -514,6 +547,28 @@ class _MatmulFamily(_Family):
 
 def _tile_tag(tile):
     return "_".join(f"{k}{v}" for k, v in tile.items())
+
+
+def _b_is_column_major(B, K, N):
+    """Is B exactly the operand the transposed-B kernel accepts?
+
+    The verified kernel takes B as `array2 et (l2_col_major K N)`, i.e.
+    cell(i,j) = j*K + i, plus `aligned 16 (core gB)`. Those two facts are
+    erased at extraction, so the Python/C++ boundary is what makes them true;
+    this predicate is exactly them and nothing more. It is what PyTorch hands
+    `aten.mm` for a frozen weight: shape (K,N), stride (1,K).
+
+    This runs twice: once at Inductor claim time on a FakeTensor, which has no
+    data pointer, and again at run time on the real tensor. Alignment is
+    therefore treated as satisfied when it cannot yet be observed -- the claim
+    is provisional, and the run-time call re-checks it for real. If it fails
+    then, ``supported`` returns None and ``_run_impl`` falls back to ATen."""
+    if tuple(int(s) for s in B.stride()) != (1, K):
+        return False
+    try:
+        return int(B.data_ptr()) % 16 == 0
+    except RuntimeError:
+        return True  # FakeTensor: undecidable here, re-checked at run time
 
 
 def _gemm_fst_ctx(spec, name):
@@ -538,7 +593,7 @@ def _gemm_wrapper_ctx(spec, name):
 class MmImpl(_MatmulFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
-    backends = ("tc2d", "tc2d_to", "bt2d")
+    backends = ("tc2d_tn", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.mm.default"
 
     @staticmethod
@@ -563,9 +618,15 @@ class MmImpl(_MatmulFamily):
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
+        backends = tuple(
+            b for b in self.backends
+            if b != "tc2d_tn" or _b_is_column_major(B, K, N)
+        )
+        plans = self._plans(kwargs, A.dtype, A.device, backends)
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
-            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            for backend, acc_dtype, out_dtype in plans
+            if backend != "tc2d_tn" or N % (16 // out_dtype.itemsize) == 0
             for tile in _tiles(backend, A.dtype, 1, M, N, K)
         ]
         return self._select(args, kwargs, specs)
@@ -627,7 +688,7 @@ class AddmmImpl(_MatmulFamily):
 
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    backends = ("tc2d", "tc2d_to", "bt2d")
+    backends = ("tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.addmm.default"
 
     @staticmethod
@@ -644,14 +705,23 @@ class AddmmImpl(_MatmulFamily):
         if len(args) != 3:
             return None
         Cin, A, B = args
-        if not all(isinstance(t, torch.Tensor) and t.is_cuda and t.dim() == 2
+        if not all(isinstance(t, torch.Tensor) and t.is_cuda
                    for t in (Cin, A, B)):
             return None
-        if A.dtype != B.dtype:
+        if A.dim() != 2 or B.dim() != 2 or A.dtype != B.dtype:
             return None
         M, K = (int(x) for x in A.shape)
         K2, N = (int(x) for x in B.shape)
-        if K != K2 or tuple(int(x) for x in Cin.shape) != (M, N):
+        if K != K2:
+            return None
+        cshape = tuple(int(x) for x in Cin.shape)
+        if cshape == (M, N):
+            backends = tuple(b for b in self.backends if b != "tc2d_to_bcast")
+        elif cshape in ((N,), (1, N)):
+            # A row bias. Only the broadcast-layout epilogue can read it; every
+            # other backend needs C to have a cell per output element.
+            backends = ("tc2d_to_bcast",)
+        else:
             return None
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
@@ -659,7 +729,8 @@ class AddmmImpl(_MatmulFamily):
             return None
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
-            for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
+            for backend, acc_dtype, out_dtype
+            in self._plans(kwargs, A.dtype, A.device, backends)
             # C is the output buffer, so it already has to be the output type.
             if Cin.dtype == out_dtype
             for tile in _tiles(backend, A.dtype, 1, M, N, K)

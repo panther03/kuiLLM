@@ -28,6 +28,15 @@ let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
         (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
         rows shared cols
+{% elif backend == "tc2d_to_bcast" %}
+// C is a length-`cols` bias vector, read through a broadcast layout: no
+// materialised (rows x cols) copy, and the epilogue addresses it by column only.
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
+    tc2d_to_bcast_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
+        (MS.rlincomb (to_real alpha) (to_real beta))
+        rows shared cols
 {% elif backend == "bt2d" %}
 // BlockTiling2D updates C in place, at batch = 1 (see Kuiops.Mm.Inst).
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
