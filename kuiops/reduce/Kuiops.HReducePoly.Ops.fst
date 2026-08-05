@@ -71,3 +71,13 @@ let or_u8_assoc x y z =
   FStar.UInt.logor_associative
     (FStar.UInt8.v x) (FStar.UInt8.v y) (FStar.UInt8.v z);
   FStar.UInt8.v_inj (or_u8 (or_u8 x y) z) (or_u8 x (or_u8 y z))
+
+inline_for_extraction noextract
+let add_a #et {| scalar et |} x y = add x y
+let add_a_r_assoc x y z = ()
+let add_a_ok et {| scalar et |} {| real_like et |} = ()
+
+inline_for_extraction noextract
+let mul_a #et {| scalar et |} x y = mul x y
+let mul_a_r_assoc x y z = ()
+let mul_a_ok et {| scalar et |} {| real_like et |} = ()

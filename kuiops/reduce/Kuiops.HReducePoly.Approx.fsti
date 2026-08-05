@@ -1,0 +1,77 @@
+module Kuiops.HReducePoly.Approx
+
+(* Reduction over the innermost dimension of a tensor, specified over the
+   reals. Unlike [Kuiops.HReducePoly.Exact], the concrete combiner is only
+   required to *approximate* an associative real operation, so the (real)
+   reduction order the kernel picks is unobservable in the specification.
+   Each outer (batch) index is reduced by one CUDA block. *)
+
+#lang-pulse
+
+open Pulse.Lib.Pledge
+open Kuiper
+open Kuiper.Math
+open Kuiper.Functions
+open Kuiper.Tensor
+open Kuiper.Seq.Common
+open Kuiops.HReducePoly.Spec
+
+module SZ = Kuiper.SizeT
+
+(* Unary analogue of [approx2]. *)
+let approx1
+  (#a #b : Type0) {| scalar a, real_like a, scalar b, real_like b |}
+  (f : a -> b) (g : real -> real) : prop
+  = forall (x:a) (r:real). x %~ r ==> f x %~ g r
+
+(* The output chest approximates the real reduction of [vr]. *)
+let out_approx
+  (#et_o : Type0) {| scalar et_o, real_like et_o |}
+  (#rank : nat) (#d : shape rank) (#cols : pos)
+  (f_r : real -> real -> real)
+  (pre_map_r post_map_r : real -> real)
+  (vr : chest (snoc_shape d cols) real)
+  (vout' : chest d et_o)
+  : prop
+  = forall (i : abs d).
+      acc vout' i %~ reduced f_r pre_map_r post_map_r vr i
+
+inline_for_extraction noextract
+fn reduce_indexed
+  (#et_i : Type0) {| scalar et_i, real_like et_i |}
+  (#et : Type0) {| scalar et, real_like et |}
+  (#et_o : Type0) {| scalar et_o, real_like et_o |}
+  (#r : erased nat)
+  (#d : shape r)
+  (cd : cshape d)
+  (f : et -> et -> et)
+  (f_r : (real -> real -> real) { is_associative f_r /\ approx2 f f_r })
+  (pre_map : et_i -> et)
+  (pre_map_r : (real -> real) { approx1 pre_map pre_map_r })
+  (post_map : et -> et_o)
+  (post_map_r : (real -> real) { approx1 post_map post_map_r })
+  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
+  (cols : szp)
+  (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
+  (index : conc d -> szlt cols -> conc (snoc_shape d cols))
+  (index_up : (i:conc d -> j:szlt cols ->
+    Lemma (up (index i j) == abs_snoc (up i) (SZ.v j))))
+  (#lin : tlayout (snoc_shape d cols)) {| ctlayout lin |}
+  (#lout : tlayout d) {| ctlayout lout |}
+  (input : tensor et_i lin { is_global input })
+  (output : tensor et_o lout { is_global output })
+  (s : stream_t)
+  (#vin : chest (snoc_shape d cols) et_i)
+  (#vr : chest (snoc_shape d cols) real)
+  (#vout : chest d et_o)
+  (#e : epoch_t)
+  preserves cpu ** stream_live s ** epoch_live s e
+  requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
+  requires pure (vin %~ vr)
+  ensures
+    pledge0 (epoch_done s e)
+      (on gpu_loc (
+        (input |-> vin) **
+        (exists* (vout' : chest d et_o).
+          (output |-> vout') **
+          pure (out_approx f_r pre_map_r post_map_r vr vout'))))

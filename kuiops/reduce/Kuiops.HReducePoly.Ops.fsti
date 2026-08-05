@@ -52,3 +52,22 @@ inline_for_extraction noextract
 val or_u8 (x y : u8) : Tot u8
 val or_u8_assoc (x y z : u8) :
   Lemma (or_u8 (or_u8 x y) z == or_u8 x (or_u8 y z))
+
+(* Approximate operators: generic over any [scalar] element type, with the
+   associativity obligation discharged over the reals only. *)
+
+inline_for_extraction noextract
+val add_a (#et : Type0) {| scalar et |} (x y : et) : Tot et
+let add_a_r (x y : real) : Tot real = x +. y
+val add_a_r_assoc (x y z : real) :
+  Lemma (add_a_r (add_a_r x y) z == add_a_r x (add_a_r y z))
+val add_a_ok (et : Type0) {| scalar et, real_like et |} :
+  Lemma (approx2 (add_a #et) add_a_r)
+
+inline_for_extraction noextract
+val mul_a (#et : Type0) {| scalar et |} (x y : et) : Tot et
+let mul_a_r (x y : real) : Tot real = x *. y
+val mul_a_r_assoc (x y z : real) :
+  Lemma (mul_a_r (mul_a_r x y) z == mul_a_r x (mul_a_r y z))
+val mul_a_ok (et : Type0) {| scalar et, real_like et |} :
+  Lemma (approx2 (mul_a #et) mul_a_r)

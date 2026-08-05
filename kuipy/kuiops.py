@@ -39,9 +39,9 @@ class _Family:
     # They stay callable directly (e.g. from the unit tests).
     graph_safe = True
 
-    def _mod(self, module, fst_ctx, wrapper_ctx):
+    def _mod(self, module, fst_ctx, wrapper_ctx, fst_template=None):
         return _compile.build_kernel(module,
-            self.fst_template, fst_ctx,
+            fst_template or self.fst_template, fst_ctx,
             self.wrapper_template, wrapper_ctx)
 
 def torch_dtype_to_fstar(dt):
@@ -1048,6 +1048,9 @@ class CatImpl(_Family):
 
 class HReducePolyImpl(_Family):
     fst_template = "reduce/Kuiops.HReducePoly.Inst.fst.j2"
+    # Float element types have no exactly associative combiner, so they go
+    # through the reduction specified over the reals instead.
+    approx_fst_template = "reduce/Kuiops.HReducePoly.Approx.Inst.fst.j2"
     wrapper_template = "reduce/wrapper_hreduce_poly.cu.j2"
 
     _OPS = {
@@ -1065,7 +1068,11 @@ class HReducePolyImpl(_Family):
         Inp = args[0]
         dim = args[1] if len(args) > 1 else kwargs.get("dim")
         if not (isinstance(Inp, torch.Tensor) and Inp.is_cuda
-                and Inp.is_contiguous() and Inp.dtype in _INTEGER_DTYPES):
+                and Inp.is_contiguous()
+                and Inp.dtype in _INTEGER_DTYPES + _FLOAT_DTYPES):
+            return None
+        approx = Inp.dtype in _FLOAT_DTYPES
+        if approx and func not in (aten.sum.dim_IntList, aten.prod.dim_int):
             return None
 
         rank = Inp.dim()
@@ -1103,7 +1110,13 @@ class HReducePolyImpl(_Family):
             return None
 
         op = self._OPS[func]
-        if op in ("add", "mul"):
+        if approx:
+            out_dtype = kwargs.get("dtype")
+            if out_dtype is None:
+                out_dtype = Inp.dtype
+            if out_dtype is not Inp.dtype:
+                return None
+        elif op in ("add", "mul"):
             out_dtype = kwargs.get("dtype")
             if out_dtype is None:
                 out_dtype = torch.int64
@@ -1114,12 +1127,31 @@ class HReducePolyImpl(_Family):
         else:
             out_dtype = torch.uint8 if Inp.dtype is torch.uint8 else torch.bool
 
-        return dict(op=op, in_dtype=Inp.dtype, out_dtype=out_dtype, rank=rank)
+        return dict(op=op, in_dtype=Inp.dtype, out_dtype=out_dtype, rank=rank,
+                    approx=approx)
 
     def run(self, spec, args, kwargs):
         op = spec["op"]
         in_dtype = spec["in_dtype"]
         out_dtype = spec["out_dtype"]
+        rank = spec["rank"]
+        if spec["approx"]:
+            et = torch_dtype_to_fstar(in_dtype)
+            module = (
+                f"Kuiops.HReducePoly.{op.title()}Approx."
+                f"R{rank}.{et.title()}")
+            name = "hreduce_poly_jit"
+            fst_ctx = dict(
+                module=module, name=name, r=rank, in_et=et, out_et=et,
+                reduce_op=f"{op}_a")
+            wrapper_ctx = dict(
+                module=module.replace(".", "_"), name=name, r=rank,
+                cpp_in=torch_dtype_to_ctype(in_dtype),
+                cpp_kernel_out=torch_dtype_to_ctype(out_dtype),
+                out_scalar=torch_dtype_to_aten_scalar(out_dtype))
+            return self._mod(
+                module, fst_ctx, wrapper_ctx,
+                fst_template=self.approx_fst_template).run(args[0])
         if op in ("and", "or"):
             out_bits = 8
             reduce_op = f"{op}_u8"
@@ -1148,7 +1180,6 @@ class HReducePolyImpl(_Family):
 
         in_et = torch_dtype_to_fstar(in_dtype)
         out_et = f"u{out_bits}"
-        rank = spec["rank"]
         module = (
             f"Kuiops.HReducePoly.{op.title()}."
             f"R{rank}.{in_et.title()}To{out_et.title()}As"

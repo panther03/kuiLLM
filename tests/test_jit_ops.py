@@ -305,6 +305,14 @@ def test_hreduce_poly(func, dtype, kwargs):
     assert torch.equal(out, ref)
 
 
+def test_hreduce_poly_approx_batched_float_sum():
+    _need_cuda()
+    X = torch.randn(2, 3, 512, device="cuda", dtype=torch.float32)
+    args = (X, [-1], False)
+    out = kuipy.run(aten.sum.dim_IntList)(*args)
+    _assert_close(out, aten.sum.dim_IntList(*args), torch.float32)
+
+
 def test_hreduce_poly_dtype_conversion():
     _need_cuda()
     X = torch.arange(8, device="cuda", dtype=torch.int8).reshape(2, 4)
@@ -333,7 +341,10 @@ def test_hreduce_poly_support_constraints():
     assert impl.supported(
         aten.sum.dim_IntList, (ints, [-1]), {"dtype": torch.float32}) is None
     assert impl.supported(
-        aten.sum.dim_IntList, (floats, [-1]), {}) is None
+        aten.sum.dim_IntList, (floats, [-1]), {}) is not None
+    assert impl.supported(
+        aten.sum.dim_IntList, (floats, [-1]), {"dtype": torch.float64}) is None
+    assert impl.supported(aten.all.dim, (floats, -1), {}) is None
     assert impl.supported(
         aten.sum.dim_IntList, (ints.transpose(0, 1), [-1]), {}) is None
     empty_rows = torch.empty(0, 4, device="cuda", dtype=torch.int32)

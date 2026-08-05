@@ -10,30 +10,8 @@ open Kuiper
 open Kuiper.Functions { is_associative }
 open Kuiper.Tensor
 open Kuiper.Seq.Common
+open Kuiops.HReducePoly.Spec
 module SZ = Kuiper.SizeT
-
-val snoc_shape (#r : nat) (d : shape r) (n : nat) : GTot (shape (r + 1))
-
-val abs_snoc (#r : nat) (#d : shape r) (#n : nat)
-  (i : abs d) (j : natlt n) : GTot (abs (snoc_shape d n))
-
-val inner_seq (#et_i : Type0) (#r : nat) (#d : shape r) (#n : nat)
-  (v : chest (snoc_shape d n) et_i) (i : abs d) : GTot (lseq et_i n)
-
-let rfold1 (#et : Type0) (f : et -> et -> et)
-  (s : seq et { Seq.length s > 0 }) : GTot et =
-  seq_fold_left f (s @! 0) (Seq.slice s 1 (Seq.length s))
-
-let reduced
-  (#et_i #et #et_o : Type0)
-  (#r : nat) (#d : shape r) (#n : pos)
-  (f : et -> et -> et)
-  (pre_map : et_i -> et)
-  (post_map : et -> et_o)
-  (v : chest (snoc_shape d n) et_i)
-  (i : abs d)
-  : GTot et_o =
-  post_map (rfold1 f (lseq_map pre_map (inner_seq v i)))
 
 inline_for_extraction noextract
 // `sized` needed because we allocate a shared memory array dynamically with element type `et`
