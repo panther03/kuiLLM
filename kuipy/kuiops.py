@@ -360,6 +360,10 @@ class ElementwiseImpl(_Family):
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
+
+# Warps per block an untuned tensor-core tiling aims for (8 warps = 256
+# threads), the occupancy sweet spot on the tested Ampere parts.
+_PREFERRED_WARPS = 8
 _MAX_BLOCKS = 2097152
 _WARP = 32
 
@@ -424,8 +428,8 @@ def _bt2d_tiles(dtype, M, N, K):
 
 
 def _tc2d_tiles(dtype, M, N, K, tn=False):
-    """Every legal TensorCore2D parameterization for this problem, ranges listed
-    in preference order. The fragment dims are fixed at the 16x16x16 shape.
+    """Every legal TensorCore2D parameterization for this problem, in preference
+    order: block shapes as listed, warp shapes by ``_PREFERRED_WARPS``. The fragment dims are fixed at the 16x16x16 shape.
 
     ``tn`` selects the transposed-B backend. Its staging copy runs along k
     rather than n, so the vector-chunk divisibility lands on ``bk`` (which is
@@ -447,6 +451,7 @@ def _tc2d_tiles(dtype, M, N, K, tn=False):
                     continue
                 if 2 * (bm * bk + bk * bn) > _SHMEM_BYTES:
                     continue
+                inner = []
                 for wm in (8, 4, 2, 16):
                     if bm % (wm * tm):
                         continue
@@ -459,8 +464,18 @@ def _tc2d_tiles(dtype, M, N, K, tn=False):
                         fill = chunk * warps * _WARP
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
-                                          tk=tk, wm=wm, wn=wn))
+                        inner.append(((abs(warps - _PREFERRED_WARPS), -wn),
+                                      dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
+                                           tk=tk, wm=wm, wn=wn)))
+                # An untuned call takes the first candidate, so order the warp
+                # shapes rather than leaving them in enumeration order. The
+                # widest legal one would otherwise win with a 64-thread block
+                # and leave most of the SM idle, so sort by distance from a
+                # full 8 warps; among equals prefer the larger `wn`, whose
+                # wider n footprint gives the row-major epilogue longer
+                # contiguous stores.
+                inner.sort(key=lambda w: w[0])
+                tiles.extend(t for _, t in inner)
     return tiles
 
 
