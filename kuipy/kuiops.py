@@ -361,9 +361,6 @@ class ElementwiseImpl(_Family):
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
 
-# Warps per block an untuned tensor-core tiling aims for (8 warps = 256
-# threads), the occupancy sweet spot on the tested Ampere parts.
-_PREFERRED_WARPS = 8
 _MAX_BLOCKS = 2097152
 _WARP = 32
 
@@ -427,9 +424,24 @@ def _bt2d_tiles(dtype, M, N, K):
     return tiles
 
 
+_ACC_FRAG_REGS = 8   # one 16x16x16 f32 accumulator fragment, per thread
+_AB_FRAG_REGS = 4    # one 16x16x16 16-bit a/b fragment, per thread
+_REG_BUDGET = 224    # 255 architectural minus headroom for addressing
+
+
+def _tc2d_frag_regs(wm, wn):
+    """Per-thread registers a warp's fragments occupy.
+
+    TensorCore2D keeps wm*wn accumulators plus wm A- and wn B-fragments live
+    across the whole k-loop. Past the hardware file they spill to local memory,
+    which costs far more than any tiling gain: at 4096^3 the wm8_wn4 tiling
+    spills and runs 2x slower than tilings that fit."""
+    return wm * wn * _ACC_FRAG_REGS + (wm + wn) * _AB_FRAG_REGS
+
+
 def _tc2d_tiles(dtype, M, N, K, tn=False):
     """Every legal TensorCore2D parameterization for this problem, in preference
-    order: block shapes as listed, warp shapes by ``_PREFERRED_WARPS``. The fragment dims are fixed at the 16x16x16 shape.
+    order: block shapes as listed, then by register budget. The fragment dims are fixed at the 16x16x16 shape.
 
     ``tn`` selects the transposed-B backend. Its staging copy runs along k
     rather than n, so the vector-chunk divisibility lands on ``bk`` (which is
@@ -464,18 +476,9 @@ def _tc2d_tiles(dtype, M, N, K, tn=False):
                         fill = chunk * warps * _WARP
                         if (bm * bk) % fill or (bk * bn) % fill:
                             continue
-                        inner.append(((abs(warps - _PREFERRED_WARPS), -wn),
-                                      dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
-                                           tk=tk, wm=wm, wn=wn)))
-                # An untuned call takes the first candidate, so order the warp
-                # shapes rather than leaving them in enumeration order. The
-                # widest legal one would otherwise win with a 64-thread block
-                # and leave most of the SM idle, so sort by distance from a
-                # full 8 warps; among equals prefer the larger `wn`, whose
-                # wider n footprint gives the row-major epilogue longer
-                # contiguous stores.
-                inner.sort(key=lambda w: w[0])
-                tiles.extend(t for _, t in inner)
+                        tiles.append(dict(bm=bm, bn=bn, bk=bk, tm=tm, tn=tn_,
+                                          tk=tk, wm=wm, wn=wn))
+    tiles.sort(key=lambda t: _tc2d_frag_regs(t["wm"], t["wn"]) > _REG_BUDGET)
     return tiles
 
 
