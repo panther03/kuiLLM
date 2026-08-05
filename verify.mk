@@ -15,6 +15,13 @@ MAKEFLAGS += --no-builtin-rules
 ROOTS := $(shell find kuiops/ -name '*.fst' -o -name '*.fsti')
 CHECKED_FILES := $(foreach f, $(ROOTS), $(OBJ)/$(notdir $(f)).checked)
 
+# Recover a module name from the underscored form F*/karamel use for filenames.
+# A blind s/_/./ is wrong: JIT instantiation modules have underscores inside
+# their last segment (Kuiops.Mm.<...>.P_bm128_bn32_...), so instead match the
+# stem against the (dot-separated) source file names.
+mod_of = $(basename $(notdir $(firstword $(foreach f,$(ROOTS),\
+  $(if $(filter $(1),$(subst .,_,$(basename $(notdir $(f))))),$(f))))))
+
 define msg =
 @printf "  %-8s  %s\n" $(1) $(if $(2),$(2),$(shell realpath --relative-to=. $<))
 endef
@@ -40,13 +47,12 @@ verify-kuiops: .depend $(CHECKED_FILES)
 # live in F*'s --odir ($(OBJ)).
 
 # Turning something like .kuipy_cache/checked/Kuiops_Mm.krml into Kuiops.Mm
-$(OBJ)/%.krml: MOD=$(subst _,.,$(basename $(notdir $@)))
 $(OBJ)/%.krml: | mkobj
 	@$(call msg,"EXTRACT")
 	@$(CURDIR)/fstar.sh --already_cached '*,-Kuiops' --codegen krml \
 	  --load_cmxs $(PLUGIN) --extract "-*,+Kuiops,+Kuiper" -o $@ $<
 
-$(PRE)/%.cu $(PRE)/%.h &: MOD=$(subst _,.,$(basename $(notdir $<)))
+$(PRE)/%.cu $(PRE)/%.h &: MOD=$(call mod_of,$*)
 $(PRE)/%.cu $(PRE)/%.h &: $(OBJ)/%.krml | mkobj
 	@$(call msg,"KRML")
 	@$(CURDIR)/krml.sh -bundle "$(MOD)=*" -tmpdir $(PRE)/ $<
