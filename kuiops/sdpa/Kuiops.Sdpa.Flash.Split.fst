@@ -22,6 +22,7 @@ open Kuiper.Shape
 open Pulse.Lib.Pledge
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -2193,4 +2194,37 @@ fn flash_gather_thread_tensor
           (f /. (SZ.v nw * BW.warp_size)) e);
     };
   tensor_gather_n a (SZ.v nw * BW.warp_size) #f;
+}
+
+ghost
+fn flash_gather_thread_rotensor
+  (#et : Type0) (#r : nat) (#ds : shape r)
+  (#l : TRO.vtlayout ds)
+  (nw nthr : szp {
+    SZ.v nthr == SZ.v nw * BW.warp_size })
+  (a : TRO.rotensor et l)
+  (#f : perm) (#e : chest ds et)
+  requires
+    forall+ (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size).
+      a |-> Frac (f /. (SZ.v nthr)) e
+  ensures a |-> Frac f e
+{
+  flash_unfactor_threads nw
+    (fun _w _lane ->
+      a |-> Frac (f /. (SZ.v nthr)) e);
+  forevery_map
+    (fun (_ : natlt (SZ.v nw * BW.warp_size)) ->
+      a |-> Frac (f /. (SZ.v nthr)) e)
+    (fun (_ : natlt (SZ.v nw * BW.warp_size)) ->
+      a |-> Frac
+        (f /. (SZ.v nw * BW.warp_size)) e)
+    fn _ {
+      rewrite
+        (a |-> Frac (f /. (SZ.v nthr)) e)
+        as
+        (a |-> Frac
+          (f /. (SZ.v nw * BW.warp_size)) e);
+    };
+  TRO.tensor_gather_n a (SZ.v nw * BW.warp_size) #f;
 }

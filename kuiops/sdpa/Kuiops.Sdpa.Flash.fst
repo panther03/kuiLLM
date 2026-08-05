@@ -25,6 +25,7 @@ open Kuiops.Sdpa.Flash.Shmem
 open Kuiops.Sdpa.Flash.Thread
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -59,16 +60,16 @@ let sdpa_flash_kd
   (d : szp { 16 /?+ SZ.v d })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   {| ctlayout lgQ |} {| ctlayout lgK |} {| ctlayout lgV |}
-  {| ctlayout lgmask |} {| ctlayout lout |}
+  {| TRO.cvtlayout lgmask |} {| ctlayout lout |}
   (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
   (gK : array4 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array4 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask { Kuiper.Tensor.is_global gmask })
+  (gmask : TRO.roarray4 et_ab lgmask { TRO.is_global gmask })
   (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
-  (causal : bool) (scale : et_acc)
+  (causal : bool) (has_mask : bool) (scale : et_acc)
   (#_ : squash (warp_row_span /?+ 16))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
@@ -163,7 +164,7 @@ let sdpa_flash_kd
       (tid / BW.warp_size) (tid % BW.warp_size));
   f = sdpa_flash_thread nblk nw nthr
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout causal scale;
+    gQ gK gV gmask gout causal has_mask scale;
   block_pre_sendable = (fun _ -> magic());
   block_post_sendable = (fun _ -> magic());
   kpre_sendable = (fun _ _ _ _ -> magic());
@@ -197,16 +198,16 @@ fn sdpa_flash_async
   (d : szp { 16 /?+ SZ.v d })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   {| ctlayout lgQ |} {| ctlayout lgK |} {| ctlayout lgV |}
-  {| ctlayout lgmask |} {| ctlayout lout |}
+  {| TRO.cvtlayout lgmask |} {| ctlayout lout |}
   (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
   (gK : array4 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array4 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask { Kuiper.Tensor.is_global gmask })
+  (gmask : TRO.roarray4 et_ab lgmask { TRO.is_global gmask })
   (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
-  (causal : bool) (scale : et_acc)
+  (causal : bool) (has_mask : bool) (scale : et_acc)
   (#_ : squash (warp_row_span /?+ 16))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
@@ -246,5 +247,5 @@ fn sdpa_flash_async
 {
   launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout causal scale) s;
+    gQ gK gV gmask gout causal has_mask scale) s;
 }

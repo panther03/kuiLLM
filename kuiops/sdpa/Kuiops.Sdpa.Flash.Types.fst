@@ -19,6 +19,7 @@ open Kuiper.ForEvery
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module BW = Kuiper.Barrier.Warp
 module B = Kuiper.Barrier
 
@@ -820,12 +821,12 @@ let flash_thread_pre
   (d : szp { 16 /?+ SZ.v d })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (v : flash_views et_ab et_acc (SZ.v nw) (SZ.v d))
   (#fQ #fK #fV #fmask : perm)
@@ -869,12 +870,12 @@ let flash_thread_post
   (d : szp { 16 /?+ SZ.v d })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (v : flash_views et_ab et_acc (SZ.v nw) (SZ.v d))
   (#fQ #fK #fV #fmask : perm)
@@ -922,12 +923,12 @@ let flash_block_state
     SZ.fits (SZ.v tiles * 16) })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -958,7 +959,7 @@ let sdpa_flash_jt_frame
   (#et_ab #et_acc : Type0)
   (d sk : szp) (b hq sq : szp)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lcw : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
   (#lS #lP #lPVc : layout2 16 16)
@@ -968,7 +969,7 @@ let sdpa_flash_jt_frame
   (shP : array2 et_ab lP)
   (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
-  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : array4 et_ab lgmask)
+  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : TRO.roarray4 et_ab lgmask)
   (#fKg #fVg #fmask : perm)
   (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
@@ -997,7 +998,7 @@ let sdpa_flash_pre
   (b hq sq rows : szp)
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (#lcw : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
@@ -1005,7 +1006,7 @@ let sdpa_flash_pre
   (gQ : array4 et_ab lgQ)
   (gK : array2 et_ab lgK)
   (gV : array2 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shK : array2 et_ab lK)
@@ -1057,7 +1058,7 @@ let sdpa_flash_post
   (b hq sq rows : szp)
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (#lcw : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
@@ -1065,7 +1066,7 @@ let sdpa_flash_post
   (gQ : array4 et_ab lgQ)
   (gK : array2 et_ab lgK)
   (gV : array2 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shK : array2 et_ab lK)
@@ -1103,3 +1104,27 @@ let sdpa_flash_post
     (out_store_cells b hq sq 16sz d rows gout
       bi (SZ.v kvh) (SZ.v group) (SZ.v r0)
       (SZ.v (sdpa_flash_lane nw nthr tid)))
+
+(* Degenerate additive-mask layout for the no-mask case.
+
+   Every index maps to cell 0, so the mask tensor is a broadcast view of a
+   single element: the caller only has to own (and allocate) one cell rather
+   than a dense [b x hq x sq x sk] buffer.  This is exactly the non-injective
+   [vtlayout] that [rotensor] admits and an ordinary [tlayout] cannot express.
+   The kernel is passed [has_mask = false] alongside it, so no read through
+   this layout ever happens; it exists to give the ownership footprint of an
+   absent mask a sound, constant-size denotation. *)
+inline_for_extraction noextract
+let vl4_broadcast0 (d0 d1 d2 d3 : nat)
+  : TRO.vlayout4 d0 d1 d2 d3
+= { ulen = 1; imap = (fun _ -> 0) }
+
+inline_for_extraction noextract
+instance cvl4_broadcast0 (d0 d1 d2 d3 : nat {
+    SZ.fits d0 /\ SZ.fits d1 /\ SZ.fits d2 /\ SZ.fits d3 })
+  : TRO.cvtlayout (vl4_broadcast0 d0 d1 d2 d3)
+= {
+    ulen_fits = ();
+    all_fit = ();
+    cimap = (fun _ -> 0sz);
+  }

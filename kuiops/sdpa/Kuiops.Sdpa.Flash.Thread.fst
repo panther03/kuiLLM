@@ -25,6 +25,7 @@ open Kuiops.Sdpa.Flash.Barrier
 open Kuiops.Sdpa.Flash.Kf
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -51,16 +52,16 @@ fn sdpa_flash_thread
   (d : szp { 16 /?+ SZ.v d })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   {| ctlayout lgQ |} {| ctlayout lgK |} {| ctlayout lgV |}
-  {| ctlayout lgmask |} {| ctlayout lout |}
+  {| TRO.cvtlayout lgmask |} {| ctlayout lout |}
   (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
   (gK : array4 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array4 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
-  (causal : bool) (scale : et_acc)
+  (causal : bool) (has_mask : bool) (scale : et_acc)
   (#_ : squash (warp_row_span /?+ 16))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
@@ -316,7 +317,7 @@ fn sdpa_flash_thread
     (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
-    tid bi r0 group kvh causal scale;
+    tid bi r0 group kvh causal has_mask scale;
 
   unfold sdpa_flash_post #et_ab #et_acc
     nw nthr d sk b hq sq rows

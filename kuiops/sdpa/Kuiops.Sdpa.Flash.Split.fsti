@@ -23,6 +23,7 @@ open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -437,6 +438,22 @@ fn flash_gather_thread_tensor
   (nw nthr : szp {
     SZ.v nthr == SZ.v nw * BW.warp_size })
   (a : tensor et l)
+  (#f : perm) (#e : chest ds et)
+  requires
+    forall+ (_w : natlt (SZ.v nw))
+      (_lane : natlt BW.warp_size).
+      a |-> Frac (f /. (SZ.v nthr)) e
+  ensures a |-> Frac f e
+
+(* Read-only counterpart of [flash_gather_thread_tensor], for the additive mask:
+   it is a [rotensor] so that a broadcast (non-injective) layout is admissible. *)
+ghost
+fn flash_gather_thread_rotensor
+  (#et : Type0) (#r : nat) (#ds : shape r)
+  (#l : TRO.vtlayout ds)
+  (nw nthr : szp {
+    SZ.v nthr == SZ.v nw * BW.warp_size })
+  (a : TRO.rotensor et l)
   (#f : perm) (#e : chest ds et)
   requires
     forall+ (_w : natlt (SZ.v nw))

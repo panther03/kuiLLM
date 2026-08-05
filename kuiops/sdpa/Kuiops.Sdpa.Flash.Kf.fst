@@ -25,6 +25,7 @@ open Kuiops.Sdpa.Flash.KfBlock
 open Kuiops.Sdpa.Flash.KfBarrier
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
@@ -41,13 +42,13 @@ fn sdpa_flash_kf
   (b hq sq rows : szp)
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (#lcw : layout1 16)
   (#lK #lV : layout2 16 (SZ.v d))
   (#lS #lP #lPVc : layout2 16 16)
   {| ctlayout lgQ |} {| ctlayout lgK |} {| ctlayout lgV |}
-  {| ctlayout lgmask |} {| ctlayout lout |} {| ctlayout lcw |}
+  {| TRO.cvtlayout lgmask |} {| ctlayout lout |} {| ctlayout lcw |}
   {| ctlayout lK |} {| ctlayout lV |} {| ctlayout lS |}
   {| ctlayout lP |} {| ctlayout lPVc |}
   {| strided_row_major lK |} {| strided_row_major lV |}
@@ -56,7 +57,7 @@ fn sdpa_flash_kf
   (gQ : array4 et_ab lgQ { Kuiper.Tensor.is_global gQ })
   (gK : array2 et_ab lgK { Kuiper.Tensor.is_global gK })
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout { Kuiper.Tensor.is_global gout })
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shK : array2 et_ab lK)
@@ -71,7 +72,7 @@ fn sdpa_flash_kf
   (shgm shgl : array1 et_acc (l1_forward 16))
   (tid : szlt nthr)
   (bi : szlt b) (r0 : sz) (group : szp) (kvh : sz)
-  (causal : bool) (scale : et_acc)
+  (causal : bool) (has_mask : bool) (scale : et_acc)
   (#_ : squash (16 /?+ SZ.v d))
   (#_ : squash ((Kuiper.Barrier.Warp.warp_size / 16) /?+ 16))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
@@ -204,7 +205,7 @@ fn sdpa_flash_kf
       (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
       shQ shPVc shcw
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
-      gK gV gmask bi qh qpos k0 cbound row_active causal scale;
+      gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale;
     assert pure (SZ.fits (SZ.v !jt + SZ.v nw));
     let next = !jt +^ nw;
     assert pure (SZ.v next == SZ.v !jt + SZ.v nw);

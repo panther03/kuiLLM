@@ -355,7 +355,9 @@ def _sdpa_ref(Q, K, V, bias, scale, causal):
     group = Q.shape[1] // K.shape[1]
     Kb = K.repeat_interleave(group, dim=1)
     Vb = V.repeat_interleave(group, dim=1)
-    logits = (Q.float() @ Kb.float().transpose(-1, -2)) * scale + bias.float()
+    logits = (Q.float() @ Kb.float().transpose(-1, -2)) * scale
+    if bias is not None:
+        logits = logits + bias.float()
     if causal:
         qpos = torch.arange(sq, device=Q.device).view(sq, 1)
         kj = torch.arange(sk, device=Q.device).view(1, sk)
@@ -365,15 +367,17 @@ def _sdpa_ref(Q, K, V, bias, scale, causal):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("causal", [False, True])
-def test_sdpa(dtype, causal):
+@pytest.mark.parametrize("has_mask", [True, False])
+def test_sdpa(dtype, causal, has_mask):
     _need_tensor_cores(dtype)
     torch.manual_seed(0)
     b, hq, hkv, sq, sk, d = 2, 4, 2, 3, 24, 32
     Q = torch.randn(b, hq, sq, d, device="cuda", dtype=dtype)
     K = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
     V = torch.randn(b, hkv, sk, d, device="cuda", dtype=dtype)
-    bias = torch.randn(b, hq, sq, sk, device="cuda", dtype=dtype)
-    original_bias = bias.clone()
+    bias = torch.randn(b, hq, sq, sk, device="cuda", dtype=dtype) \
+        if has_mask else None
+    original_bias = None if bias is None else bias.clone()
     scale = 0.3
     func = aten._scaled_dot_product_efficient_attention.default
     args = (Q, K, V, bias, False, 0.0, causal)
@@ -381,7 +385,8 @@ def test_sdpa(dtype, causal):
     assert out.shape == (b, hq, sq, d) and out.dtype == dtype
     assert lse.shape == (b, hq, 0) and lse.dtype == torch.float32
     assert seed.shape == off.shape == ()
-    assert torch.equal(bias, original_bias)
+    if has_mask:
+        assert torch.equal(bias, original_bias)
     _assert_close(out, _sdpa_ref(Q, K, V, bias, scale, causal), dtype)
 
 
@@ -400,9 +405,10 @@ def test_sdpa_unsupported():
     # LSE computation and dropout have no kernel support.
     assert impl.supported(func, (Q, K, V, bias, True), {}) is None
     assert impl.supported(func, (Q, K, V, bias, False, 0.1, False), {}) is None
-    # The mask is read through an injective layout: it cannot be absent or
-    # broadcast, and it must share the input dtype.
-    assert impl.supported(func, (Q, K, V, None, False), {}) is None
+    # The mask is read through a rotensor, so it may be absent; a present one
+    # must still be dense (the template only emits the row-major layout) and
+    # share the input dtype.
+    assert impl.supported(func, (Q, K, V, None, False), {}) is not None
     assert impl.supported(
         func, (Q, K, V, mk((b, 1, 1, sk)).expand(b, hq, sq, sk), False), {}) is None
     assert impl.supported(

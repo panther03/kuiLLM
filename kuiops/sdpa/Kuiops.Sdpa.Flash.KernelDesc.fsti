@@ -22,6 +22,7 @@ open Kuiper.TensorCore
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
+module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 
@@ -39,12 +40,12 @@ fn flash_setup
     SZ.fits (SZ.v tiles * 16) })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -77,13 +78,13 @@ fn flash_teardown
     SZ.fits (SZ.v tiles * 16) })
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   {| ctlayout lout |}
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -126,12 +127,12 @@ fn flash_block_setup
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
@@ -183,12 +184,12 @@ fn flash_block_teardown
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (#lgQ : layout4 b hq sq d)
   (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : layout4 b hq sq sk)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
   (#lout : layout4 b hq sq d)
   (gQ : array4 et_ab lgQ)
   (gK : array4 et_ab lgK)
   (gV : array4 et_ab lgV)
-  (gmask : array4 et_ab lgmask)
+  (gmask : TRO.roarray4 et_ab lgmask)
   (gout : array4 et_ab lout)
   (#fQ #fK #fV #fmask : perm)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)

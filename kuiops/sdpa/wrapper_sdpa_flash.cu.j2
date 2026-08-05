@@ -9,9 +9,17 @@
 //
 // Q(B,Hq,Sq,D) K/V(B,Hkv,Sk,D) mask(B,Hq,Sq,Sk) -> out(B,Hq,Sq,D), all dense
 // row-major. Shapes and the launch geometry are validated by SdpaImpl.supported.
+//
+// This instantiation is built {% if has_mask %}with{% else %}without{% endif %} an additive mask. With no mask the
+// kernel's mask tensor uses a broadcast layout that maps every index to cell 0,
+// so it only needs one live element to own; the kernel is passed
+// has_mask=false and never reads it.
 
 torch::Tensor op_{{ module }}
-    (torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor mask,
+    (torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+{%- if has_mask %}
+     torch::Tensor mask,
+{%- endif %}
      double scale, bool causal, int64_t nw)
 {
     const int64_t b = Q.size(0), hq = Q.size(1), sq = Q.size(2), d = Q.size(3);
@@ -21,6 +29,11 @@ torch::Tensor op_{{ module }}
     const int64_t tiles = (rows + 15) / 16;
 
     auto out = torch::empty({b, hq, sq, d}, Q.options());
+{%- if not has_mask %}
+    // Single-element backing store for the broadcast mask layout. Never read
+    // (has_mask=false), but the kernel owns one cell, so it must be live.
+    auto mask = torch::empty({1}, Q.options());
+{%- endif %}
 
     at::cuda::CUDAGuard g(Q.device());
 
@@ -33,7 +46,8 @@ torch::Tensor op_{{ module }}
         reinterpret_cast<{{cpp_et_ab}}*>(V.data_ptr()),
         reinterpret_cast<{{cpp_et_ab}}*>(mask.data_ptr()),
         reinterpret_cast<{{cpp_et_ab}}*>(out.data_ptr()),
-        causal, static_cast<{{cpp_et_acc}}>((float)scale),
+        causal, {{ 'true' if has_mask else 'false' }},
+        static_cast<{{cpp_et_acc}}>((float)scale),
         kuiops::current_stream());
 
     return out;
