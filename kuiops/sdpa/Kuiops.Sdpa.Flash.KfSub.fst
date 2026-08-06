@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 let flash_transpose_bij (#rows #cols : nat)
@@ -178,6 +179,12 @@ let fa_acc1_upd1 (#et:Type) (#len:nat) (s:chest1 et len) (i:natlt len) (v:et) (j
 let fa_up_cidx1_eq (#d0:nat) (i:szlt d0)
   : Lemma (up (cidx1 i) == idx1 (SZ.v i))
           [SMTPat (up (cidx1 i))]
+  = ()
+
+let fa_up_cidx4_eq (#d0 #d1 #d2 #d3:nat)
+  (i:szlt d0) (j:szlt d1) (k:szlt d2) (l:szlt d3)
+  : Lemma (up (cidx4 i j k l) == idx4 (SZ.v i) (SZ.v j) (SZ.v k) (SZ.v l))
+          [SMTPat (up (cidx4 i j k l))]
   = ()
 
 let fa_tr_val_chest1_to_seq (#et:Type) (#len:nat) (v:chest1 et len)
@@ -332,14 +339,6 @@ fn array1_cell_from_ref
   tensor_cell_from_ref a (idx1 i);
 }
 
-(* Clamp a key index into [0, sk) so the mask read is unconditionally in bounds
-   (a pure, F*-level [if] refines the result type). *)
-(* Select-to-zero probability (line 180): masked score is the [-inf] sentinel and
-   maps to the literal 0, never [exp(-inf)]. *)
-inline_for_extraction noextract
-let sel_prob (#et : Type0) {| floating et |} (sv mnew : et) : et =
-  if eq sv (neg infinity) then zero else fexp (sv `sub` mnew)
-
 (* Read the additive mask bias for one (row, key) pair, or [zero] when the
    caller supplied no mask tensor (flash_attn_fa1.cu:162, [if (mask)]).
 
@@ -361,6 +360,8 @@ fn sdpa_flash_mask_bias
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   preserves (gmask |-> Frac fmask emask)
   returns v : et_ab
+  ensures pure (v == SF.mask_bias emask has_mask
+                       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v kjb))
 {
   if has_mask {
     TRO.tensor_read gmask (cidx4 bi qh qpos kjb)
@@ -408,20 +409,36 @@ fn sdpa_flash_softmax_upd
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (#fmask : perm)
   (#vm #vl #vcw : erased et_acc)
+  (#es : chest1 et_acc (SZ.v bn))
+  (#ep : chest1 et_ab (SZ.v bn))
   requires
-    shm |-> vm ** shl |-> vl ** shcw |-> vcw
+    shm |-> vm ** shl |-> vl ** shcw |-> vcw ** shS |-> es ** shP |-> ep
   preserves
-    (gmask |-> Frac fmask emask) ** live shS ** live shP
+    (gmask |-> Frac fmask emask)
   ensures
-    live shm ** live shl ** live shcw
+    exists* (es' : chest1 et_acc (SZ.v bn)) (ep' : chest1 et_ab (SZ.v bn))
+            (m' l' cw' : et_acc).
+      shS |-> es' ** shP |-> ep' ** shm |-> m' ** shl |-> l' ** shcw |-> cw' **
+      pure (SF.softmax_upd_post emask has_mask row_active causal
+              (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+              es vm vl es' ep' m' l' cw'
+            /\ kind cw' == Finite)
 {
   // Score loop: scale + mask, masking-out invalid keys to the -inf sentinel.
   let mut rowmax : et_acc = neg infinity;
   let mut j : szle bn = 0sz;
   while (!j <^ bn)
-    invariant
-      (gmask |-> Frac fmask emask) ** live shS ** live shP **
-      live j ** live rowmax
+    invariant exists* (vj : szle bn) (rmv : et_acc) (esc : chest1 et_acc (SZ.v bn)).
+      (gmask |-> Frac fmask emask) ** shS |-> esc ** shP |-> ep **
+      j |-> vj ** rowmax |-> rmv **
+      pure (
+        (forall (t : natlt (SZ.v bn)). t < SZ.v vj ==>
+           acc1 esc t == SF.score_upd scale (acc1 es t)
+             (SF.mask_bias emask has_mask (SZ.v bi) (SZ.v qh) (SZ.v qpos)
+                (SF.clamp_nat (SZ.v sk) (SZ.v k0 + t)))
+             (SF.key_ok row_active causal (SZ.v sk) (SZ.v cbound) (SZ.v k0 + t))) /\
+        (forall (t : natlt (SZ.v bn)). SZ.v vj <= t ==> acc1 esc t == acc1 es t) /\
+        rmv == SF.row_max esc (SZ.v vj))
     decreases (bn - !j)
   {
     let vj = !j;
@@ -429,22 +446,22 @@ fn sdpa_flash_softmax_upd
     let kj = k0 +^ vj;
     let sc = tensor_read shS (cidx1 jj);
     // The only conditional memory access is the mask read; it is in bounds iff
-    // [kj <^ sk].  Since we have no functional spec, we read an in-bounds mask
-    // cell (clamping the key index) and select the score purely: the mask value
-    // is discarded whenever the key is invalid.  With [has_mask] false there is
-    // no mask tensor and the read is skipped, yielding a zero bias.
+    // [kj <^ sk].  We read an in-bounds mask cell (clamping the key index) and
+    // select the score purely: the mask value is discarded whenever the key is
+    // invalid.  With [has_mask] false there is no mask tensor and the read is
+    // skipped, yielding a zero bias.
     let kjb : szlt sk = clamp_lt sk kj;
     let mv = sdpa_flash_mask_bias b hq sq sk gmask has_mask bi qh qpos kjb;
-    let s : et_acc =
-      if (row_active && (not (causal && (kj >^ cbound))) && (kj <^ sk)) {
-        (sc `mul` scale) `add` (FC.fcast mv)
-      } else {
-        neg #et_acc infinity
-      };
+    let ok : bool = row_active && (not (causal && (kj >^ cbound))) && (kj <^ sk);
+    let s : et_acc = SF.score_upd scale sc mv ok;
+    with esc. assert (shS |-> esc);
     shS.(cidx1 jj) <- s;
+    SF.row_max_ext esc (upd1 esc (SZ.v jj) s <: chest1 et_acc (SZ.v bn)) (SZ.v vj);
     rowmax := fmax !rowmax s;
     j := !j +^ 1sz;
   };
+
+  with esf. assert (shS |-> esf);
 
   // Online-softmax max/correction update (uses the OLD m still in shm).
   let m_old = !shm;
@@ -461,15 +478,19 @@ fn sdpa_flash_softmax_upd
   let mut rowsum : et_acc = zero;
   j := 0sz;
   while (!j <^ bn)
-    invariant
-      (gmask |-> Frac fmask emask) ** live shS ** live shP **
-      live j ** live rowsum
+    invariant exists* (vj : szle bn) (rsv : et_acc) (epc : chest1 et_ab (SZ.v bn)).
+      (gmask |-> Frac fmask emask) ** shS |-> esf ** shP |-> epc **
+      j |-> vj ** rowsum |-> rsv **
+      pure (
+        (forall (t : natlt (SZ.v bn)). t < SZ.v vj ==>
+           acc1 epc t == FC.fcast (SF.sel_prob (acc1 esf t) mnew)) /\
+        rsv == SF.row_sum esf mnew (SZ.v vj))
     decreases (bn - !j)
   {
     let vj = !j;
     let jj : szlt bn = vj;
     let sv = tensor_read shS (cidx1 jj);
-    let p : et_acc = sel_prob sv mnew;
+    let p : et_acc = SF.sel_prob sv mnew;
     shP.(cidx1 jj) <- FC.fcast p;
     rowsum := !rowsum `add` p;
     j := !j +^ 1sz;
