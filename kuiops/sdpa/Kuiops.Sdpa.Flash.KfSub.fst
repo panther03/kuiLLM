@@ -31,6 +31,7 @@ module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
+module BM = Kuiops.Common.BlockMatmul
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 let flash_transpose_bij (#rows #cols : nat)
@@ -556,7 +557,8 @@ fn sdpa_flash_qk_mm
   ensures
     shQ  |-> Frac fQ eQ **
     shKT |-> Frac fK eKT **
-    (exists* eS. shS |-> Frac (1.0R /. warp_size) eS)
+    shS  |-> Frac (1.0R /. warp_size)
+               (BM.emma_chain #et_ab #et_acc 16 eQ eKT (SZ.v d / 16))
 {
   tensor_pts_to_ref shQ;
   tensor_pts_to_ref shKT;
@@ -568,12 +570,16 @@ fn sdpa_flash_qk_mm
   mma_fill sFrag sc_acc.zero;
 
   let nchunks = d /^ 16sz;
+  FStar.Math.Lemmas.lemma_div_le (SZ.v d) (SZ.v hd) 16;
   let mut chunk : sz = 0sz;
   while (!chunk <^ nchunks)
     invariant
-      live qFrag ** live kFrag ** live sFrag ** live chunk **
+      live qFrag ** live kFrag ** live chunk **
       shQ |-> Frac fQ eQ **
       shKT |-> Frac fK eKT **
+      (exists* (c : nat { c <= SZ.v hd / 16 }).
+         sFrag |-> BM.emma_chain #et_ab #et_acc 16 eQ eKT c
+         ** pure (c == SZ.v !chunk)) **
       pure (SZ.v !chunk <= SZ.v nchunks)
     decreases (nchunks - !chunk)
   {
