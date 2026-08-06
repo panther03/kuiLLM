@@ -1727,3 +1727,91 @@ let block_ml_state
       scale eQ eKg i nw w nkt
 
 #pop-options
+
+(* ------------------------------------------------------------------ *)
+(* The [P@V] tile cell is an exact real sum over the tile's keys.       *)
+(* ------------------------------------------------------------------ *)
+
+let subtile_approx
+  (#et : Type0) {| scalar et |} {| real_like et |}
+  (#rows #cols : nat)
+  (e : chest2 et rows cols) (r : chest2 real rows cols)
+  (trows : pos { trows /?+ rows }) (tcols : pos { tcols /?+ cols })
+  (tr : natlt (rows / trows)) (tc : natlt (cols / tcols))
+  : Lemma (requires e %~ r)
+          (ensures Kuiper.EMatrix.Tiling.ematrix_subtile e trows tcols tr tc
+                   %~ Kuiper.EMatrix.Tiling.ematrix_subtile r trows tcols tr tc)
+  = ()
+
+(* The real matmul's inner accumulation is a plain masked sum. *)
+let rec matmul_single_sum
+  (#rows #shared #cols : nat)
+  (m1 : chest2 real rows shared) (m2 : chest2 real shared cols)
+  (row : natlt rows) (col : natlt cols) (to : natle shared)
+  : Lemma (ensures MS.__matmul_single m1 m2 row col to
+                   == SO.sum_upto #shared
+                        (fun k -> acc2 m1 row k *. acc2 m2 k col) SO.ptrue to)
+          (decreases to)
+  = if to = 0 then assert (MS.__matmul_single m1 m2 row col 0 == 0.0R)
+    else begin
+      matmul_single_sum m1 m2 row col (to - 1);
+      assert (MS.__matmul_single m1 m2 row col to
+              == MS.__matmul_single m1 m2 row col (to - 1)
+                 +. (acc2 m1 row (to - 1) *. acc2 m2 (to - 1) col))
+    end
+
+let matmul_cell_sum
+  (#rows #shared #cols : nat)
+  (m1 : chest2 real rows shared) (m2 : chest2 real shared cols)
+  (row : natlt rows) (col : natlt cols)
+  : Lemma (acc2 (MS.matmul m1 m2) row col
+           == SO.sum_where #shared
+                (fun k -> acc2 m1 row k *. acc2 m2 k col) SO.ptrue)
+  = MS.lemma_matmul_index m1 m2 row col;
+    matmul_single_sum m1 m2 row col shared
+
+(* Column [c] of a [16]-wide output chunk lives in chunk [c / 16]. *)
+let chunk_of_col (d : pos) (#dd16 : squash (16 /?+ d)) (c : natlt d)
+  : Lemma (SF.clamp_nat (d / 16) (c / 16) == c / 16 /\
+           (c / 16) * 16 + c % 16 == c)
+  = FStar.Math.Lemmas.lemma_div_mod c 16;
+    FStar.Math.Lemmas.lemma_div_mod d 16;
+    if c / 16 >= d / 16
+    then FStar.Math.Lemmas.lemma_mult_le_left 16 (d / 16) (c / 16)
+    else ()
+
+(* Cell [(r, c)] of the tile's [P@V] product approximates the exact real dot
+   product of probability row [r] with value column [c] of the tile. *)
+let pv_cell_approx
+  (#et_ab #et_acc : Type0)
+  {| _sa : scalar et_ab |} {| _ra : real_like et_ab |}
+  {| _sc : scalar et_acc |} {| _rc : real_like et_acc |}
+  (#d : pos) (#dd16 : squash (16 /?+ d))
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 d)
+  (rP : chest2 real 16 16) (rV : chest2 real 16 d)
+  (r : natlt 16) (c : natlt d)
+  : Lemma (requires eP %~ rP /\ eV %~ rV)
+          (ensures acc2 (SF.pv_chunk #et_ab #et_acc eP eV
+                           (SF.clamp_nat (d / 16) (c / 16))) r (c % 16)
+                   %~ SO.sum_where #16
+                        (fun k -> acc2 rP r k *. acc2 rV k c) SO.ptrue)
+  = chunk_of_col d #dd16 c;
+    let cb : natlt (d / 16) = c / 16 in
+    let cc : natlt 16 = c % 16 in
+    subtile_approx eV rV 16 16 0 cb;
+    BM.emma_chain_approx #et_ab #et_acc #_sa #_ra #_sc #_rc #16 #16 #16 16
+      eP (Kuiper.EMatrix.Tiling.ematrix_subtile eV 16 16 0 cb)
+      rP (Kuiper.EMatrix.Tiling.ematrix_subtile rV 16 16 0 cb);
+    matmul_cell_sum rP (Kuiper.EMatrix.Tiling.ematrix_subtile rV 16 16 0 cb)
+      r cc;
+    SO.sum_where_ext #16
+      (fun k -> acc2 rP r k
+                *. acc2 (Kuiper.EMatrix.Tiling.ematrix_subtile rV 16 16 0 cb)
+                     k cc)
+      (fun k -> acc2 rP r k *. acc2 rV k c) SO.ptrue SO.ptrue;
+    assert (acc (BM.emma_chain #et_ab #et_acc 16 eP
+                   (Kuiper.EMatrix.Tiling.ematrix_subtile eV 16 16 0 cb) 1)
+                ((r, (cc, ())) <: Kuiper.Shape.abs (16 @| 16 @| INil))
+            %~ acc (MS.matmul rP
+                      (Kuiper.EMatrix.Tiling.ematrix_subtile rV 16 16 0 cb))
+                   ((r, (cc, ())) <: Kuiper.Shape.abs (16 @| 16 @| INil)))
