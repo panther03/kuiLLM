@@ -1345,3 +1345,36 @@ instance cvl4_bcast_keys (d0 d1 d2 d3 : nat {
 let subtile_row_upd (#et : Type0) (r : chest2 et 1 16) (s : chest1 et 16)
   : Lemma (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s)) == s)
   = assert (equal (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s))) s)
+
+(* A [1 x 16] subtile is determined by its single row, so knowing that row is
+   row [i] of some [16 x 16] tile pins the subtile itself. *)
+let row_subtile_det
+  (#et : Type0) (r : chest2 et 1 16) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (requires forall (j : natlt 16). acc1 (subtile_row r) j == acc2 e i j)
+          (ensures r == ematrix_subtile e 1 16 i 0)
+  = assert (equal r (ematrix_subtile e 1 16 i 0))
+
+(* Reading a subtile's row back out of the tile it came from. *)
+let subtile_row_sub
+  (#et : Type0) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (subtile_row (ematrix_subtile e 1 16 i 0) == SF.erow e i)
+  = assert (equal (subtile_row (ematrix_subtile e 1 16 i 0)) (SF.erow e i))
+
+let row_subtile_erow
+  (#et : Type0) (r : chest2 et 1 16) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (requires subtile_row r == SF.erow e i)
+          (ensures r == ematrix_subtile e 1 16 i 0)
+  = assert (forall (j : natlt 16). acc1 (SF.erow e i) j == acc2 e i j);
+    row_subtile_det r e i
+
+(* Total lookup into a 16-vector: out-of-range indices are clamped so the
+   whole-warp descriptions can be written against an unrefined lane index. *)
+unfold
+let acc16 (#et : Type0) (e : chest1 et 16) (i : nat) : GTot et
+= acc1 e (if i < 16 then i else 0)
+
+let from_tiles_row16 (#et : Type0) (e : chest2 et 16 16)
+  : Lemma (ematrix_from_tiles 1 16
+             (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc) == e)
+  = assert (equal (ematrix_from_tiles 1 16
+                     (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc)) e)

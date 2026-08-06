@@ -60,6 +60,47 @@ let jt_score_row_eq_g
              == SS.tile_score_row #et_ab #et_acc eQ eKg k0 i)
   = if i < 16 then jt_score_row_eq #et_ab #et_acc d eQ eKg k0 i else ()
 
+(* The raw score tile the warp computes for the key tile at [k0]. *)
+unfold
+let jt_stile
+  (#et_ab #et_acc : Type0) {| floating et_acc |} {| scalar et_ab |}
+  (#sk : pos) (d : nat) (#_ : squash (16 /?+ d))
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (k0 : nat)
+  : chest2 et_acc 16 16
+= BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16)
+
+(* Lane [i]'s online-softmax update, read off the whole-warp descriptions. *)
+let jt_upd_post_g
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (evm evl : chest1 et_acc 16) (i : nat)
+  : Lemma (i < 16 ==>
+      SF.softmax_upd_post emask has_mask row_active causal bi qh qpos k0 cbound scale
+        (jt_score_row #et_ab #et_acc d eQ eKg k0 i) (acc16 evm i) (acc16 evl i)
+        (SF.erow (SF.score_tile emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale (jt_stile #et_ab #et_acc d eQ eKg k0)) i)
+        (SF.erow (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale (jt_stile #et_ab #et_acc d eQ eKg k0) evm) i)
+        (acc16 (SF.m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale (jt_stile #et_ab #et_acc d eQ eKg k0) evm) i)
+        (acc16 (SF.l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale (jt_stile #et_ab #et_acc d eQ eKg k0) evm evl) i)
+        (acc16 (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale (jt_stile #et_ab #et_acc d eQ eKg k0) evm) i))
+  = if i < 16
+    then (SF.tile_upd_post emask has_mask row_active causal bi qh qpos k0 cbound
+            scale (jt_stile #et_ab #et_acc d eQ eKg k0) evm evl i;
+          subtile_row_sub (jt_stile #et_ab #et_acc d eQ eKg k0) i)
+    else ()
+
 unfold
 let jt_rest_v
   (#et_ab #et_acc : Type0)
@@ -188,8 +229,11 @@ fn sdpa_flash_jt_body
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (vm vl : Ghost.erased et_acc)
+  (evm evl : Ghost.erased (chest1 et_acc 16))
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
+  requires pure (SZ.v lane < 16 ==>
+                   reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl (SZ.v lane)

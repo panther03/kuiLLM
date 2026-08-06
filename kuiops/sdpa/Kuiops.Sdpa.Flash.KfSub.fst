@@ -1318,6 +1318,33 @@ fn rows16_to_whole32 (#et:Type0) (#l : layout2 16 16)
     fn i { () };
 }
 
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 20"
+ghost
+fn rows16_to_whole32_v (#et:Type0) (#l : layout2 16 16)
+  {| c : ctlayout l |}
+  (shA : array2 et l) (e : chest2 et 16 16)
+  requires forall+ (i:natlt 16). row_subtile_v shA i (ematrix_subtile e 1 16 i 0)
+  ensures  forall+ (i:natlt BW.warp_size). (shA |-> Frac (1.0R /. BW.warp_size) e)
+{
+  assert pure (SZ.fits (tlayout_ulen l));
+  forevery_ext #(natlt 16)
+    (fun (i:natlt 16) -> array2_subtile shA 1 16 i 0 |-> Frac 1.0R (ematrix_subtile e 1 16 i 0))
+    (fun (i:natlt 16) ->
+       array2_subtile shA 1 16 (i / 1) (i % 1)
+       |-> Frac 1.0R (ematrix_subtile e 1 16 (i / 1) (i % 1)));
+  forevery_factor' 16 16 1
+    (fun (tr:natlt 16) (tc:natlt 1) ->
+       array2_subtile shA 1 16 tr tc |-> Frac 1.0R (ematrix_subtile e 1 16 tr tc));
+  array2_untile' shA 1 16 (fun (tr:natlt 16) (tc:natlt 1) -> ematrix_subtile e 1 16 tr tc);
+  from_tiles_row16 e;
+  rewrite (shA |-> Frac 1.0R
+            (ematrix_from_tiles 1 16 (fun (tr:natlt 16) (tc:natlt 1) -> ematrix_subtile e 1 16 tr tc)))
+       as (shA |-> Frac 1.0R e);
+  tensor_share_n shA BW.warp_size;
+}
+
+#pop-options
+
 (* shcw scalar array (length 16): whole 1/warp fraction (all 32) <-> 16 exclusive
    cells (via [Cell]).  Used by b3 (cells->whole) and b5 (whole->cells). *)
 ghost
@@ -1338,6 +1365,27 @@ fn cells16_to_whole32 (#et:Type0) (#lcw:layout1 16)
     (fun (i:natlt BW.warp_size) -> shcw |-> Frac (1.0R /. BW.warp_size) s)
     (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
     fn i { () };
+}
+
+ghost
+fn cells16_to_whole32_v (#et:Type0) (#lcw:layout1 16)
+  (shcw : array1 et lcw) (s : chest1 et 16)
+  requires (forall+ (i:natlt 16). cell_full_v shcw i (acc1 s i))
+    ** pure (SZ.fits (tlayout_ulen lcw))
+  ensures  forall+ (i:natlt BW.warp_size). (shcw |-> Frac (1.0R /. BW.warp_size) s)
+{
+  implode1 shcw #1.0R #s;
+  tensor_share_n shcw BW.warp_size;
+}
+
+ghost
+fn whole32_to_cells16_v (#et:Type0) (#lcw:layout1 16)
+  (shcw : array1 et lcw) (s : chest1 et 16)
+  requires forall+ (i:natlt BW.warp_size). (shcw |-> Frac (1.0R /. BW.warp_size) s)
+  ensures  forall+ (i:natlt 16). cell_full_v shcw i (acc1 s i)
+{
+  tensor_gather_n shcw BW.warp_size;
+  explode1 shcw #1.0R #s;
 }
 
 ghost
@@ -1444,74 +1492,80 @@ fn sdpa_flash_barrier2
    The three arrays the softmax lanes exclusively owned per-row (shS, shP) or
    per-cell (shcw) are returned to the collective whole-tile [1/warp] fraction so
    the following [scale] (and next-iteration [qk_mm]) can read them. *)
-unfold let b3_pre (#et_ab #et_acc:Type0) (#lcw:layout1 16)
+unfold let b3_pre_v (#et_ab #et_acc:Type0) (#lcw:layout1 16)
   (#lS #lP : layout2 16 16)
   (shS : array2 et_acc lS)
   (shP : array2 et_ab lP)
   (shcw : array1 et_acc lcw)
+  (eS : chest2 et_acc 16 16) (eP : chest2 et_ab 16 16) (ecw : chest1 et_acc 16)
   (i : natlt BW.warp_size) : slprop
-= when__ (i < 16) (fun _ -> row_subtile shS i)
-  ** when__ (i < 16) (fun _ -> row_subtile shP i)
-  ** when__ (i < 16) (fun _ -> cell_full shcw i)
+= when__ (i < 16) (fun _ -> row_subtile_v shS i (ematrix_subtile eS 1 16 i 0))
+  ** when__ (i < 16) (fun _ -> row_subtile_v shP i (ematrix_subtile eP 1 16 i 0))
+  ** when__ (i < 16) (fun _ -> cell_full_v shcw i (acc1 ecw i))
 
-unfold let b3_post (#et_ab #et_acc:Type0) (#lcw:layout1 16)
+unfold let b3_post_v (#et_ab #et_acc:Type0) (#lcw:layout1 16)
   (#lS #lP : layout2 16 16)
   (shS : array2 et_acc lS)
   (shP : array2 et_ab lP)
   (shcw : array1 et_acc lcw)
+  (eS : chest2 et_acc 16 16) (eP : chest2 et_ab 16 16) (ecw : chest1 et_acc 16)
   (i : natlt BW.warp_size) : slprop
-= (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
-  ** (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-  ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e)
+= (shS |-> Frac (1.0R /. BW.warp_size) eS)
+  ** (shP |-> Frac (1.0R /. BW.warp_size) eP)
+  ** (shcw |-> Frac (1.0R /. BW.warp_size) ecw)
 
 ghost
-fn barrier3_transform
+fn barrier3_transform_v
   (#et_ab #et_acc:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
   (#lS #lP : layout2 16 16)
   {| ctlayout lS |} {| ctlayout lP |}
   (shS : array2 et_acc lS)
   (shP : array2 et_ab lP)
   (shcw : array1 et_acc lcw)
-  requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i
-  ensures  forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i
+  (eS : chest2 et_acc 16 16) (eP : chest2 et_ab 16 16) (ecw : chest1 et_acc 16)
+  requires forall+ (i:natlt BW.warp_size). b3_pre_v shS shP shcw eS eP ecw i
+  ensures  forall+ (i:natlt BW.warp_size). b3_post_v shS shP shcw eS eP ecw i
 {
   forevery_unzip
-    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shS i))
     (fun (i:natlt BW.warp_size) ->
-       when__ (i < 16) (fun _ -> row_subtile shP i)
-       ** when__ (i < 16) (fun _ -> cell_full shcw i));
+       when__ (i < 16) (fun _ -> row_subtile_v shS i (ematrix_subtile eS 1 16 i 0)))
+    (fun (i:natlt BW.warp_size) ->
+       when__ (i < 16) (fun _ -> row_subtile_v shP i (ematrix_subtile eP 1 16 i 0))
+       ** when__ (i < 16) (fun _ -> cell_full_v shcw i (acc1 ecw i)));
   forevery_unzip
-    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> row_subtile shP i))
-    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> cell_full shcw i));
-
-  lower_32to16 (row_subtile shS);
-  rows16_to_whole32 shS;
-  lower_32to16 (row_subtile shP);
-  rows16_to_whole32 shP;
-  lower_32to16 (cell_full shcw);
-  cells16_to_whole32 shcw;
-
-  forevery_zip
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e);
-  forevery_zip
-    (fun (i:natlt BW.warp_size) -> exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
     (fun (i:natlt BW.warp_size) ->
-       (exists* (e:chest2 et_ab 16 16). shP |-> Frac (1.0R /. BW.warp_size) e)
-       ** (exists* (e:chest1 et_acc 16). shcw |-> Frac (1.0R /. BW.warp_size) e));
+       when__ (i < 16) (fun _ -> row_subtile_v shP i (ematrix_subtile eP 1 16 i 0)))
+    (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> cell_full_v shcw i (acc1 ecw i)));
+
+  lower_32to16 (fun (i:natlt 16) -> row_subtile_v shS i (ematrix_subtile eS 1 16 i 0));
+  rows16_to_whole32_v shS eS;
+  lower_32to16 (fun (i:natlt 16) -> row_subtile_v shP i (ematrix_subtile eP 1 16 i 0));
+  rows16_to_whole32_v shP eP;
+  lower_32to16 (fun (i:natlt 16) -> cell_full_v shcw i (acc1 ecw i));
+  cells16_to_whole32_v shcw ecw;
+
+  forevery_zip
+    (fun (i:natlt BW.warp_size) -> shP |-> Frac (1.0R /. BW.warp_size) eP)
+    (fun (i:natlt BW.warp_size) -> shcw |-> Frac (1.0R /. BW.warp_size) ecw);
+  forevery_zip
+    (fun (i:natlt BW.warp_size) -> shS |-> Frac (1.0R /. BW.warp_size) eS)
+    (fun (i:natlt BW.warp_size) ->
+       (shP |-> Frac (1.0R /. BW.warp_size) eP)
+       ** (shcw |-> Frac (1.0R /. BW.warp_size) ecw));
 }
 
-let barrier3_proof
+let barrier3_proof_v
   (#et_ab #et_acc:Type0) (#lcw:layout1 16) (#_ : squash (SZ.fits (tlayout_ulen lcw)))
   (#lS #lP : layout2 16 16)
   {| ctlayout lS |} {| ctlayout lP |}
   (#shS : array2 et_acc lS)
   (#shP : array2 et_ab lP)
   (#shcw : array1 et_acc lcw)
+  (#eS : chest2 et_acc 16 16) (#eP : chest2 et_ab 16 16) (#ecw : chest1 et_acc 16)
   : stt_ghost unit emp_inames
-      (requires forall+ (i:natlt BW.warp_size). b3_pre shS shP shcw i)
-      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b3_post shS shP shcw i)
-  = barrier3_transform shS shP shcw
+      (requires forall+ (i:natlt BW.warp_size). b3_pre_v shS shP shcw eS eP ecw i)
+      (ensures  fun _ -> forall+ (i:natlt BW.warp_size). b3_post_v shS shP shcw eS eP ecw i)
+  = barrier3_transform_v shS shP shcw eS eP ecw
 
 inline_for_extraction noextract
 fn sdpa_flash_barrier3
@@ -1522,14 +1576,16 @@ fn sdpa_flash_barrier3
   (shS : array2 et_acc lS)
   (shP : array2 et_ab lP)
   (shcw : array1 et_acc lcw)
+  (#eS : chest2 et_acc 16 16) (#eP : chest2 et_ab 16 16) (#ecw : chest1 et_acc 16)
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
-  requires b3_pre shS shP shcw (SZ.v lane % BW.warp_size)
-  ensures  b3_post shS shP shcw (SZ.v lane % BW.warp_size)
+  requires b3_pre_v shS shP shcw eS eP ecw (SZ.v lane % BW.warp_size)
+  ensures  b3_post_v shS shP shcw eS eP ecw (SZ.v lane % BW.warp_size)
 {
   rewrite each (SZ.v lane % BW.warp_size) as (SZ.v tid % BW.warp_size);
-  BW.warp_barrier_wait () (b3_pre shS shP shcw) (b3_post shS shP shcw)
-    barrier3_proof #(SZ.v nthr) #(SZ.v tid);
+  BW.warp_barrier_wait () (b3_pre_v shS shP shcw eS eP ecw) (b3_post_v shS shP shcw eS eP ecw)
+    barrier3_proof_v #(SZ.v nthr) #(SZ.v tid);
+  rewrite each (SZ.v tid % BW.warp_size) as (SZ.v lane % BW.warp_size);
 }
 
 (* ── Barrier 4 (CUDA line 192): scale -> pv_mm ─────────────────────────────────
@@ -1862,6 +1918,16 @@ fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
 }
 
 ghost
+fn cell_reindex_v (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (e : chest1 et 16) (i j : natlt BW.warp_size)
+  requires pure (i == j) ** when__ (i < 16) (fun _ -> cell_full_v shA i (acc1 e i))
+  ensures  when__ (j < 16) (fun _ -> cell_full_v shA j (acc1 e j))
+{
+  rewrite (when__ (i < 16) (fun _ -> cell_full_v shA i (acc1 e i)))
+       as (when__ (j < 16) (fun _ -> cell_full_v shA j (acc1 e j)));
+}
+
+ghost
 fn cell_reindex (#et:Type0) (#l:layout1 16) (shA : array1 et l) (i j : natlt BW.warp_size)
   requires pure (i == j) ** when__ (i < 16) (fun _ -> cell_full shA i)
   ensures  when__ (j < 16) (fun _ -> cell_full shA j)
@@ -2027,8 +2093,13 @@ fn sdpa_flash_softmax_maybe
   (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fmask : perm)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
-  (eS : Ghost.erased (chest2 et_acc 16 16)) (vm vl : Ghost.erased et_acc)
+  (eS : Ghost.erased (chest2 et_acc 16 16))
+  (vm vl : Ghost.erased et_acc)
+  (evm evl : Ghost.erased (chest1 et_acc 16))
   preserves (gmask |-> Frac fmask emask)
+  requires
+    pure (SZ.v lane < 16 ==>
+            reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
     when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile eS 1 16 (SZ.v lane) 0))
     ** when__ (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane))
@@ -2036,18 +2107,12 @@ fn sdpa_flash_softmax_maybe
     ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm)
     ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl)
   ensures
-    exists* (m' l' : et_acc).
-    when__ (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane))
-    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane))
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane))
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) m')
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) l')
-    ** pure (SZ.v lane < 16 ==>
-              (exists (sr' : chest1 et_acc 16) (pr' : chest1 et_ab 16) (cw' : et_acc).
-                 SF.softmax_upd_post emask has_mask row_active causal
-                   (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
-                   (subtile_row (ematrix_subtile eS 1 16 (SZ.v lane) 0)) vm vl
-                   sr' pr' m' l' cw' /\ Finite? (kind cw')))
+    when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0))
+    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)))
+    ** pure (SZ.v lane < 16 ==> Finite? (kind (acc16 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane))))
 {
   let active = lane <^ 16sz;
   if active {
@@ -2069,11 +2134,29 @@ fn sdpa_flash_softmax_maybe
               ** cell_full_v shm (SZ.v lane) m'
               ** cell_full_v shl (SZ.v lane) l');
 
-    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
-    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) m');
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) l');
+    subtile_row_sub eS (SZ.v lane);
+    SF.tile_upd_det emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos)
+      (SZ.v k0) (SZ.v cbound) scale eS evm evl (SZ.v lane)
+      (subtile_row rS') (subtile_row rP') m' l' cw';
+    row_subtile_erow rS' (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) (SZ.v lane);
+    row_subtile_erow rP' (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane);
+
+    rewrite (row_subtile_v shS (SZ.v lane) rS')
+         as (row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0));
+    rewrite (row_subtile_v shP (SZ.v lane) rP')
+         as (row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0));
+    rewrite (cell_full_v shcw (SZ.v lane) cw')
+         as (cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    rewrite (cell_full_v shm (SZ.v lane) m')
+         as (cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    rewrite (cell_full_v shl (SZ.v lane) l')
+         as (cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
+
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0));
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
   } else {
     assert pure ((SZ.v lane < 16) == false);
     when__elim_false (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile eS 1 16 (SZ.v lane) 0));
@@ -2082,11 +2165,11 @@ fn sdpa_flash_softmax_maybe
     when__elim_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm);
     when__elim_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl);
 
-    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile shS (SZ.v lane));
-    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm);
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl);
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0));
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
   }
 }
 
@@ -2142,8 +2225,11 @@ fn sdpa_flash_jt_body
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (vm vl : Ghost.erased et_acc)
+  (evm evl : Ghost.erased (chest1 et_acc 16))
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
+  requires pure (SZ.v lane < 16 ==>
+                   reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl (SZ.v lane)
@@ -2170,27 +2256,27 @@ fn sdpa_flash_jt_body
 
   (* Q@K^T score matmul, then barrier 2 (K -> stride sub-tiles, S -> rows). *)
   sdpa_flash_qk_mm d d shQ (flash_row2col shK) shS;
-  sdpa_flash_barrier2 d lane nthr tid shK shS
-    #(BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg (SZ.v k0))) (SZ.v d / 16));
+  sdpa_flash_barrier2 d lane nthr tid shK shS #(jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0));
 
   (* Bridge barrier-2 outputs (K stride, S row) back to the leaf residue. *)
   stride_reindex shK (SZ.v lane % BW.warp_size) (SZ.v lane);
-  row_reindex_v shS
-    (BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg (SZ.v k0))) (SZ.v d / 16))
-    (SZ.v lane % BW.warp_size) (SZ.v lane);
+  row_reindex_v shS (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) (SZ.v lane % BW.warp_size) (SZ.v lane);
 
   (* Online-softmax update on the 16 active lanes (guarded wrapper owns the if). *)
   sdpa_flash_softmax_maybe b hq sq sk shS shP shcw shm shl gmask
     lane bi qh qpos k0 cbound row_active causal has_mask scale
-    (BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg (SZ.v k0))) (SZ.v d / 16))
-    vm vl;
+    (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) vm vl evm evl;
+
+  jt_upd_post_g #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
+    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eQ eKg
+    evm evl (SZ.v lane);
 
   (* Bridge S/P rows + cw cell to the barrier residue, run barrier 3
-     (rows/cells -> whole tiles). *)
-  row_reindex shS (SZ.v lane) (SZ.v lane % BW.warp_size);
-  row_reindex shP (SZ.v lane) (SZ.v lane % BW.warp_size);
-  cell_reindex shcw (SZ.v lane) (SZ.v lane % BW.warp_size);
-  sdpa_flash_barrier3 lane nthr tid shS shP shcw;
+     (rows/cells -> whole tiles, values pinned). *)
+  row_reindex_v shS (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  row_reindex_v shP (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  cell_reindex_v shcw (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  sdpa_flash_barrier3 lane nthr tid shS shP shcw #(SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) #(SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) #(SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm);
 
   (* Rescale, barrier 4, P@V (all use residue [SZ.v lane]). *)
   sdpa_flash_scale d lane shO shcw;

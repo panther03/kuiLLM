@@ -216,6 +216,9 @@ fn sdpa_flash_kf
       gK gV gmask
       #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
       vmc vlc (SZ.v (tid %^ 32sz)));
+    SS.run_mlv_acc #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+      (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter) vmc vlc;
     sdpa_flash_jt_body d sk b hq sq
       #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
       #_ #_ #_ #_ #_ #_ #_ #_
@@ -239,7 +242,13 @@ fn sdpa_flash_kf
       shQ shPVc shcw
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale
-      vmc vlc;
+      vmc vlc
+      (SS.run_mv #et_ab #et_acc emask has_mask row_active causal
+        (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+      (SS.run_lv #et_ab #et_acc emask has_mask row_active causal
+        (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter));
     jt_score_row_eq_g #et_ab #et_acc (SZ.v d) eQsh eKg (SZ.v k0)
       (SZ.v (tid %^ 32sz));
     with vmn vln. assert (jt_rest_v #et_ab #et_acc d sk b hq sq

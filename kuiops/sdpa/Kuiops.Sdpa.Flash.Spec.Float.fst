@@ -205,3 +205,192 @@ let q_tile
       let qh = clamp_nat hq (kvh * group + rr / sq) in
       let qpos : natlt sq = rr % sq in
       if r < rows then acc4 eQ bi qh qpos dd else zero
+
+(* ------------------------------------------------------------------ *)
+(* The whole warp's view of one tile update.                           *)
+(*                                                                     *)
+(* [shS], [shP] and [shcw] are collectively owned between barriers, so *)
+(* their values have to be named by expressions every lane can write   *)
+(* down: the incoming register vectors [evm]/[evl] plus the raw score  *)
+(* tile.                                                               *)
+(* ------------------------------------------------------------------ *)
+
+let erow (#et : Type0) (#r #c : nat) (e : chest2 et r c) (i : natlt r)
+  : GTot (chest1 et c)
+  = mk1 (fun j -> acc2 e i j)
+
+let m_vec
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+  = mk1 (fun i ->
+      fmax (acc1 evm i)
+        (row_max (tile_scores emask has_mask row_active causal bi qh qpos
+                    k0 cbound scale (erow eS i)) 16))
+
+let cw_vec
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+  = mk1 (fun i ->
+      fexp (acc1 evm i `sub`
+            acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm) i))
+
+let l_vec
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+  = mk1 (fun i ->
+      (acc1 evl i `mul`
+       acc1 (cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+               scale eS evm) i)
+      `add`
+      row_sum (tile_scores emask has_mask row_active causal bi qh qpos
+                 k0 cbound scale (erow eS i))
+        (acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                 scale eS evm) i) 16)
+
+let score_tile
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16)
+  : GTot (chest2 et_acc 16 16)
+  = mk2 (fun i j ->
+      acc1 (tile_scores emask has_mask row_active causal bi qh qpos
+              k0 cbound scale (erow eS i)) j)
+
+let prob_tile
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest2 et_ab 16 16)
+  = mk2 (fun i j ->
+      FC.fcast
+        (sel_prob
+          (acc1 (tile_scores emask has_mask row_active causal bi qh qpos
+                   k0 cbound scale (erow eS i)) j)
+          (acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                   scale eS evm) i)))
+
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 20"
+
+(* [softmax_upd_post] for lane [i], read off the whole-warp descriptions. *)
+let tile_upd_post
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16) (i : natlt 16)
+  : Lemma
+      (softmax_upd_post emask has_mask row_active causal bi qh qpos k0 cbound
+         scale (erow eS i) (acc1 evm i) (acc1 evl i)
+         (erow (score_tile emask has_mask row_active causal bi qh qpos k0
+                  cbound scale eS) i)
+         (erow (prob_tile emask has_mask row_active causal bi qh qpos k0
+                  cbound scale eS evm) i)
+         (acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale eS evm) i)
+         (acc1 (l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale eS evm evl) i)
+         (acc1 (cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                  scale eS evm) i))
+  = row_max_ext
+      (erow (score_tile emask has_mask row_active causal bi qh qpos k0 cbound
+               scale eS) i)
+      (tile_scores emask has_mask row_active causal bi qh qpos k0 cbound scale
+         (erow eS i)) 16;
+    row_sum_ext
+      (erow (score_tile emask has_mask row_active causal bi qh qpos k0 cbound
+               scale eS) i)
+      (tile_scores emask has_mask row_active causal bi qh qpos k0 cbound scale
+         (erow eS i))
+      (acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+               scale eS evm) i) 16
+
+
+(* The whole-warp descriptions are the *only* possible outcome of lane [i]'s
+   update, so a [softmax_upd_post] hypothesis pins every primed value. *)
+let tile_upd_det
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16) (i : natlt 16)
+  (es' : chest1 et_acc 16) (ep' : chest1 et_ab 16) (m' l' cw' : et_acc)
+  : Lemma
+      (requires softmax_upd_post emask has_mask row_active causal bi qh qpos
+                  k0 cbound scale (erow eS i) (acc1 evm i) (acc1 evl i)
+                  es' ep' m' l' cw')
+      (ensures
+        es' == erow (score_tile emask has_mask row_active causal bi qh qpos k0
+                       cbound scale eS) i /\
+        ep' == erow (prob_tile emask has_mask row_active causal bi qh qpos k0
+                       cbound scale eS evm) i /\
+        m' == acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                      scale eS evm) i /\
+        l' == acc1 (l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                      scale eS evm evl) i /\
+        cw' == acc1 (cw_vec emask has_mask row_active causal bi qh qpos k0
+                       cbound scale eS evm) i)
+  = tile_upd_post emask has_mask row_active causal bi qh qpos k0 cbound scale
+      eS evm evl i;
+    scores_post_det emask has_mask row_active causal bi qh qpos k0 cbound scale
+      (erow eS i) es';
+    scores_post_det emask has_mask row_active causal bi qh qpos k0 cbound scale
+      (erow eS i)
+      (erow (score_tile emask has_mask row_active causal bi qh qpos k0 cbound
+               scale eS) i);
+    assert (equal ep'
+              (erow (prob_tile emask has_mask row_active causal bi qh qpos k0
+                       cbound scale eS evm) i))
+
+#pop-options
