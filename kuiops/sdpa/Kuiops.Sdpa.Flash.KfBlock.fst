@@ -347,7 +347,9 @@ fn sdpa_flash_causal_active
   (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
   (#_ : squash (SZ.v sq <= SZ.v sk))
   returns kmax : sz
-  ensures pure (SZ.v kmax <= SZ.v sk)
+  ensures pure (SZ.v kmax <= SZ.v sk /\
+                SZ.v kmax == SF.causal_kmax (SZ.v bm) (SZ.v sq) (SZ.v sk)
+                               (SZ.v rows) (SZ.v r0))
 {
   let mut maxpos : sz = 0sz;
   let mut found : bool = false;
@@ -356,7 +358,9 @@ fn sdpa_flash_causal_active
     invariant
       live i ** live maxpos ** live found **
       pure (SZ.v !i <= SZ.v bm) **
-      pure (SZ.v !maxpos < SZ.v sq)
+      pure (SZ.v !maxpos < SZ.v sq) **
+      pure ((SZ.v !maxpos, !found)
+              == SF.tile_maxpos (SZ.v sq) (SZ.v rows) (SZ.v r0) (SZ.v !i))
     decreases (bm - !i)
   {
     let vi = !i;
@@ -382,7 +386,9 @@ fn sdpa_flash_causal_mask
   (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
   (#_ : squash (SZ.v sq <= SZ.v sk))
   returns nkt : sz
-  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1)
+  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1 /\
+                SZ.v nkt == SF.key_tiles (SZ.v bn) (SZ.v bm) (SZ.v sq) (SZ.v sk)
+                              (SZ.v rows) (SZ.v r0) causal)
 {
   let kmax : sz =
     if causal { sdpa_flash_causal_active bm sk sq rows r0 } else { (sk <: sz) };

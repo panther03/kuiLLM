@@ -101,6 +101,85 @@ let jt_upd_post_g
           subtile_row_sub (jt_stile #et_ab #et_acc d eQ eKg k0) i)
     else ()
 
+(* The lane-uniform tile descriptions agree with lane [i]'s own on row [i].
+   A warp barrier's predicate family has to be the same expression for every
+   lane, so everything that crosses one is phrased with the [_t] versions. *)
+#push-options "--fuel 1 --ifuel 2"
+
+let jt_t_row_eq
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16) (i : natlt 16)
+  : Lemma
+      (requires SF.lane_params_ok hq sq sk kvh group rows r0 i row_active
+                  qh qpos cbound)
+      (ensures
+        ematrix_subtile (SF.score_tile_t emask has_mask causal bi kvh group rows r0
+                           k0 scale eS) 1 16 i 0
+        == ematrix_subtile (SF.score_tile emask has_mask row_active causal bi qh qpos
+                              k0 cbound scale eS) 1 16 i 0 /\
+        ematrix_subtile (SF.prob_tile_t emask has_mask causal bi kvh group rows r0
+                           k0 scale eS evm) 1 16 i 0
+        == ematrix_subtile (SF.prob_tile emask has_mask row_active causal bi qh qpos
+                              k0 cbound scale eS evm) 1 16 i 0 /\
+        acc1 (SF.cw_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm) i
+        == acc1 (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+                   eS evm) i /\
+        acc1 (SF.m_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm) i
+        == acc1 (SF.m_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+                   eS evm) i /\
+        acc1 (SF.l_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm evl) i
+        == acc1 (SF.l_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+                   eS evm evl) i)
+= SF.tile_row_eq
+    (SF.score_tile_t emask has_mask causal bi kvh group rows r0 k0 scale eS)
+    (SF.score_tile emask has_mask row_active causal bi qh qpos k0 cbound scale eS) i;
+  SF.tile_row_eq
+    (SF.prob_tile_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm)
+    (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound scale eS evm) i
+
+let jt_t_row_eq_g
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16) (i : nat)
+  : Lemma
+      (requires i < 16 ==>
+        SF.lane_params_ok hq sq sk kvh group rows r0 i row_active qh qpos cbound)
+      (ensures i < 16 ==>
+        (acc1 (SF.cw_vec_t emask has_mask causal bi kvh group rows r0 k0 scale
+                 eS evm) i
+         == acc1 (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm) i /\
+         acc1 (SF.m_vec_t emask has_mask causal bi kvh group rows r0 k0 scale
+                 eS evm) i
+         == acc1 (SF.m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm) i /\
+         acc1 (SF.l_vec_t emask has_mask causal bi kvh group rows r0 k0 scale
+                 eS evm evl) i
+         == acc1 (SF.l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm evl) i))
+= if i < 16
+  then jt_t_row_eq #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2 #b #hq #sq #sk
+         emask has_mask row_active causal bi qh qpos kvh group rows r0 k0 cbound
+         scale eS evm evl i
+  else ()
+
+#pop-options
+
 (* The [P@V] accumulation into one lane's [(span, 16)] stride sub-tile of the
    output tile, after the first [n] head-dimension chunks: lane [(tr, tc)] adds
    cell [(span*a + tr, tc)] of chunk [b] into its own output cell [(a, b)]. *)
@@ -173,18 +252,18 @@ let jt_out_step
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
   {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
   {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
-  (#b #hq #sq : nat) (#sk : pos) (d : pos) (#sq16 : squash (16 /?+ d))
+  (#b : nat) (#hq #sq #sk : pos) (d : pos) (#sq16 : squash (16 /?+ d))
   (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
-  (has_mask row_active causal : bool)
-  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
-  (k0 cbound : nat) (scale : et_acc)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
   (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
   (evm : chest1 et_acc 16) (eOw : chest2 et_acc 16 d)
   : GTot (chest2 et_acc 16 d)
 = SF.out_tile eOw
-    (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+    (SF.cw_vec_t emask has_mask causal bi kvh group rows r0 k0 scale
        (jt_stile #et_ab #et_acc d eQ eKg k0) evm)
-    (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
+    (SF.prob_tile_t emask has_mask causal bi kvh group rows r0 k0 scale
        (jt_stile #et_ab #et_acc d eQ eKg k0) evm)
     (SF.kv_tile 16 eVg k0)
 
@@ -309,6 +388,7 @@ fn sdpa_flash_jt_body
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
   (gmask : TRO.roarray4 et_ab lgmask)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (kvh group rows r0 : sz)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
   (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fQ #fKg #fVg #fmask : perm)
@@ -323,6 +403,10 @@ fn sdpa_flash_jt_body
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
   requires pure (SZ.v lane < 16 ==>
                    reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
+  requires pure (SZ.v lane < 16 ==>
+                   SF.lane_params_ok (SZ.v hq) (SZ.v sq) (SZ.v sk) (SZ.v kvh)
+                     (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v lane)
+                     row_active (SZ.v qh) (SZ.v qpos) (SZ.v cbound))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw (SZ.v lane)
@@ -330,8 +414,8 @@ fn sdpa_flash_jt_body
     exists* (m' l' : et_acc).
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l'
-      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
-         (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask causal
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale
          eQ eKg eVg evm eOw)
       (SZ.v lane)
     ** pure (SZ.v lane < 16 ==>

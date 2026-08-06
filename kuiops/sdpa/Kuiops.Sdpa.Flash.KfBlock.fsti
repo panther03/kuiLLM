@@ -83,7 +83,9 @@ fn sdpa_flash_causal_mask
   (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
   (#_ : squash (SZ.v sq <= SZ.v sk))
   returns nkt : sz
-  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1)
+  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1 /\
+                SZ.v nkt == SF.key_tiles (SZ.v bn) (SZ.v bm) (SZ.v sq) (SZ.v sk)
+                              (SZ.v rows) (SZ.v r0) causal)
 
 inline_for_extraction noextract
 fn sdpa_flash_combine_partials

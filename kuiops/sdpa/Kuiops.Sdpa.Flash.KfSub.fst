@@ -2103,6 +2103,7 @@ fn sdpa_flash_softmax_maybe
   (gmask : TRO.roarray4 et_ab lgmask)
   (lane : szlt warp_size)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (kvh group rows r0 : sz)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
   (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fmask : perm)
@@ -2115,18 +2116,23 @@ fn sdpa_flash_softmax_maybe
     pure (SZ.v lane < 16 ==>
             reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
+    pure (SZ.v lane < 16 ==>
+            SF.lane_params_ok (SZ.v hq) (SZ.v sq) (SZ.v sk) (SZ.v kvh) (SZ.v group)
+              (SZ.v rows) (SZ.v r0) (SZ.v lane)
+              row_active (SZ.v qh) (SZ.v qpos) (SZ.v cbound))
+  requires
     when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile eS 1 16 (SZ.v lane) 0))
     ** when__ (SZ.v lane < 16) (fun _ -> row_subtile shP (SZ.v lane))
     ** when__ (SZ.v lane < 16) (fun _ -> cell_full shcw (SZ.v lane))
     ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm)
     ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl)
   ensures
-    when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0))
-    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0))
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
-    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)))
-    ** pure (SZ.v lane < 16 ==> Finite? (kind (acc16 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane))))
+    when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS) 1 16 (SZ.v lane) 0))
+    ** when__ (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) 1 16 (SZ.v lane) 0))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)))
+    ** when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm evl) (SZ.v lane)))
+    ** pure (SZ.v lane < 16 ==> Finite? (kind (acc16 (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane))))
 {
   let active = lane <^ 16sz;
   if active {
@@ -2166,11 +2172,25 @@ fn sdpa_flash_softmax_maybe
     rewrite (cell_full_v shl (SZ.v lane) l')
          as (cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
 
-    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0));
-    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
+    jt_t_row_eq #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0)
+      (SZ.v k0) (SZ.v cbound) scale eS evm evl (SZ.v lane);
+    rewrite (row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0))
+         as (row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS) 1 16 (SZ.v lane) 0));
+    rewrite (row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0))
+         as (row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) 1 16 (SZ.v lane) 0));
+    rewrite (cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
+         as (cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    rewrite (cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)))
+         as (cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    rewrite (cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)))
+         as (cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm evl) (SZ.v lane)));
+
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS) 1 16 (SZ.v lane) 0));
+    when__intro_true (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) 1 16 (SZ.v lane) 0));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm evl) (SZ.v lane)));
   } else {
     assert pure ((SZ.v lane < 16) == false);
     when__elim_false (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile eS 1 16 (SZ.v lane) 0));
@@ -2179,11 +2199,11 @@ fn sdpa_flash_softmax_maybe
     when__elim_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm);
     when__elim_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl);
 
-    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS) 1 16 (SZ.v lane) 0));
-    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) 1 16 (SZ.v lane) 0));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm) (SZ.v lane)));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eS evm evl) (SZ.v lane)));
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shS (SZ.v lane) (ematrix_subtile (SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS) 1 16 (SZ.v lane) 0));
+    when__intro_false (SZ.v lane < 16) (fun _ -> row_subtile_v shP (SZ.v lane) (ematrix_subtile (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) 1 16 (SZ.v lane) 0));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shcw (SZ.v lane) (acc1 (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) (acc16 (SF.m_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm) (SZ.v lane)));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) (acc16 (SF.l_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale eS evm evl) (SZ.v lane)));
   }
 }
 
@@ -2231,6 +2251,7 @@ fn sdpa_flash_jt_body
   (gV : array2 et_ab lgV { Kuiper.Tensor.is_global gV })
   (gmask : TRO.roarray4 et_ab lgmask)
   (bi : szlt b) (qh : szlt hq) (qpos : szlt sq)
+  (kvh group rows r0 : sz)
   (k0 : sz) (#_ : squash (SZ.fits (SZ.v k0 + 16)))
   (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fQ #fKg #fVg #fmask : perm)
@@ -2245,6 +2266,10 @@ fn sdpa_flash_jt_body
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
   requires pure (SZ.v lane < 16 ==>
                    reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
+  requires pure (SZ.v lane < 16 ==>
+                   SF.lane_params_ok (SZ.v hq) (SZ.v sq) (SZ.v sk) (SZ.v kvh)
+                     (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v lane)
+                     row_active (SZ.v qh) (SZ.v qpos) (SZ.v cbound))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw (SZ.v lane)
@@ -2252,8 +2277,8 @@ fn sdpa_flash_jt_body
     exists* (m' l' : et_acc).
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l'
-      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
-         (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask causal
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale
          eQ eKg eVg evm eOw)
       (SZ.v lane)
     ** pure (SZ.v lane < 16 ==>
@@ -2283,27 +2308,31 @@ fn sdpa_flash_jt_body
 
   (* Online-softmax update on the 16 active lanes (guarded wrapper owns the if). *)
   sdpa_flash_softmax_maybe b hq sq sk shS shP shcw shm shl gmask
-    lane bi qh qpos k0 cbound row_active causal has_mask scale
+    lane bi qh qpos kvh group rows r0 k0 cbound row_active causal has_mask scale
     (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) vm vl evm evl;
 
   jt_upd_post_g #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
     (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale eQ eKg
     evm evl (SZ.v lane);
+  jt_t_row_eq_g #et_ab #et_acc emask has_mask row_active causal
+    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0)
+    (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))
+    evm evl (SZ.v lane);
 
   (* Bridge S/P rows + cw cell to the barrier residue, run barrier 3
      (rows/cells -> whole tiles, values pinned). *)
-  row_reindex_v shS (SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) (SZ.v lane) (SZ.v lane % BW.warp_size);
-  row_reindex_v shP (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
-  cell_reindex_v shcw (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
-  sdpa_flash_barrier3 lane nthr tid shS shP shcw #(SF.score_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) #(SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) #(SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm);
+  row_reindex_v shS (SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  row_reindex_v shP (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  cell_reindex_v shcw (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) (SZ.v lane) (SZ.v lane % BW.warp_size);
+  sdpa_flash_barrier3 lane nthr tid shS shP shcw #(SF.score_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0))) #(SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm) #(SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm);
 
   (* Rescale, barrier 4, P@V (all use residue [SZ.v lane]). *)
   sdpa_flash_scale d lane shO shcw;
   sdpa_flash_barrier4 lane nthr tid;
   sdpa_flash_pv_mm d d lane nthr tid shP shV shPVc shO;
   jt_out_subtile (reveal eOw)
-    (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
-    (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
+    (SF.cw_vec_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
+    (SF.prob_tile_t emask has_mask causal (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v k0) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
     (SF.kv_tile 16 eVg (SZ.v k0)) (SZ.v lane / 16) (SZ.v lane % 16);
 
   (* Barrier 5, then bridge its outputs (V stride, P row, cw cell) back to the

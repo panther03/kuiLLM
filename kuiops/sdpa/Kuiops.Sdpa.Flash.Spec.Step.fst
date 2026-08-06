@@ -923,6 +923,179 @@ let run_mlv_step
 
 #pop-options
 
+(* ------------------------------------------------------------------ *)
+(* Whole-tile descriptions.                                            *)
+(*                                                                     *)
+(* [run_ml] applies one row's parameters to all 16 rows; these versions *)
+(* give row [i] its own query head, position and causal bound, so they  *)
+(* are the same expression for every lane of the warp.                  *)
+(* ------------------------------------------------------------------ *)
+
+let run_ml_t
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat) : GTot (et_acc & et_acc)
+= run_ml emask has_mask (SF.lane_active_row rows r0 i) causal bi
+    (SF.lane_qh hq sq kvh group rows r0 i) (SF.lane_qpos sq rows r0 i)
+    (SF.lane_cbound sq sk rows r0 i) scale eQ eKg i nw w t
+
+let run_mv_t
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw w t : nat) : GTot (chest1 et_acc 16)
+= mk1 (fun i -> fst (run_ml_t emask has_mask causal bi kvh group rows r0 scale
+                       eQ eKg i nw w t))
+
+let run_lv_t
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw w t : nat) : GTot (chest1 et_acc 16)
+= mk1 (fun i -> snd (run_ml_t emask has_mask causal bi kvh group rows r0 scale
+                       eQ eKg i nw w t))
+
+#push-options "--fuel 1 --ifuel 2"
+
+(* At row [i] the lane-uniform vectors are that row's own. *)
+let run_mlv_t_eq
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : nat)
+  (nw w t : nat)
+  : Lemma
+      (requires i < 16 ==>
+        SF.lane_params_ok hq sq sk kvh group rows r0 i row_active qh qpos cbound)
+      (ensures i < 16 ==>
+        (acc1 (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                 eQ eKg nw w t) i
+         == acc1 (run_mv emask has_mask row_active causal bi qh qpos cbound
+                    scale eQ eKg nw w t) i /\
+         acc1 (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+                 eQ eKg nw w t) i
+         == acc1 (run_lv emask has_mask row_active causal bi qh qpos cbound
+                    scale eQ eKg nw w t) i))
+  = ()
+
+#pop-options
+
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 30"
+
+(* One key tile advances row [i] of the lane-uniform register vectors. *)
+let mlv_step_t_row
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw w t : nat) (i : natlt 16)
+  : Lemma
+      (let k0 = (w + t * nw) * 16 in
+       let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+                  (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+       acc1 (SF.m_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS
+               (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w t)) i
+       == acc1 (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w (t + 1)) i /\
+       acc1 (SF.l_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS
+               (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w t)
+               (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w t)) i
+       == acc1 (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w (t + 1)) i)
+  = let k0 = (w + t * nw) * 16 in
+    let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+               (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+    let ra = SF.lane_active_row rows r0 i in
+    let qh = SF.lane_qh hq sq kvh group rows r0 i in
+    let qp = SF.lane_qpos sq rows r0 i in
+    let cb = SF.lane_cbound sq sk rows r0 i in
+    run_mlv_step emask has_mask ra causal bi qh qp cb scale eQ eKg nw w t;
+    SF.vec_local emask has_mask ra causal bi qh qp k0 cb scale eS
+      (run_mv_t emask has_mask causal bi kvh group rows r0 scale eQ eKg nw w t)
+      (run_mv emask has_mask ra causal bi qh qp cb scale eQ eKg nw w t)
+      (run_lv_t emask has_mask causal bi kvh group rows r0 scale eQ eKg nw w t)
+      (run_lv emask has_mask ra causal bi qh qp cb scale eQ eKg nw w t) i
+
+(* One key tile advances the lane-uniform register vectors by one step. *)
+let run_mlv_step_t
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw w t : nat)
+  : Lemma
+      (let k0 = (w + t * nw) * 16 in
+       let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+                  (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+       SF.m_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS
+         (run_mv_t emask has_mask causal bi kvh group rows r0 scale eQ eKg nw w t)
+       == run_mv_t emask has_mask causal bi kvh group rows r0 scale
+            eQ eKg nw w (t + 1) /\
+       SF.l_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS
+         (run_mv_t emask has_mask causal bi kvh group rows r0 scale eQ eKg nw w t)
+         (run_lv_t emask has_mask causal bi kvh group rows r0 scale eQ eKg nw w t)
+       == run_lv_t emask has_mask causal bi kvh group rows r0 scale
+            eQ eKg nw w (t + 1))
+  = let k0 = (w + t * nw) * 16 in
+    let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+               (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+    let evm = run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                eQ eKg nw w t in
+    let evl = run_lv_t emask has_mask causal bi kvh group rows r0 scale
+                eQ eKg nw w t in
+    FStar.Classical.forall_intro
+      (mlv_step_t_row #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+         #b #hq #sq #sk #d #sq16 emask has_mask causal bi kvh group
+         rows r0 scale eQ eKg nw w t);
+    assert (equal
+      (SF.m_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm)
+      (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+         eQ eKg nw w (t + 1)));
+    assert (equal
+      (SF.l_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm evl)
+      (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+         eQ eKg nw w (t + 1)))
+
+#pop-options
+
 #push-options "--fuel 1 --ifuel 1"
 
 (* The output tile a warp holds after [t] key tiles: the zero fill, then one
@@ -932,11 +1105,10 @@ let rec run_O
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
   {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
   {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
-  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
   (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
-  (has_mask row_active causal : bool)
-  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
-  (cbound : nat) (scale : et_acc)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
   (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
   (nw w t : nat) : GTot (chest2 et_acc 16 d) (decreases t)
 = if t = 0 then const (16 @| d @| INil) zero
@@ -944,14 +1116,13 @@ let rec run_O
     let k0 = (w + (t - 1) * nw) * 16 in
     let eS = BM.emma_chain #et_ab #et_acc 16 eQ
                (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
-    let evm = run_mv emask has_mask row_active causal bi qh qpos cbound scale
+    let evm = run_mv_t emask has_mask causal bi kvh group rows r0 scale
                 eQ eKg nw w (t - 1) in
     SF.out_tile
-      (run_O emask has_mask row_active causal bi qh qpos cbound scale
+      (run_O emask has_mask causal bi kvh group rows r0 scale
          eQ eKg eVg nw w (t - 1))
-      (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
-         eS evm)
-      (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
+      (SF.cw_vec_t emask has_mask causal bi kvh group rows r0 k0 scale eS evm)
+      (SF.prob_tile_t emask has_mask causal bi kvh group rows r0 k0 scale
          eS evm)
       (SF.kv_tile 16 eVg k0)
 
@@ -961,29 +1132,78 @@ let run_O_step
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
   {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
   {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
-  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
   (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
-  (has_mask row_active causal : bool)
-  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
-  (cbound : nat) (scale : et_acc)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
   (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
   (nw w t : nat)
   : Lemma
       (let k0 = (w + t * nw) * 16 in
        let eS = BM.emma_chain #et_ab #et_acc 16 eQ
                   (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
-       let evm = run_mv emask has_mask row_active causal bi qh qpos cbound scale
+       let evm = run_mv_t emask has_mask causal bi kvh group rows r0 scale
                    eQ eKg nw w t in
        SF.out_tile
-         (run_O emask has_mask row_active causal bi qh qpos cbound scale
+         (run_O emask has_mask causal bi kvh group rows r0 scale
             eQ eKg eVg nw w t)
-         (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+         (SF.cw_vec_t emask has_mask causal bi kvh group rows r0 k0 scale
             eS evm)
-         (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound
-            scale eS evm)
+         (SF.prob_tile_t emask has_mask causal bi kvh group rows r0 k0 scale
+            eS evm)
          (SF.kv_tile 16 eVg k0)
-       == run_O emask has_mask row_active causal bi qh qpos cbound scale
+       == run_O emask has_mask causal bi kvh group rows r0 scale
             eQ eKg eVg nw w (t + 1))
   = ()
 
 #pop-options
+
+(* ------------------------------------------------------------------ *)
+(* What the block holds when every warp has finished its sweep.        *)
+(* ------------------------------------------------------------------ *)
+
+let block_m
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw : pos) (nkt : nat)
+  : GTot (chest2 et_acc nw 16)
+= mk2 (fun w i -> acc1 (run_mv_t emask has_mask causal bi kvh group rows r0
+                          scale eQ eKg nw w (SF.warp_iters nw nkt w)) i)
+
+let block_l
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw : pos) (nkt : nat)
+  : GTot (chest2 et_acc nw 16)
+= mk2 (fun w i -> acc1 (run_lv_t emask has_mask causal bi kvh group rows r0
+                          scale eQ eKg nw w (SF.warp_iters nw nkt w)) i)
+
+(* The block's output tile: warp [w] owns rows [16w .. 16w+15]. *)
+let block_O
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (nw : pos) (nkt : nat) (w : natlt nw)
+  : GTot (chest2 et_acc 16 d)
+= run_O emask has_mask causal bi kvh group rows r0 scale eQ eKg eVg nw w
+    (SF.warp_iters nw nkt w)

@@ -439,3 +439,206 @@ let out_tile
   : GTot (chest2 et_acc 16 d)
 = mk2 (fun r c -> add (mul (acc2 eO r c) (acc1 ecw r))
                       (acc2 (pv_chunk eP eV (clamp_nat (d / 16) (c / 16))) r (c % 16)))
+
+(* Warp [w] of [nw] visits the key tiles [w], [w + nw], ... below [nkt], so it
+   runs this many online-softmax steps. *)
+let warp_iters (nw : pos) (nkt w : nat) : nat
+= if w >= nkt then 0 else (nkt - w + nw - 1) / nw
+
+(* The loop exit condition pins the step count to [warp_iters]. *)
+let warp_iters_uniq (nw : pos) (nkt w t : nat)
+  : Lemma (requires w + t * nw >= nkt /\ (t == 0 \/ w + (t - 1) * nw < nkt))
+          (ensures t == warp_iters nw nkt w)
+= if t = 0 then ()
+  else begin
+    let m = nkt - w in
+    FStar.Math.Lemmas.distributivity_sub_left t 1 nw;
+    FStar.Math.Lemmas.division_definition (m + nw - 1) nw t
+  end
+
+(* The [(maxpos, found)] pair the causal-bound scan holds after [n] rows of the
+   query tile starting at [r0]. *)
+let rec tile_maxpos (sq : pos) (rows r0 n : nat) : Tot (nat & bool) (decreases n)
+= if n = 0 then (0, false)
+  else
+    let mf = tile_maxpos sq rows r0 (n - 1) in
+    let r = r0 + n - 1 in
+    let valid = r < rows in
+    let take = valid && ((not (snd mf)) || r % sq > fst mf) in
+    ((if take then r % sq else fst mf), snd mf || valid)
+
+(* One past the largest key index the causal mask admits for the tile. *)
+let causal_kmax (bm : nat) (sq : pos) (sk : nat { sq <= sk }) (rows r0 : nat) : nat
+= let mf = tile_maxpos sq rows r0 bm in
+  let e = (sk - sq) + (if snd mf then fst mf + 1 else 0) in
+  if sk < e then sk else e
+
+(* Number of key tiles the block sweeps. *)
+let key_tiles
+  (bn : pos) (bm : nat) (sq : pos) (sk : nat { sq <= sk })
+  (rows r0 : nat) (causal : bool) : nat
+= Kuiper.Divides.divup (if causal then causal_kmax bm sq sk rows r0 else sk) bn
+
+(* Per-row parameters of the query tile starting at [r0]: row [i] of the tile is
+   query row [r0 + i], which the kernel clamps into range before splitting it
+   into a query head and a position. *)
+let lane_active_row (rows r0 i : nat) : bool = r0 + i < rows
+
+let lane_rr (rows r0 i : nat) : nat = if r0 + i < rows then r0 + i else 0
+
+let lane_qpos (sq : pos) (rows r0 i : nat) : natlt sq = lane_rr rows r0 i % sq
+
+let lane_qh (hq sq : pos) (kvh group rows r0 i : nat) : natlt hq
+= let q = kvh * group + lane_rr rows r0 i / sq in
+  if q < hq then q else 0
+
+let lane_cbound (sq : pos) (sk rows r0 i : nat) : nat
+= lane_qpos sq rows r0 i + (if sk >= sq then sk - sq else 0)
+
+
+(* The row parameters a lane computes for its own row of the query tile. *)
+let lane_params_ok (hq sq : pos) (sk kvh group rows r0 i : nat)
+  (row_active : bool) (qh qpos cbound : nat) : prop
+= row_active == lane_active_row rows r0 i /\
+  qh == lane_qh hq sq kvh group rows r0 i /\
+  qpos == lane_qpos sq rows r0 i /\
+  cbound == lane_cbound sq sk rows r0 i
+
+(* Entry [i] of the register vectors reads only entry [i] of the incoming
+   registers. *)
+#push-options "--fuel 1 --ifuel 2"
+
+let vec_local
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16)
+  (evm1 evm2 evl1 evl2 : chest1 et_acc 16) (i : natlt 16)
+  : Lemma (requires acc1 evm1 i == acc1 evm2 i /\ acc1 evl1 i == acc1 evl2 i)
+          (ensures
+            acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm1) i
+            == acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                       scale eS evm2) i /\
+            acc1 (cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm1) i
+            == acc1 (cw_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                       scale eS evm2) i /\
+            acc1 (l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                    scale eS evm1 evl1) i
+            == acc1 (l_vec emask has_mask row_active causal bi qh qpos k0 cbound
+                       scale eS evm2 evl2) i)
+= ()
+
+#pop-options
+
+(* ------------------------------------------------------------------ *)
+(* Whole-tile descriptions.                                            *)
+(*                                                                     *)
+(* [m_vec] and friends apply one row's parameters to all 16 rows, which *)
+(* is only meaningful at that row.  A warp barrier's predicate family   *)
+(* must be the same for every lane, so anything pinned across one is    *)
+(* phrased with these row-indexed versions instead: row [i] uses row    *)
+(* [i]'s own query head, position and causal bound.                     *)
+(* ------------------------------------------------------------------ *)
+
+let m_vec_t
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+= mk1 (fun i ->
+    acc1 (m_vec emask has_mask (lane_active_row rows r0 i) causal bi
+            (lane_qh hq sq kvh group rows r0 i) (lane_qpos sq rows r0 i)
+            k0 (lane_cbound sq sk rows r0 i) scale eS evm) i)
+
+let cw_vec_t
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+= mk1 (fun i ->
+    acc1 (cw_vec emask has_mask (lane_active_row rows r0 i) causal bi
+            (lane_qh hq sq kvh group rows r0 i) (lane_qpos sq rows r0 i)
+            k0 (lane_cbound sq sk rows r0 i) scale eS evm) i)
+
+let l_vec_t
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm evl : chest1 et_acc 16)
+  : GTot (chest1 et_acc 16)
+= mk1 (fun i ->
+    acc1 (l_vec emask has_mask (lane_active_row rows r0 i) causal bi
+            (lane_qh hq sq kvh group rows r0 i) (lane_qpos sq rows r0 i)
+            k0 (lane_cbound sq sk rows r0 i) scale eS evm evl) i)
+
+let score_tile_t
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16)
+  : GTot (chest2 et_acc 16 16)
+= mk2 (fun i j ->
+    acc2 (score_tile emask has_mask (lane_active_row rows r0 i) causal bi
+            (lane_qh hq sq kvh group rows r0 i) (lane_qpos sq rows r0 i)
+            k0 (lane_cbound sq sk rows r0 i) scale eS) i j)
+
+let prob_tile_t
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat)
+  (k0 : nat) (scale : et_acc)
+  (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
+  : GTot (chest2 et_ab 16 16)
+= mk2 (fun i j ->
+    acc2 (prob_tile emask has_mask (lane_active_row rows r0 i) causal bi
+            (lane_qh hq sq kvh group rows r0 i) (lane_qpos sq rows r0 i)
+            k0 (lane_cbound sq sk rows r0 i) scale eS evm) i j)
+
+(* Two tiles that agree on row [i] have the same row [i], in either of the two
+   shapes the kernel uses for a row. *)
+let tile_row_eq
+  (#et : Type0) (#c : pos) (e1 e2 : chest2 et 16 c) (i : natlt 16)
+  : Lemma (requires forall (j : natlt c). acc2 e1 i j == acc2 e2 i j)
+          (ensures ematrix_subtile e1 1 c i 0 == ematrix_subtile e2 1 c i 0 /\
+                   erow e1 i == erow e2 i)
+= assert (equal (ematrix_subtile e1 1 c i 0) (ematrix_subtile e2 1 c i 0));
+  assert (equal (erow e1 i) (erow e2 i))

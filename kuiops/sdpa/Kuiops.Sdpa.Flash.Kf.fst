@@ -157,6 +157,10 @@ fn sdpa_flash_kf
   let cbound = qpos +^ (sk -^ sq);
   let nkt = sdpa_flash_causal_mask 16sz 16sz sk sq rows r0 causal;
   assert pure (SZ.v (tid /^ 32sz) < SZ.v nw);
+  assert pure (SZ.v (tid %^ 32sz) < 16 ==>
+                 SF.lane_params_ok (SZ.v hq) (SZ.v sq) (SZ.v sk) (SZ.v kvh)
+                   (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v (tid %^ 32sz))
+                   row_active (SZ.v qh) (SZ.v qpos) (SZ.v cbound));
   SS.lane_state_init #et_ab #et_acc emask has_mask row_active causal
     (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
     (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz));
@@ -170,9 +174,15 @@ fn sdpa_flash_kf
       exists* (vjt : sz).
         jt |-> vjt **
         live iter **
-        pure (SZ.v !iter <= SZ.v vjt /\
+        pure ((SZ.v (tid %^ 32sz) < 16 ==>
+                 SF.lane_params_ok (SZ.v hq) (SZ.v sq) (SZ.v sk) (SZ.v kvh)
+                   (SZ.v group) (SZ.v rows) (SZ.v r0) (SZ.v (tid %^ 32sz))
+                   row_active (SZ.v qh) (SZ.v qpos) (SZ.v cbound)) /\
+              SZ.v !iter <= SZ.v vjt /\
               SZ.v vjt % SZ.v nw == SZ.v (tid /^ 32sz) /\
-              SZ.v vjt == SZ.v (tid /^ 32sz) + SZ.v !iter * SZ.v nw) **
+              SZ.v vjt == SZ.v (tid /^ 32sz) + SZ.v !iter * SZ.v nw /\
+              (SZ.v !iter == 0 \/
+               SZ.v (tid /^ 32sz) + (SZ.v !iter - 1) * SZ.v nw < SZ.v nkt)) **
         gpu **
         thread_id (block_threads nw) tid **
         B.barrier_tok (barrier_contract nw d shQ
@@ -187,8 +197,8 @@ fn sdpa_flash_kf
             (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
             gK gV gmask
             #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-            vm vl (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+            vm vl (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
             (SZ.v (tid %^ 32sz)) **
           pure (SS.lane_state #et_ab #et_acc emask has_mask row_active causal
@@ -219,13 +229,17 @@ fn sdpa_flash_kf
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask
       #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-      vmc vlc (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+      vmc vlc (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
       (SZ.v (tid %^ 32sz)));
     SS.run_mlv_acc #et_ab #et_acc emask has_mask row_active causal
       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
       (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter) vmc vlc;
+    SS.run_mlv_t_eq #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v kvh) (SZ.v group) (SZ.v rows)
+      (SZ.v r0) (SZ.v cbound) scale eQsh eKg
+      (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter);
     sdpa_flash_jt_body d sk b hq sq
       #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
       #_ #_ #_ #_ #_ #_ #_ #_
@@ -248,19 +262,19 @@ fn sdpa_flash_kf
       (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
       shQ shPVc shcw
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
-      gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale
+      gK gV gmask bi qh qpos kvh group rows r0 k0 cbound row_active causal has_mask scale
       vmc vlc
-      (SS.run_mv #et_ab #et_acc emask has_mask row_active causal
-        (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+      (SS.run_mv_t #et_ab #et_acc emask has_mask causal
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg
         (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
-      (SS.run_lv #et_ab #et_acc emask has_mask row_active causal
-        (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+      (SS.run_lv_t #et_ab #et_acc emask has_mask causal
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg
         (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
-      (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+      (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter));
-    SS.run_O_step #et_ab #et_acc emask has_mask row_active causal
-      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+    SS.run_O_step #et_ab #et_acc emask has_mask causal
+      (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter);
     jt_score_row_eq_g #et_ab #et_acc (SZ.v d) eQsh eKg (SZ.v k0)
       (SZ.v (tid %^ 32sz));
@@ -271,8 +285,8 @@ fn sdpa_flash_kf
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask
       #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-      vmn vln (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+      vmn vln (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter + 1))
       (SZ.v (tid %^ 32sz)));
     SS.lane_step #et_ab #et_acc emask has_mask row_active causal
@@ -296,6 +310,8 @@ fn sdpa_flash_kf
     iter := !iter +^ 1sz;
   };
 
+  SF.warp_iters_uniq (SZ.v nw) (SZ.v nkt) (SZ.v (tid /^ 32sz)) (SZ.v !iter);
+
   with vmf vlf. assert (jt_rest_v #et_ab #et_acc d sk b hq sq
     shK shV shS shP
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
@@ -303,8 +319,8 @@ fn sdpa_flash_kf
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
     (SZ.v (tid %^ 32sz)));
   unfold jt_rest_v #et_ab #et_acc d sk b hq sq
@@ -314,8 +330,8 @@ fn sdpa_flash_kf
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask row_active causal
-       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask causal
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rows) (SZ.v r0) scale eQsh eKg eVg
        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
     (SZ.v (tid %^ 32sz));
   when__forget_cell16 (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) vmf;
