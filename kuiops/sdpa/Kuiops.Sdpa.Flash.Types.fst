@@ -191,6 +191,12 @@ inline_for_extraction noextract
 let q_sel (#et : Type0) {| scalar et |} (cond : bool) (v : et) : et =
   if cond then v else zero
 
+(* The all-zero output tile: the initial value [Osh] is filled with
+   (flash_attn_fa1.cu, line 114). *)
+unfold
+let ozero (#et : Type0) {| scalar et |} (rows cols : nat) : chest2 et rows cols
+  = const (rows @| cols @| INil) zero
+
 unfold
 let strided_cells2_v
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
@@ -824,7 +830,7 @@ let b0_raw
 
 unfold
 let b0_pre
-  (#et_q #et_o : Type0) (nw d : szp)
+  (#et_q #et_o : Type0) {| scalar et_o |} (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
   (eQsh : chest2 et_q 16 (SZ.v d))
@@ -833,11 +839,12 @@ let b0_pre
 = let w = thread_w nw tid in
   let lane = thread_lane nw tid in
   strided_cells2_v shQ (block_threads nw) tid eQsh **
-  strided_cells2 (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
+  strided_cells2_v (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
+    (ozero 16 (SZ.v d))
 
 unfold
 let b0_post
-  (#et_q #et_o : Type0) (nw d : szp)
+  (#et_q #et_o : Type0) {| scalar et_o |} (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
   (eQsh : chest2 et_q 16 (SZ.v d))
@@ -846,11 +853,11 @@ let b0_post
 = let w = thread_w nw tid in
   let lane = thread_lane nw tid in
   (shQ |-> Frac (1.0R /. (block_threads nw)) eQsh)
-  ** (exists* (o : chest2 et_o (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-          warp_row_span 16 (lane / 16) (lane % 16)
-          |-> Frac 1.0R o)
+  ** (array2_stride_subtile
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        warp_row_span 16 (lane / 16) (lane % 16)
+        |-> Frac 1.0R (ematrix_stride_subtile (ozero #et_o 16 (SZ.v d))
+                         warp_row_span 16 (lane / 16) (lane % 16)))
 
 unfold
 let b1_pre_one
@@ -941,7 +948,7 @@ let b2_post
      shgl |-> Frac (1.0R /. (block_threads nw)) e)
 
 let barrier_rin
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
@@ -958,7 +965,7 @@ let barrier_rin
     else emp
 
 let barrier_rout
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
@@ -975,7 +982,7 @@ let barrier_rout
     else emp
 
 let barrier_contract
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
@@ -1173,7 +1180,7 @@ let sdpa_flash_jt_frame
 
 unfold
 let sdpa_flash_pre
-  (#et_ab #et_acc : Type0) {| scalar et_ab |}
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1235,7 +1242,7 @@ let sdpa_flash_pre
 
 unfold
 let sdpa_flash_post
-  (#et_ab #et_acc : Type0) {| scalar et_ab |}
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })

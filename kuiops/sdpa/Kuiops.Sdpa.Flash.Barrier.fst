@@ -313,6 +313,72 @@ fn b0_o_transform
           |-> Frac 1.0R e);
 }
 
+(* Value-carrying [b0_o_transform]: every thread's cells of its warp's [O] tile
+   hold the same zero fill, so the gathered tile and each lane's stride
+   sub-tile are pinned rather than existential. *)
+ghost
+fn b0_o_transform_v
+  (#et : Type0) {| scalar et |} (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
+  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  requires
+    forall+ (tid : natlt (block_threads nw)).
+      strided_cells2_v
+        (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
+        BW.warp_size (thread_lane nw tid) (ozero 16 (SZ.v d))
+  ensures
+    forall+ (tid : natlt (block_threads nw)).
+      array2_stride_subtile
+        (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
+        warp_row_span 16
+        (thread_lane nw tid / 16) (thread_lane nw tid % 16)
+        |-> Frac 1.0R (ematrix_stride_subtile (ozero #et 16 (SZ.v d))
+                         warp_row_span 16
+                         (thread_lane nw tid / 16) (thread_lane nw tid % 16))
+{
+  forevery_factor' (block_threads nw) (SZ.v nw) BW.warp_size
+    (fun w lane ->
+      strided_cells2_v
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        BW.warp_size lane (ozero 16 (SZ.v d)));
+  forevery_map #(natlt (SZ.v nw))
+    (fun w ->
+      forall+ (lane : natlt BW.warp_size).
+        strided_cells2_v
+          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+          BW.warp_size lane (ozero 16 (SZ.v d)))
+    (fun w ->
+      forall+ (lane : natlt BW.warp_size).
+        array2_stride_subtile
+          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+          warp_row_span 16 (lane / 16) (lane % 16)
+          |-> Frac 1.0R (ematrix_stride_subtile (ozero #et 16 (SZ.v d))
+                           warp_row_span 16 (lane / 16) (lane % 16)))
+    fn w {
+      strided_cells2_gather_v
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        BW.warp_size (ozero 16 (SZ.v d));
+      array2_stride_tile
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        warp_row_span 16;
+      forevery_unfactor' BW.warp_size warp_row_span 16
+        (fun tr tc ->
+          array2_stride_subtile
+            (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+            warp_row_span 16 tr tc
+            |-> Frac 1.0R (ematrix_stride_subtile (ozero #et 16 (SZ.v d))
+                             warp_row_span 16 tr tc));
+    };
+  forevery_unfactor' (block_threads nw) (SZ.v nw) BW.warp_size
+    (fun w lane ->
+      array2_stride_subtile
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        warp_row_span 16 (lane / 16) (lane % 16)
+        |-> Frac 1.0R (ematrix_stride_subtile (ozero #et 16 (SZ.v d))
+                         warp_row_span 16 (lane / 16) (lane % 16)));
+}
+
 ghost
 fn row_cell_to_matrix
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
@@ -676,7 +742,7 @@ fn b2_scale_transform
 
 ghost
 fn barrier_ok
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (#_ : squash (SZ.fits (16 * SZ.v d)))
@@ -710,51 +776,54 @@ fn barrier_ok
       (fun tid -> b0_pre nw d shQ eQsh shO tid)
       (fun tid ->
         strided_cells2_v shQ (block_threads nw) tid eQsh **
-        strided_cells2
+        strided_cells2_v
           (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          BW.warp_size (thread_lane nw tid))
+          BW.warp_size (thread_lane nw tid) (ozero 16 (SZ.v d)))
       fn tid {
         unfold b0_pre nw d shQ eQsh shO tid;
       };
     forevery_unzip #(natlt (block_threads nw))
       (fun tid -> strided_cells2_v shQ (block_threads nw) tid eQsh)
       (fun tid ->
-        strided_cells2
+        strided_cells2_v
           (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-          BW.warp_size (thread_lane nw tid));
+          BW.warp_size (thread_lane nw tid) (ozero 16 (SZ.v d)));
 
     strided_cells2_gather_v shQ (block_threads nw) eQsh;
     tensor_share_n shQ (block_threads nw);
 
-    b0_o_transform nw d shO;
+    b0_o_transform_v nw d shO;
     forevery_zip #(natlt (block_threads nw))
       (fun _ -> shQ |-> Frac (1.0R /. (block_threads nw)) eQsh)
       (fun tid ->
-        exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-            warp_row_span 16
-            (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-            |-> Frac 1.0R e);
+        array2_stride_subtile
+          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
+          warp_row_span 16
+          (thread_lane nw tid / 16) (thread_lane nw tid % 16)
+          |-> Frac 1.0R (ematrix_stride_subtile (ozero #et_acc 16 (SZ.v d))
+                           warp_row_span 16
+                           (thread_lane nw tid / 16) (thread_lane nw tid % 16)));
     forevery_map #(natlt (block_threads nw))
       (fun tid ->
         (shQ |-> Frac (1.0R /. (block_threads nw)) eQsh) **
-        (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-          array2_stride_subtile
-            (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-            warp_row_span 16
-            (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-            |-> Frac 1.0R e))
+        (array2_stride_subtile
+          (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
+          warp_row_span 16
+          (thread_lane nw tid / 16) (thread_lane nw tid % 16)
+          |-> Frac 1.0R (ematrix_stride_subtile (ozero #et_acc 16 (SZ.v d))
+                           warp_row_span 16
+                           (thread_lane nw tid / 16) (thread_lane nw tid % 16))))
       (fun tid -> barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid)
       fn tid {
         rewrite
           ((shQ |-> Frac (1.0R /. (block_threads nw)) eQsh) **
-           (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-              array2_stride_subtile
-                (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
-                warp_row_span 16
-                (thread_lane nw tid / 16) (thread_lane nw tid % 16)
-                |-> Frac 1.0R e))
+           (array2_stride_subtile
+             (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
+             warp_row_span 16
+             (thread_lane nw tid / 16) (thread_lane nw tid % 16)
+             |-> Frac 1.0R (ematrix_stride_subtile (ozero #et_acc 16 (SZ.v d))
+                              warp_row_span 16
+                              (thread_lane nw tid / 16) (thread_lane nw tid % 16))))
           as
           (b0_post nw d shQ eQsh shO tid);
         rewrite

@@ -186,9 +186,9 @@ fn sdpa_flash_block_prologue
     tid lane bi r0 rows group kvh;
 
   unfold strided_cells2_v shQ (SZ.v nthr) (SZ.v tid) (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0));
-  unfold strided_cells2
+  unfold strided_cells2_v
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
-    BW.warp_size (SZ.v lane);
+    BW.warp_size (SZ.v lane) (FT.ozero 16 (SZ.v d));
   forevery_rw_type
     (stride_index2 16 (SZ.v d) (SZ.v nthr) (SZ.v tid))
     (FT.stride_index2 16 (SZ.v d) (block_threads nw) (SZ.v tid))
@@ -197,14 +197,14 @@ fn sdpa_flash_block_prologue
   forevery_rw_type
     (stride_index2 16 (SZ.v d) BW.warp_size (SZ.v lane))
     (FT.stride_index2 16 (SZ.v d) BW.warp_size (SZ.v lane))
-    (fun ij -> exists* (v : et_acc).
+    (fun ij ->
       tensor_pts_to_cell
         (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
-        (idx2 ij._1 ij._2) v);
+        (idx2 ij._1 ij._2) (acc2 (FT.ozero 16 (SZ.v d)) ij._1 ij._2));
   fold FT.strided_cells2_v shQ (block_threads nw) (SZ.v tid) (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0));
-  fold FT.strided_cells2
+  fold FT.strided_cells2_v
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
-    BW.warp_size (SZ.v lane);
+    BW.warp_size (SZ.v lane) (FT.ozero 16 (SZ.v d));
   rewrite each (SZ.v w) as (thread_w nw (SZ.v tid));
   rewrite each (SZ.v lane) as (thread_lane nw (SZ.v tid));
   fold b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid);
@@ -224,6 +224,7 @@ fn sdpa_flash_block_prologue
 inline_for_extraction noextract
 fn sdpa_flash_block_barrier1
   (#et_ab #et_acc : Type0)
+  {| scalar et_acc |}
   (nw nthr d : szp { SZ.v nthr == block_threads nw })
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
@@ -256,6 +257,7 @@ fn sdpa_flash_block_barrier1
 inline_for_extraction noextract
 fn sdpa_flash_block_barrier2
   (#et_ab #et_acc : Type0)
+  {| scalar et_acc |}
   (nw nthr d : szp { SZ.v nthr == block_threads nw })
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))

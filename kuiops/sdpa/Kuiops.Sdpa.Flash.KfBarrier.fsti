@@ -82,6 +82,7 @@ fn sdpa_flash_block_prologue
 inline_for_extraction noextract
 fn sdpa_flash_block_barrier1
   (#et_ab #et_acc : Type0)
+  {| scalar et_acc |}
   (nw nthr d : szp { SZ.v nthr == block_threads nw })
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
@@ -107,6 +108,7 @@ fn sdpa_flash_block_barrier1
 inline_for_extraction noextract
 fn sdpa_flash_block_barrier2
   (#et_ab #et_acc : Type0)
+  {| scalar et_acc |}
   (nw nthr d : szp { SZ.v nthr == block_threads nw })
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))

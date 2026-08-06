@@ -768,7 +768,7 @@ fn sdpa_flash_pv_mm
       invariant
         live k **
         (exists* ePVc. (shPVc |-> Frac (1.0R /. warp_size) ePVc)
-           ** pure (ePVc == jt_pv_chunk eP eV (SZ.v ocol))) **
+           ** pure (ePVc == SF.pv_chunk eP eV (SZ.v ocol))) **
         (exists* eO. (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
            ** pure (jt_pv_part eO0 eO eP eV warp_row_span (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v ocol) (SZ.v !k))) **
         pure (SZ.v !k <= SZ.v lane_row_span_sz)
@@ -2240,17 +2240,22 @@ fn sdpa_flash_jt_body
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (vm vl : Ghost.erased et_acc)
   (evm evl : Ghost.erased (chest1 et_acc 16))
+  (eOw : Ghost.erased (chest2 et_acc 16 (SZ.v d)))
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
   requires pure (SZ.v lane < 16 ==>
                    reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl (SZ.v lane)
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw (SZ.v lane)
   ensures
     exists* (m' l' : et_acc).
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l' (SZ.v lane)
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l'
+      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
+         (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+         eQ eKg eVg evm eOw)
+      (SZ.v lane)
     ** pure (SZ.v lane < 16 ==>
               (exists (sr' : chest1 et_acc 16) (pr' : chest1 et_ab 16) (cw' : et_acc).
                  SF.softmax_upd_post emask has_mask row_active causal
@@ -2296,6 +2301,10 @@ fn sdpa_flash_jt_body
   sdpa_flash_scale d lane shO shcw;
   sdpa_flash_barrier4 lane nthr tid;
   sdpa_flash_pv_mm d d lane nthr tid shP shV shPVc shO;
+  jt_out_subtile (reveal eOw)
+    (SF.cw_vec emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
+    (SF.prob_tile emask has_mask row_active causal (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale (jt_stile #et_ab #et_acc (SZ.v d) eQ eKg (SZ.v k0)) evm)
+    (SF.kv_tile 16 eVg (SZ.v k0)) (SZ.v lane / 16) (SZ.v lane % 16);
 
   (* Barrier 5, then bridge its outputs (V stride, P row, cw cell) back to the
      resting residue [SZ.v lane]. *)

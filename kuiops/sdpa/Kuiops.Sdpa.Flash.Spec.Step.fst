@@ -922,3 +922,68 @@ let run_mlv_step
          eQ eKg nw w (t + 1)))
 
 #pop-options
+
+#push-options "--fuel 1 --ifuel 1"
+
+(* The output tile a warp holds after [t] key tiles: the zero fill, then one
+   [SF.out_tile] step per tile the warp visits. *)
+let rec run_O
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (nw w t : nat) : GTot (chest2 et_acc 16 d) (decreases t)
+= if t = 0 then const (16 @| d @| INil) zero
+  else
+    let k0 = (w + (t - 1) * nw) * 16 in
+    let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+               (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+    let evm = run_mv emask has_mask row_active causal bi qh qpos cbound scale
+                eQ eKg nw w (t - 1) in
+    SF.out_tile
+      (run_O emask has_mask row_active causal bi qh qpos cbound scale
+         eQ eKg eVg nw w (t - 1))
+      (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+         eS evm)
+      (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
+         eS evm)
+      (SF.kv_tile 16 eVg k0)
+
+(* One key tile advances the output tile by exactly one [run_O] step. *)
+let run_O_step
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (nw w t : nat)
+  : Lemma
+      (let k0 = (w + t * nw) * 16 in
+       let eS = BM.emma_chain #et_ab #et_acc 16 eQ
+                  (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16) in
+       let evm = run_mv emask has_mask row_active causal bi qh qpos cbound scale
+                   eQ eKg nw w t in
+       SF.out_tile
+         (run_O emask has_mask row_active causal bi qh qpos cbound scale
+            eQ eKg eVg nw w t)
+         (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+            eS evm)
+         (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound
+            scale eS evm)
+         (SF.kv_tile 16 eVg k0)
+       == run_O emask has_mask row_active causal bi qh qpos cbound scale
+            eQ eKg eVg nw w (t + 1))
+  = ()
+
+#pop-options

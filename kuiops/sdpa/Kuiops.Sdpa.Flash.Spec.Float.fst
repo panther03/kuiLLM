@@ -14,8 +14,11 @@ open Kuiper
 open Kuiper.Chest
 open Kuiper.Floating
 open Kuiper.Shape
+open Kuiper.EMatrix
+open Kuiper.EMatrix.Tiling
 
 module FC = Kuiper.Float.Casts
+module BM = Kuiops.Common.BlockMatmul
 
 (* Clamp a key index into [0, n) so a mask read is unconditionally in bounds.
    The clamped value is only ever used when it is the identity. *)
@@ -415,3 +418,24 @@ let tile_upd_det
                        cbound scale eS evm) i))
 
 #pop-options
+
+(* Chunk [b] of the [P@V] product: the [16 x 16] tile [P @ V[:, 16b:16b+16]],
+   accumulated by the tensor-core [emma] chain over its single 16-wide chunk. *)
+unfold
+let pv_chunk
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#hd : nat) (#_ : squash (16 /?+ hd))
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 hd) (b : natlt (hd / 16))
+  : GTot (chest2 et_acc 16 16)
+= BM.emma_chain #et_ab #et_acc 16 eP (ematrix_subtile eV 16 16 0 b) 1
+
+(* The whole [16 x d] output tile after one key-tile step: every row is
+   rescaled by its correction weight, and the [P@V] product is added to it. *)
+let out_tile
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#d : nat) (#_ : squash (16 /?+ d))
+  (eO : chest2 et_acc 16 d) (ecw : chest1 et_acc 16)
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 d)
+  : GTot (chest2 et_acc 16 d)
+= mk2 (fun r c -> add (mul (acc2 eO r c) (acc1 ecw r))
+                      (acc2 (pv_chunk eP eV (clamp_nat (d / 16) (c / 16))) r (c % 16)))

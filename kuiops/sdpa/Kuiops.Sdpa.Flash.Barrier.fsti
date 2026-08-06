@@ -183,7 +183,7 @@ fn b2_scale_transform
 
 ghost
 fn barrier_ok
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (#_ : squash (SZ.fits (16 * SZ.v d)))

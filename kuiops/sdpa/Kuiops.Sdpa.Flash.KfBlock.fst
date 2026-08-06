@@ -156,7 +156,7 @@ fn sdpa_flash_q_load
     strided_cells2_v shQ (SZ.v nthr) (SZ.v tid)
       (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group)
          eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
-    strided_cells2 shO BW.warp_size (SZ.v lane) **
+    strided_cells2_v shO BW.warp_size (SZ.v lane) (ozero (SZ.v bm) (SZ.v d)) **
     if_ (lane_active bm lane)
       (ml_cells_v bm shm shl lane (neg infinity) zero)
 {
@@ -251,6 +251,15 @@ fn sdpa_flash_q_load
 
   sdpa_flash_ml_init_maybe bm b hq sq d shm shl gQ lane;
 
+  unfold strided_cells2 shO BW.warp_size (SZ.v lane);
+  forevery_map #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun ij -> exists* (v : et_acc). tensor_pts_to_cell shO (idx2 ij._1 ij._2) v)
+    (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v lane) ij)
+    fn ij {
+      stride_ge_tid BW.warp_size (SZ.v lane) (ij._1 * SZ.v d + ij._2);
+      q_cell_intro_todo shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v lane) ij;
+    };
+
   idx := lane;
   iter := 0sz;
   while (!idx <^ ncells)
@@ -258,7 +267,8 @@ fn sdpa_flash_q_load
       live idx ** live iter **
       (gQ |-> Frac fQ eQ) **
       strided_cells2_v shQ (SZ.v nthr) (SZ.v tid) (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
-      strided_cells2 shO BW.warp_size (SZ.v lane) **
+      (forall+ (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)).
+        q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v !idx) ij) **
       if_ (lane_active bm lane)
         (ml_cells_v bm shm shl lane (neg infinity) zero) **
       pure (SZ.v !idx % BW.warp_size == SZ.v lane) **
@@ -267,31 +277,61 @@ fn sdpa_flash_q_load
     decreases (SZ.v ncells - SZ.v !iter)
   {
     let flat = !idx;
+    let next = flat +^ 32sz;
+    assert pure (SZ.v next == SZ.v flat + BW.warp_size);
     let i : szlt bm = flat /^ d;
     let dd : szlt d = flat %^ d;
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
-    unfold strided_cells2 shO BW.warp_size (SZ.v lane);
-    forevery_extract'
+    assert pure (SZ.v i * SZ.v d + SZ.v dd == SZ.v flat);
+    forevery_remove
       #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+      (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v flat) ij)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    q_cell_elim_todo shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v flat)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
     with oldo. assert (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) oldo);
     rewrite (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) oldo)
          as (tensor_pts_to_cell shO (up (cidx2 i dd)) oldo);
     tensor_write_cell shO (cidx2 i dd) (zero #et_acc #_);
-    with newo. assert (tensor_pts_to_cell shO (up (cidx2 i dd)) newo);
-    rewrite (tensor_pts_to_cell shO (up (cidx2 i dd)) newo)
-         as (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd)) newo);
-    elim_forall
-      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ->
-        exists* x. tensor_pts_to_cell shO (idx2 ij._1 ij._2) x);
-    Trade.elim_trade _ _;
-    fold strided_cells2 shO BW.warp_size (SZ.v lane);
-    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 BW.warp_size;
-    let next = !idx +^ 32sz;
+    rewrite (tensor_pts_to_cell shO (up (cidx2 i dd)) (zero #et_acc #_))
+         as (tensor_pts_to_cell shO (idx2 (SZ.v i) (SZ.v dd))
+               (acc2 (ozero (SZ.v bm) (SZ.v d)) (SZ.v i) (SZ.v dd)));
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v flat) 1 BW.warp_size;
+    q_cell_intro_done shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v next)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_map
+      #(ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane) {
+          ij =!= (((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)))
+                   <: stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) })
+      (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v flat) ij)
+      (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v next) ij)
+      fn ij {
+        stride_next BW.warp_size (SZ.v lane) (SZ.v bm) (SZ.v d)
+          (SZ.v i) (SZ.v dd) ij;
+        q_cell_bump shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v flat) (SZ.v next) ij;
+      };
+    forevery_insert
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v next) ij)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_unrefine
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v next) ij);
     assert pure (SZ.v !idx < SZ.v next);
     idx := next;
     iter := !iter +^ 1sz;
   };
+
+  let ofin = !idx;
+  forevery_map #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun ij -> q_cell shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v ofin) ij)
+    (fun ij -> tensor_pts_to_cell shO (idx2 ij._1 ij._2)
+                 (acc2 (ozero (SZ.v bm) (SZ.v d)) ij._1 ij._2))
+    fn ij {
+      flat_lt (SZ.v bm) (SZ.v d) ij._1 ij._2;
+      q_cell_elim_done shO (ozero (SZ.v bm) (SZ.v d)) (SZ.v ofin) ij;
+    };
+  fold strided_cells2_v shO BW.warp_size (SZ.v lane) (ozero (SZ.v bm) (SZ.v d));
   ()
 }
 

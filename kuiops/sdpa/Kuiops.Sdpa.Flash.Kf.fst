@@ -142,6 +142,7 @@ fn sdpa_flash_kf
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
     (neg infinity) (zero #et_acc)
+    (ozero 16 (SZ.v d))
     (SZ.v (tid %^ 32sz)));
 
   let w = sdpa_flash_w nw nthr tid;
@@ -186,7 +187,10 @@ fn sdpa_flash_kf
             (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
             gK gV gmask
             #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-            vm vl (SZ.v (tid %^ 32sz)) **
+            vm vl (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+            (SZ.v (tid %^ 32sz)) **
           pure (SS.lane_state #et_ab #et_acc emask has_mask row_active causal
                   (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale
                   eQsh eKg (SZ.v (tid %^ 32sz)) (SZ.v nw)
@@ -215,7 +219,10 @@ fn sdpa_flash_kf
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask
       #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-      vmc vlc (SZ.v (tid %^ 32sz)));
+      vmc vlc (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+      (SZ.v (tid %^ 32sz)));
     SS.run_mlv_acc #et_ab #et_acc emask has_mask row_active causal
       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
       (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter) vmc vlc;
@@ -248,7 +255,13 @@ fn sdpa_flash_kf
         (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
       (SS.run_lv #et_ab #et_acc emask has_mask row_active causal
         (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
-        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter));
+        (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+      (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter));
+    SS.run_O_step #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+      (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter);
     jt_score_row_eq_g #et_ab #et_acc (SZ.v d) eQsh eKg (SZ.v k0)
       (SZ.v (tid %^ 32sz));
     with vmn vln. assert (jt_rest_v #et_ab #et_acc d sk b hq sq
@@ -258,7 +271,10 @@ fn sdpa_flash_kf
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask
       #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-      vmn vln (SZ.v (tid %^ 32sz)));
+      vmn vln (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter + 1))
+      (SZ.v (tid %^ 32sz)));
     SS.lane_step #et_ab #et_acc emask has_mask row_active causal
       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
       (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v vjt)
@@ -287,7 +303,10 @@ fn sdpa_flash_kf
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    vmf vlf (SZ.v (tid %^ 32sz)));
+    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+    (SZ.v (tid %^ 32sz)));
   unfold jt_rest_v #et_ab #et_acc d sk b hq sq
     shK shV shS shP
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
@@ -295,7 +314,10 @@ fn sdpa_flash_kf
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    vmf vlf (SZ.v (tid %^ 32sz));
+    vmf vlf (SS.run_O #et_ab #et_acc emask has_mask row_active causal
+       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg eVg
+       (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter))
+    (SZ.v (tid %^ 32sz));
   when__forget_cell16 (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) vmf;
   when__forget_cell16 (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) vlf;
   assert pure (thread_w nw (SZ.v tid) == SZ.v (tid /^ 32sz));

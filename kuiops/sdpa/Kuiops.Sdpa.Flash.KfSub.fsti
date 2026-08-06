@@ -101,16 +101,6 @@ let jt_upd_post_g
           subtile_row_sub (jt_stile #et_ab #et_acc d eQ eKg k0) i)
     else ()
 
-(* Chunk [b] of the [P@V] product: the [16 x 16] tile [P @ V[:, 16b:16b+16]],
-   accumulated by the tensor-core [emma] chain over its single 16-wide chunk. *)
-unfold
-let jt_pv_chunk
-  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
-  (#hd : nat) (#_ : squash (16 /?+ hd))
-  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 hd) (b : natlt (hd / 16))
-  : GTot (chest2 et_acc 16 16)
-= BM.emma_chain #et_ab #et_acc 16 eP (ematrix_subtile eV 16 16 0 b) 1
-
 (* The [P@V] accumulation into one lane's [(span, 16)] stride sub-tile of the
    output tile, after the first [n] head-dimension chunks: lane [(tr, tc)] adds
    cell [(span*a + tr, tc)] of chunk [b] into its own output cell [(a, b)]. *)
@@ -124,7 +114,7 @@ let jt_pv_acc
 = mk2 (fun a b ->
     if b < n
     then add (acc2 eO0 a b)
-             (acc2 (jt_pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
+             (acc2 (SF.pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
     else acc2 eO0 a b)
 
 (* Partial progress of that accumulation: chunks before [j] are done, and chunk
@@ -140,8 +130,63 @@ let jt_pv_part
     acc2 eO a b ==
       (if b < j || (b = j && a < n)
        then add (acc2 eO0 a b)
-                (acc2 (jt_pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
+                (acc2 (SF.pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
        else acc2 eO0 a b)
+
+let div_mod_16 (q r : nat)
+  : Lemma (requires r < 16) (ensures (q * 16 + r) / 16 == q /\ (q * 16 + r) % 16 == r)
+= FStar.Math.Lemmas.lemma_div_plus r q 16;
+  FStar.Math.Lemmas.lemma_mod_plus r q 16;
+  FStar.Math.Lemmas.small_div r 16;
+  FStar.Math.Lemmas.small_mod r 16
+
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 30"
+
+(* One lane's view of that update: rescale its stride sub-tile, then add the
+   [P@V] chunks -- exactly the composition [sdpa_flash_scale] followed by
+   [sdpa_flash_pv_mm] performs. *)
+let jt_out_subtile
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#d : nat) (#_ : squash (16 /?+ d)) (#_ : squash (warp_row_span /?+ 16))
+  (eO : chest2 et_acc 16 d) (ecw : chest1 et_acc 16)
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 d)
+  (tr : natlt warp_row_span) (tc : natlt 16)
+  : Lemma (jt_pv_acc (SF.scale_subtile (ematrix_stride_subtile eO warp_row_span 16 tr tc)
+                        ecw warp_row_span tr)
+             eP eV warp_row_span tr tc (d / 16)
+           == ematrix_stride_subtile (SF.out_tile eO ecw eP eV) warp_row_span 16 tr tc)
+= let lhs = jt_pv_acc (SF.scale_subtile (ematrix_stride_subtile eO warp_row_span 16 tr tc)
+                         ecw warp_row_span tr)
+              eP eV warp_row_span tr tc (d / 16) in
+  let rhs = ematrix_stride_subtile (SF.out_tile eO ecw eP eV) warp_row_span 16 tr tc in
+  introduce forall (a : natlt (16 / warp_row_span)) (bb : natlt (d / 16)).
+    acc2 lhs a bb == acc2 rhs a bb
+  with div_mod_16 bb tc;
+  assert (equal lhs rhs)
+
+#pop-options
+
+(* The output tile after the key-tile step at [k0]. *)
+unfold
+let jt_out_step
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (evm : chest1 et_acc 16) (eOw : chest2 et_acc 16 d)
+  : GTot (chest2 et_acc 16 d)
+= SF.out_tile eOw
+    (SF.cw_vec emask has_mask row_active causal bi qh qpos k0 cbound scale
+       (jt_stile #et_ab #et_acc d eQ eKg k0) evm)
+    (SF.prob_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
+       (jt_stile #et_ab #et_acc d eQ eKg k0) evm)
+    (SF.kv_tile 16 eVg k0)
 
 unfold
 let jt_rest_v
@@ -171,6 +216,7 @@ let jt_rest_v
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (vm vl : et_acc)
+  (eOw : chest2 et_acc 16 (SZ.v d))
   (i : natlt BW.warp_size) : slprop
 = (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
      array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
@@ -181,8 +227,8 @@ let jt_rest_v
   ** when__ (i < 16) (fun _ -> cell_full shcw i)
   ** when__ (i < 16) (fun _ -> cell_full_v shm i vm)
   ** when__ (i < 16) (fun _ -> cell_full_v shl i vl)
-  ** (exists* (e:chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-     array2_stride_subtile shO warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R e)
+  ** (array2_stride_subtile shO warp_row_span 16 (i / 16) (i % 16)
+        |-> Frac 1.0R (ematrix_stride_subtile eOw warp_row_span 16 (i / 16) (i % 16)))
   ** (shQ |-> Frac fQ eQ)
   ** (exists* (e:chest2 et_acc 16 16). shPVc |-> Frac (1.0R /. BW.warp_size) e)
   ** (gK |-> Frac fKg eKg) ** (gV |-> Frac fVg eVg) ** (gmask |-> Frac fmask emask)
@@ -215,9 +261,9 @@ let jt_rest
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (i : natlt BW.warp_size) : slprop
-= exists* (vm vl : et_acc).
+= exists* (vm vl : et_acc) (eOw : chest2 et_acc 16 (SZ.v d)).
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl i
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw i
 
 inline_for_extraction noextract
 fn sdpa_flash_jt_body
@@ -272,17 +318,22 @@ fn sdpa_flash_jt_body
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (vm vl : Ghost.erased et_acc)
   (evm evl : Ghost.erased (chest1 et_acc 16))
+  (eOw : Ghost.erased (chest2 et_acc 16 (SZ.v d)))
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
   requires pure (SZ.v lane < 16 ==>
                    reveal vm == acc1 evm (SZ.v lane) /\ reveal vl == acc1 evl (SZ.v lane))
   requires
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl (SZ.v lane)
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw (SZ.v lane)
   ensures
     exists* (m' l' : et_acc).
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l' (SZ.v lane)
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l'
+      (jt_out_step #et_ab #et_acc (SZ.v d) emask has_mask row_active causal
+         (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+         eQ eKg eVg evm eOw)
+      (SZ.v lane)
     ** pure (SZ.v lane < 16 ==>
               (exists (sr' : chest1 et_acc 16) (pr' : chest1 et_ab 16) (cw' : et_acc).
                  SF.softmax_upd_post emask has_mask row_active causal

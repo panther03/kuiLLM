@@ -71,7 +71,7 @@ fn sdpa_flash_q_load
     strided_cells2_v shQ (SZ.v nthr) (SZ.v tid)
       (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group)
          eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
-    strided_cells2 shO BW.warp_size (SZ.v lane) **
+    strided_cells2_v shO BW.warp_size (SZ.v lane) (ozero (SZ.v bm) (SZ.v d)) **
     if_ (lane_active bm lane)
       (ml_cells_v bm shm shl lane (neg infinity) zero)
 
