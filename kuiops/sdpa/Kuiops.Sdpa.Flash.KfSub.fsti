@@ -101,6 +101,48 @@ let jt_upd_post_g
           subtile_row_sub (jt_stile #et_ab #et_acc d eQ eKg k0) i)
     else ()
 
+(* Chunk [b] of the [P@V] product: the [16 x 16] tile [P @ V[:, 16b:16b+16]],
+   accumulated by the tensor-core [emma] chain over its single 16-wide chunk. *)
+unfold
+let jt_pv_chunk
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#hd : nat) (#_ : squash (16 /?+ hd))
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 hd) (b : natlt (hd / 16))
+  : GTot (chest2 et_acc 16 16)
+= BM.emma_chain #et_ab #et_acc 16 eP (ematrix_subtile eV 16 16 0 b) 1
+
+(* The [P@V] accumulation into one lane's [(span, 16)] stride sub-tile of the
+   output tile, after the first [n] head-dimension chunks: lane [(tr, tc)] adds
+   cell [(span*a + tr, tc)] of chunk [b] into its own output cell [(a, b)]. *)
+let jt_pv_acc
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#hd : nat) (#_ : squash (16 /?+ hd)) (#nr : nat)
+  (eO0 : chest2 et_acc nr (hd / 16))
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 hd)
+  (span tr tc n : nat)
+  : GTot (chest2 et_acc nr (hd / 16))
+= mk2 (fun a b ->
+    if b < n
+    then add (acc2 eO0 a b)
+             (acc2 (jt_pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
+    else acc2 eO0 a b)
+
+(* Partial progress of that accumulation: chunks before [j] are done, and chunk
+   [j] is done for the first [n] rows of the lane's sub-tile. *)
+let jt_pv_part
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#hd : nat) (#_ : squash (16 /?+ hd)) (#nr : nat)
+  (eO0 eO : chest2 et_acc nr (hd / 16))
+  (eP : chest2 et_ab 16 16) (eV : chest2 et_ab 16 hd)
+  (span tr tc j n : nat)
+  : prop
+= forall (a : natlt nr) (b : natlt (hd / 16)).
+    acc2 eO a b ==
+      (if b < j || (b = j && a < n)
+       then add (acc2 eO0 a b)
+                (acc2 (jt_pv_chunk eP eV b) (SF.clamp_nat 16 (span * a + tr)) (SF.clamp_nat 16 tc))
+       else acc2 eO0 a b)
+
 unfold
 let jt_rest_v
   (#et_ab #et_acc : Type0)

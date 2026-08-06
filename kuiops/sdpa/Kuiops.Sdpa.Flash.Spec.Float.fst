@@ -116,6 +116,27 @@ let scores_post
           (mask_bias emask has_mask bi qh qpos (clamp_nat sk (k0 + j)))
           (key_ok row_active causal sk cbound (k0 + j))
 
+(* [scale]'s in-place row-broadcast multiply on one lane's [(span, 16)] stride
+   sub-tile of the output tile: cell [(a, b)] lives on tile row [span * a + tr],
+   so it is scaled by that row's correction weight. *)
+let scale_subtile
+  (#et : Type0) {| scalar et |} (#nr #nc : nat)
+  (eO : chest2 et nr nc) (ecw : chest1 et 16) (span tr : nat)
+  : GTot (chest2 et nr nc)
+  = mk2 (fun a bb -> mul (acc2 eO a bb) (acc1 ecw (clamp_nat 16 (span * a + tr))))
+
+(* Partial progress of that multiply: rows before [r] are done, row [r] is done
+   up to column [n], the rest is untouched. *)
+let scale_part
+  (#et : Type0) {| scalar et |} (#nr #nc : nat)
+  (eO0 eO : chest2 et nr nc) (ecw : chest1 et 16) (span tr : nat) (r n : nat)
+  : prop
+  = forall (a : natlt nr) (bb : natlt nc).
+      acc2 eO a bb ==
+        (if a < r || (a = r && bb < n)
+         then acc2 (scale_subtile eO0 ecw span tr) a bb
+         else acc2 eO0 a bb)
+
 (* The complete effect of one lane's online-softmax update: primed values are
    the post-state of the score tile, the probability tile, and the running
    max / denominator / correction registers. *)

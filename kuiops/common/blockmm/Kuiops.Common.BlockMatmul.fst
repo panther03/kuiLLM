@@ -161,3 +161,31 @@ let emma_chain_approx
   matmul_tile_chain_full tk ra rb
 
 #pop-options
+
+#push-options "--fuel 2 --ifuel 0 --z3rlimit 20"
+
+(* The chain over a single full-width chunk is one fused multiply-add onto a
+   zero accumulator -- the shape a kernel produces with [mma_fill] followed by a
+   single [mma_sync] over untiled operands. *)
+let emma_chain_one
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#tm #tn #tk : pos)
+  (ma : chest2 et_ab tm tk) (mb : chest2 et_ab tk tn)
+  : Lemma (emma_chain #et_ab #et_acc tk ma mb 1
+           == emma (const (tm @| tn @| INil) (zero #et_acc)) ma mb)
+= assert (equal (ematrix_subtile ma tm tk 0 0) ma);
+  assert (equal (ematrix_subtile mb tk tn 0 0) mb)
+
+(* ... and, like any chain, it approximates the exact real matmul. *)
+let emma_chain_one_approx
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| scalar et_acc |} {| real_like et_acc |}
+  (#tm #tn #tk : pos)
+  (ma : chest2 et_ab tm tk) (mb : chest2 et_ab tk tn)
+  (ra : chest2 real tm tk) (rb : chest2 real tk tn)
+  : Lemma (requires ma %~ ra /\ mb %~ rb)
+          (ensures emma_chain #et_ab #et_acc tk ma mb 1 %~ MS.matmul ra rb)
+= emma_chain_approx #et_ab #et_acc #_ #_ #_ #_ #tm #tn #tk tk ma mb ra rb
+
+#pop-options

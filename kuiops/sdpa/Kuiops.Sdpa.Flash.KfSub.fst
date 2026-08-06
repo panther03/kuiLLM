@@ -714,7 +714,8 @@ fn sdpa_flash_pv_mm
     shP |-> Frac fP eP **
     shV |-> Frac fV eV **
     (exists* ePVc. shPVc |-> Frac (1.0R /. warp_size) ePVc) **
-    (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+    (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)
+       |-> Frac 1.0R (jt_pv_acc eO0 eP eV warp_row_span (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v d / 16)))
 {
   tensor_pts_to_ref shV;
   tensor_pts_to_ref shPVc;
@@ -736,7 +737,8 @@ fn sdpa_flash_pv_mm
       shP |-> Frac fP eP **
       shV |-> Frac fV eV **
       (exists* ePVc. shPVc |-> Frac (1.0R /. warp_size) ePVc) **
-      (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+      (exists* eO. (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+         ** pure (jt_pv_part eO0 eO eP eV warp_row_span (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v !jcol) 0)) **
       pure (SZ.v !jcol <= SZ.v njcol)
     decreases (njcol - !jcol)
   {
@@ -751,6 +753,7 @@ fn sdpa_flash_pv_mm
     with etV. assert (tensor_pts_to vtile #fV etV);
       elim_trade (vtile |-> Frac fV etV) (shV |-> Frac fV eV);
     mma_store pvacc shPVc;
+    BM.emma_chain_one #et_ab #et_acc #_ #_ #_ #_ #_ eP (ematrix_subtile eV 16 16 0 (SZ.v ocol));
 
     (* The [__syncwarp()] after [store_matrix_sync]: model it as an empty warp
        barrier (threads no ownership, [p == q == emp]).  It is a pure ordering
@@ -764,8 +767,10 @@ fn sdpa_flash_pv_mm
     while (!k <^ lane_row_span_sz)
       invariant
         live k **
-        (exists* ePVc. shPVc |-> Frac (1.0R /. warp_size) ePVc) **
-        (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+        (exists* ePVc. (shPVc |-> Frac (1.0R /. warp_size) ePVc)
+           ** pure (ePVc == jt_pv_chunk eP eV (SZ.v ocol))) **
+        (exists* eO. (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+           ** pure (jt_pv_part eO0 eO eP eV warp_row_span (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v ocol) (SZ.v !k))) **
         pure (SZ.v !k <= SZ.v lane_row_span_sz)
       decreases (lane_row_span_sz - !k)
     {
@@ -781,6 +786,10 @@ fn sdpa_flash_pv_mm
     };
     jcol := !jcol +^ 1sz;
   };
+
+  with eO. assert (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO);
+  assert (pure (equal eO
+    (jt_pv_acc eO0 eP eV warp_row_span (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v d / 16))));
 
   with vp. assert pf |-> vp; drop_ (pf |-> vp);
   with vv. assert vf |-> vv; drop_ (vf |-> vv);
@@ -965,7 +974,8 @@ fn sdpa_flash_scale
     (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO0)
   ensures
     (shcw |-> Frac fcw ecw) **
-    (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+    (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16)
+       |-> Frac 1.0R (SF.scale_subtile eO0 ecw warp_row_span (SZ.v lane / 16)))
 {
   let tr = lane /^ 16sz;
   let ncol : sz = hd /^ 16sz;
@@ -975,7 +985,8 @@ fn sdpa_flash_scale
     invariant
       live orow **
       (shcw |-> Frac fcw ecw) **
-      (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+      (exists* eO. (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+         ** pure (SF.scale_part eO0 eO ecw warp_row_span (SZ.v lane / 16) (SZ.v !orow) 0)) **
       pure (SZ.v !orow <= lane_row_span)
     decreases (lane_row_span_sz - !orow)
   {
@@ -989,7 +1000,8 @@ fn sdpa_flash_scale
       invariant
         live ocol **
         (shcw |-> Frac fcw ecw) **
-        (exists* eO. array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO) **
+        (exists* eO. (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO)
+           ** pure (SF.scale_part eO0 eO ecw warp_row_span (SZ.v lane / 16) (SZ.v vor) (SZ.v !ocol))) **
         pure (SZ.v !ocol <= SZ.v hd / 16)
       decreases (ncol - !ocol)
     {
@@ -1003,6 +1015,8 @@ fn sdpa_flash_scale
     };
     orow := !orow +^ 1sz;
   };
+  with eO. assert (array2_stride_subtile shO warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eO);
+  assert (pure (equal eO (SF.scale_subtile eO0 ecw warp_row_span (SZ.v lane / 16))));
   ()
 }
 
