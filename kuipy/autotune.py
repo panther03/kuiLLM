@@ -12,7 +12,6 @@ shapes/strides/dtypes in the key, so a selection made while tracing a graph
 import hashlib
 import json
 import os
-import statistics
 import tempfile
 import threading
 from pathlib import Path
@@ -204,11 +203,14 @@ def _benchmark(spec, run_candidate, args, kwargs, device):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            run_candidate(spec, args, kwargs)
+            for _ in range(C.AUTOTUNE_BATCH):
+                run_candidate(spec, args, kwargs)
             end.record()
             end.synchronize()
-            timings.append(float(start.elapsed_time(end)))
-    return statistics.median(timings)
+            timings.append(float(start.elapsed_time(end)) / C.AUTOTUNE_BATCH)
+    # Interference from the rest of the machine can only ever make a sample
+    # slower, so the fastest one is the best estimate of the kernel's cost.
+    return min(timings)
 
 
 def _cleanup(candidates, winner, store):
