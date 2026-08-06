@@ -553,3 +553,42 @@ let sum_where_drop (#n : nat) (f : natlt n -> GTot real) (p : pred n)
   : Lemma (requires forall (j : natlt n). ~(p j) ==> f j == 0.0R)
           (ensures sum_where f ptrue == sum_where f p)
   = sum_upto_drop f p n
+
+(* ------------------------------------------------------------------ *)
+(* Splitting the shifted sums.                                         *)
+(*                                                                     *)
+(* The cross-warp combine adds partial sums that are already shifted by *)
+(* the block-wide maximum, so it needs the additive structure of        *)
+(* [tsum_d]/[tsum_n] rather than that of [dsum]/[nsum].                 *)
+(* ------------------------------------------------------------------ *)
+
+let tsum_d_split (#n : nat) (x : natlt n -> GTot real) (p q : pred n) (m' : real)
+  : Lemma (requires disjoint p q)
+          (ensures tsum_d x (por p q) m' == tsum_d x p m' +. tsum_d x q m')
+  = sum_where_split (fun j -> exp (x j -. m')) p q
+
+let tsum_n_split (#n : nat) (x y : natlt n -> GTot real) (p q : pred n) (m' : real)
+  : Lemma (requires disjoint p q)
+          (ensures tsum_n x y (por p q) m' == tsum_n x y p m' +. tsum_n x y q m')
+  = sum_where_split (fun j -> exp (x j -. m') *. y j) p q
+
+let tsum_d_none (#n : nat) (x : natlt n -> GTot real) (p : pred n) (m' : real)
+  : Lemma (requires forall (j : natlt n). ~(p j))
+          (ensures tsum_d x p m' == 0.0R)
+  = sum_upto_false (fun j -> exp (x j -. m')) p n
+
+let tsum_n_none (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m' : real)
+  : Lemma (requires forall (j : natlt n). ~(p j))
+          (ensures tsum_n x y p m' == 0.0R)
+  = sum_upto_false (fun j -> exp (x j -. m') *. y j) p n
+
+let tsum_d_ext (#n : nat) (x : natlt n -> GTot real) (p q : pred n) (m' : real)
+  : Lemma (requires forall (j : natlt n). p j == q j)
+          (ensures tsum_d x p m' == tsum_d x q m')
+  = sum_where_ext (fun j -> exp (x j -. m')) (fun j -> exp (x j -. m')) p q
+
+let tsum_n_ext (#n : nat) (x y : natlt n -> GTot real) (p q : pred n) (m' : real)
+  : Lemma (requires forall (j : natlt n). p j == q j)
+          (ensures tsum_n x y p m' == tsum_n x y q m')
+  = sum_where_ext (fun j -> exp (x j -. m') *. y j)
+                  (fun j -> exp (x j -. m') *. y j) p q

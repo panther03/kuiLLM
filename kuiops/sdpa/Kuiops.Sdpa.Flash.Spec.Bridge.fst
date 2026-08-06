@@ -516,6 +516,14 @@ let mul_zero_approx
   = to_real_ok y;
     a_mul x y 0.0R (to_real y)
 
+(* The same, annihilating on the right: the rescaling factor a warp with no
+   keys publishes may well be NaN, so the factors cannot be commuted. *)
+let mul_zero_approx_r
+  (#et : Type0) {| scalar et |} {| real_like et |} (x y : et)
+  : Lemma (requires y %~ 0.0R) (ensures (x `mul` y) %~ 0.0R)
+  = to_real_ok x;
+    a_mul x y (to_real x) 0.0R
+
 (* [m], [l] and [o] are one lane's running maximum, denominator and output
    accumulator for one value column, after absorbing exactly the keys in [p].
    The single witness [mr] is shared between [l] and [o], so dividing them
@@ -798,3 +806,265 @@ let mlo_step
          ()
          (fun i ->
             mlo_step_b_i x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' i))
+
+(* ------------------------------------------------------------------ *)
+(* The cross-warp combine.                                             *)
+(*                                                                     *)
+(* Every warp published a running maximum, denominator and output       *)
+(* accumulator for the key set it owns.  Warp 0 folds the maxima into a *)
+(* block-wide one and re-weights the other two by [exp (m_w - gm)].     *)
+(* A warp that absorbed nothing published the [-inf] sentinel, whose    *)
+(* weight is meaningless; it is annihilated because that warp's         *)
+(* accumulators are (approximately) zero.                              *)
+(* ------------------------------------------------------------------ *)
+
+(* The key set the first [k] warps cover between them. *)
+let rec punion (#n #nw : nat) (pw : natlt nw -> SO.pred n) (k : nat { k <= nw })
+  : SO.pred n
+  = if k = 0 then SO.pfalse
+    else (fun j -> punion pw (k - 1) j || pw (k - 1) j)
+
+let rec punion_spec (#n #nw : nat) (pw : natlt nw -> SO.pred n)
+                    (k : nat { k <= nw }) (j : natlt n)
+  : Lemma (ensures punion pw k j <==> (exists (w : natlt nw). w < k /\ pw w j))
+          (decreases k)
+  = if k = 0 then () else punion_spec pw (k - 1) j
+
+let punion_none (#n #nw : nat) (pw : natlt nw -> SO.pred n) (k : nat { k <= nw })
+  : Lemma (pnone (punion pw k) n
+           <==> (forall (w : natlt nw). w < k ==> pnone (pw w) n))
+  = pnone_spec (punion pw k) n;
+    introduce forall (w : natlt nw).
+      (pnone (pw w) n <==> (forall (j : natlt n). ~(pw w j)))
+    with pnone_spec (pw w) n;
+    introduce forall (j : natlt n).
+      (punion pw k j <==> (exists (w : natlt nw). w < k /\ pw w j))
+    with punion_spec pw k j
+
+(* The first [k] warps' keys are disjoint from warp [w1]'s whenever [w1] is
+   not among them. *)
+let rec punion_disjoint (#n #nw : nat) (pw : natlt nw -> SO.pred n)
+                        (k : nat { k <= nw }) (w1 : natlt nw)
+  : Lemma (requires k <= w1 /\
+                    (forall (a b : natlt nw). ~(a == b) ==>
+                       SO.disjoint (pw a) (pw b)))
+          (ensures SO.disjoint (punion pw k) (pw w1))
+          (decreases k)
+  = if k = 0
+    then assert (SO.disjoint (punion pw k) (pw w1))
+    else begin
+      let k1 : nat = k - 1 in
+      let w0 : natlt nw = k1 in
+      punion_disjoint pw k1 w1;
+      assert (SO.disjoint (pw w0) (pw w1));
+      introduce forall (j : natlt n). ~(punion pw k j /\ pw w1 j)
+      with assert (punion pw k j == (punion pw k1 j || pw w0 j))
+    end
+
+(* The block-wide maximum after folding the first [k] warps. *)
+let rec gmax_fold
+  (#et : Type0) {| floating et |} (#nw : nat)
+  (m : natlt nw -> GTot et) (k : nat { k <= nw }) : GTot et (decreases k)
+  = if k = 0 then neg infinity else fmax (gmax_fold m (k - 1)) (m (k - 1))
+
+(* The rescale-weighted sum of the first [k] warps' accumulators. *)
+let rec gfold
+  (#et : Type0) {| floating et |} (#nw : nat)
+  (sc v : natlt nw -> GTot et) (k : nat { k <= nw }) : GTot et (decreases k)
+  = if k = 0 then zero
+    else add (gfold sc v (k - 1)) (mul (sc (k - 1)) (v (k - 1)))
+
+(* What each warp published, as the combine sees it. *)
+let warps_ok
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n #nw : nat) (x y : natlt n -> GTot real) (pw : natlt nw -> SO.pred n)
+  (m l o : natlt nw -> GTot et) : prop
+  = forall (w : natlt nw). mlo_state x y (pw w) (m w) (l w) (o w)
+
+(* The block-wide maximum is not NaN, is the sentinel exactly while no warp
+   has absorbed anything, and otherwise approximates some real. *)
+let rec gmax_fold_ok
+  (#et : Type0) {| floating et |} {| real_like et |} {| floating_real_like et |}
+  (#n #nw : nat) (x y : natlt n -> GTot real) (pw : natlt nw -> SO.pred n)
+  (m l o : natlt nw -> GTot et) (k : nat { k <= nw })
+  : Lemma (requires warps_ok x y pw m l o)
+          (ensures
+            not_nan (gmax_fold m k) /\
+            ((forall (w : natlt nw). w < k ==> pnone (pw w) n)
+             ==> gmax_fold m k == neg infinity) /\
+            ((forall (w : natlt nw). w < k ==> pnone (pw w) n) \/
+             (exists (gmr : real). gmax_fold m k %~ gmr)))
+          (decreases k)
+  = if k = 0 then ninf_not_nan #et ()
+    else begin
+      let k1 : nat = k - 1 in
+      let w1 : natlt nw = k1 in
+      gmax_fold_ok x y pw m l o k1;
+      let g1 = gmax_fold m k1 in
+      let a = m w1 in
+      if pnone (pw w1) n
+      then fmax_ninf_r g1
+      else begin
+        fmax_not_nan g1 a;
+        if (forall (w : natlt nw). w < k1 ==> pnone (pw w) n)
+        then (fmax_ninf_l a;
+              FStar.Classical.exists_elim
+                (exists (gmr : real). fmax g1 a %~ gmr)
+                #real
+                #(fun mr -> a %~ mr /\ l w1 %~ (SO.dsum x (pw w1) /. exp mr) /\
+                            o w1 %~ (SO.nsum x y (pw w1) /. exp mr))
+                ()
+                (fun mr -> ()))
+        else
+          FStar.Classical.exists_elim
+            (exists (gmr : real). fmax g1 a %~ gmr)
+            #real
+            #(fun mr -> a %~ mr /\ l w1 %~ (SO.dsum x (pw w1) /. exp mr) /\
+                        o w1 %~ (SO.nsum x y (pw w1) /. exp mr))
+            ()
+            (fun mr ->
+               FStar.Classical.exists_elim
+                 (exists (gmr : real). fmax g1 a %~ gmr)
+                 #real
+                 #(fun gmr1 -> g1 %~ gmr1)
+                 ()
+                 (fun gmr1 -> fmax_approx g1 a gmr1 mr))
+      end
+    end
+
+(* One warp's rescaled accumulators are its share of the block sums, already
+   shifted by the block-wide maximum.  A warp that absorbed nothing published
+   zero, which annihilates its meaningless rescaling factor. *)
+let combine_warp
+  (#et : Type0) {| floating et |} {| real_like et |} {| floating_real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p : SO.pred n)
+  (mw lw ow gm sc : et) (gmr : real)
+  : Lemma (requires mlo_state x y p mw lw ow /\ gm %~ gmr /\
+                    sc == fexp (mw `sub` gm))
+          (ensures (sc `mul` lw) %~ SO.tsum_d x p gmr /\
+                   (sc `mul` ow) %~ SO.tsum_n x y p gmr)
+  = if pnone p n
+    then begin
+      pnone_spec p n;
+      SO.tsum_d_none x p gmr;
+      SO.tsum_n_none x y p gmr;
+      zero_approx #et ();
+      mul_zero_approx_r sc lw;
+      mul_zero_approx_r sc ow
+    end
+    else
+      FStar.Classical.exists_elim
+        ((sc `mul` lw) %~ SO.tsum_d x p gmr /\ (sc `mul` ow) %~ SO.tsum_n x y p gmr)
+        #real
+        #(fun mr -> mw %~ mr /\ lw %~ (SO.dsum x p /. exp mr) /\
+                    ow %~ (SO.nsum x y p /. exp mr))
+        ()
+        (fun mr ->
+           sub_approx mw gm mr gmr;
+           exp_approx (mw `sub` gm) (mr -. gmr);
+           a_mul sc lw (exp (mr -. gmr)) (SO.dsum x p /. exp mr);
+           a_mul sc ow (exp (mr -. gmr)) (SO.nsum x y p /. exp mr);
+           SO.lem_rescale (SO.dsum x p /. exp mr) mr gmr (SO.dsum x p);
+           SO.lem_rescale (SO.nsum x y p /. exp mr) mr gmr (SO.nsum x y p);
+           SO.lem_tsum_d x p gmr;
+           SO.lem_tsum_n x y p gmr)
+
+(* The fold of warps that all published (approximate) zero is zero. *)
+let rec gfold_none
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#nw : nat) (sc v : natlt nw -> GTot et) (k : nat { k <= nw })
+  : Lemma (requires forall (w : natlt nw). w < k ==> v w %~ 0.0R)
+          (ensures gfold sc v k %~ 0.0R)
+          (decreases k)
+  = if k = 0 then zero_approx #et ()
+    else begin
+      let k1 : nat = k - 1 in
+      let w1 : natlt nw = k1 in
+      gfold_none sc v k1;
+      mul_zero_approx_r (sc w1) (v w1);
+      a_add (gfold sc v k1) (mul (sc w1) (v w1)) 0.0R 0.0R
+    end
+
+(* The fold of the first [k] warps is the block sum over the keys they cover. *)
+let rec gfold_ok
+  (#et : Type0) {| floating et |} {| real_like et |} {| floating_real_like et |}
+  (#n #nw : nat) (x y : natlt n -> GTot real) (pw : natlt nw -> SO.pred n)
+  (m l o sc : natlt nw -> GTot et) (gm : et) (gmr : real) (k : nat { k <= nw })
+  : Lemma (requires
+             warps_ok x y pw m l o /\ gm %~ gmr /\
+             (forall (w : natlt nw). sc w == fexp (m w `sub` gm)) /\
+             (forall (w1 w2 : natlt nw). ~(w1 == w2) ==>
+                SO.disjoint (pw w1) (pw w2)))
+          (ensures gfold sc l k %~ SO.tsum_d x (punion pw k) gmr /\
+                   gfold sc o k %~ SO.tsum_n x y (punion pw k) gmr)
+          (decreases k)
+  = if k = 0
+    then (SO.tsum_d_none x (punion pw 0) gmr;
+          SO.tsum_n_none x y (punion pw 0) gmr;
+          zero_approx #et ())
+    else begin
+      let k1 : nat = k - 1 in
+      let w1 : natlt nw = k1 in
+      gfold_ok x y pw m l o sc gm gmr k1;
+      combine_warp x y (pw w1) (m w1) (l w1) (o w1) gm (sc w1) gmr;
+      punion_disjoint pw k1 w1;
+      SO.tsum_d_split x (punion pw k1) (pw w1) gmr;
+      SO.tsum_n_split x y (punion pw k1) (pw w1) gmr;
+      SO.tsum_d_ext x (punion pw k) (SO.por (punion pw k1) (pw w1)) gmr;
+      SO.tsum_n_ext x y (punion pw k) (SO.por (punion pw k1) (pw w1)) gmr;
+      a_add (gfold sc l k1) (mul (sc w1) (l w1))
+            (SO.tsum_d x (punion pw k1) gmr) (SO.tsum_d x (pw w1) gmr);
+      a_add (gfold sc o k1) (mul (sc w1) (o w1))
+            (SO.tsum_n x y (punion pw k1) gmr) (SO.tsum_n x y (pw w1) gmr)
+    end
+
+(* The block-wide state after the combine.  Unlike [mlo_state] the empty case
+   only says the accumulators are approximately zero: an empty row's rescaling
+   factors are meaningless floats and nothing pins the fold to a literal
+   zero.  Nothing downstream needs more -- an empty row belongs to a query
+   position the kernel never stores. *)
+let gstate
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p : SO.pred n) (gm gl go : et) : prop
+  = not_nan gm /\
+    (if pnone p n
+     then (gl %~ 0.0R /\ go %~ 0.0R)
+     else (exists (gmr : real).
+             gm %~ gmr /\ gl %~ (SO.dsum x p /. exp gmr) /\
+             go %~ (SO.nsum x y p /. exp gmr)))
+
+let mlo_combine
+  (#et : Type0) {| floating et |} {| real_like et |} {| floating_real_like et |}
+  (#n #nw : nat) (x y : natlt n -> GTot real) (pw : natlt nw -> SO.pred n)
+  (m l o sc : natlt nw -> GTot et) (p' : SO.pred n)
+  : Lemma (requires
+             warps_ok x y pw m l o /\
+             (forall (w : natlt nw). sc w == fexp (m w `sub` gmax_fold m nw)) /\
+             (forall (w1 w2 : natlt nw). ~(w1 == w2) ==>
+                SO.disjoint (pw w1) (pw w2)) /\
+             (forall (j : natlt n). p' j == punion pw nw j))
+          (ensures gstate x y p' (gmax_fold m nw)
+                     (gfold sc l nw) (gfold sc o nw))
+  = let gm = gmax_fold m nw in
+    gmax_fold_ok x y pw m l o nw;
+    punion_none pw nw;
+    pnone_ext p' (punion pw nw);
+    if pnone p' n
+    then begin
+      introduce forall (w : natlt nw). l w %~ 0.0R /\ o w %~ 0.0R
+      with zero_approx #et ();
+      gfold_none sc l nw;
+      gfold_none sc o nw
+    end
+    else
+      FStar.Classical.exists_elim
+        (gstate x y p' gm (gfold sc l nw) (gfold sc o nw))
+        #real
+        #(fun gmr -> gm %~ gmr)
+        ()
+        (fun gmr ->
+           gfold_ok x y pw m l o sc gm gmr nw;
+           SO.lem_tsum_d x (punion pw nw) gmr;
+           SO.lem_tsum_n x y (punion pw nw) gmr;
+           SO.dsum_ext x p' (punion pw nw);
+           SO.nsum_ext x y p' (punion pw nw))
