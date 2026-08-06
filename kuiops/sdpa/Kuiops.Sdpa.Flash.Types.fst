@@ -377,6 +377,38 @@ let out_store_cells
     when_ (r0 + ij._1 < SZ.v rows)
       (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2)
 
+let out_cell_v
+  (#et : Type0) (b hq sq d : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et lout)
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r : nat) (dd : natlt (SZ.v d)) (v : et) : slprop
+= tensor_pts_to_cell gout
+    (idx4 bi
+      (out_qh (SZ.v hq) (SZ.v sq) kvh group r)
+      (out_qpos (SZ.v sq) r)
+      dd)
+    v
+
+(* The epilogue's output cells, pinned to the values the combine publishes. *)
+let out_store_cells_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw b hq sq bm d rows : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (egl : chest1 et_acc (SZ.v bm))
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r0 : nat) (lane : natlt BW.warp_size) : slprop
+= forall+ (ij : out_stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size lane).
+    when_ (r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)))
+
 unfold let flash_nwarps : nat = 4
 
 unfold
@@ -772,6 +804,34 @@ let flash_block_output
   : slprop =
   forall+ (lane : natlt BW.warp_size).
     out_store_cells b hq sq 16sz d rows gout
+      (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (SZ.v group)
+      (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+      lane
+
+(* [flash_block_output] with each written cell pinned to the value the
+   block's epilogue publishes. *)
+let flash_block_output_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : slprop =
+  forall+ (lane : natlt BW.warp_size).
+    out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
       (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (SZ.v group)
@@ -1317,6 +1377,9 @@ let flash_thread_pre
 unfold
 let flash_thread_post
   (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nw nthr : szp { SZ.v nthr == block_threads nw })
   (b hq hkv group sq rows tiles sk : szp {
     SZ.v hq == SZ.v hkv * SZ.v group /\
@@ -1338,6 +1401,9 @@ let flash_thread_post
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
   (w : natlt (SZ.v nw))
   (lane : natlt BW.warp_size) : slprop =
@@ -1358,7 +1424,7 @@ let flash_thread_post
     (flash_warp_s v w) (flash_warp_p v w)
     (flash_warp_pv v w) (flash_warp_cw v w) lane **
   when_ (w = 0)
-    (out_store_cells b hq sq 16sz d rows gout
+    (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
       (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (SZ.v group)
@@ -1396,6 +1462,44 @@ let flash_block_state
   (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
   (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
   flash_block_output b hq hkv group sq rows tiles d gout
+    (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+
+(* [flash_block_state] with the block's output cells pinned to the values
+   its epilogue publishes. *)
+let flash_block_state_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw nblk : szp)
+  (b hq hkv group sq rows tiles sk d : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : TRO.roarray4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v nblk)) : slprop =
+  (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
+  (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+  (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+  (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+  flash_block_output_v nw b hq hkv group sq rows tiles d gout escale eO egl
     (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
 
 inline_for_extraction noextract
@@ -1513,7 +1617,10 @@ let sdpa_flash_pre
 
 unfold
 let sdpa_flash_post
-  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1569,7 +1676,7 @@ let sdpa_flash_post
     #fKg #fVg #fmask #eKg #eVg #emask
     (SZ.v (sdpa_flash_lane nw nthr tid))
   ** if_ (sdpa_flash_w nw nthr tid = 0sz)
-    (out_store_cells b hq sq 16sz d rows gout
+    (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
       bi (SZ.v kvh) (SZ.v group) (SZ.v r0)
       (SZ.v (sdpa_flash_lane nw nthr tid)))
 

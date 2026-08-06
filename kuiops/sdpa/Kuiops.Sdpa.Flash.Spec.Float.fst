@@ -692,3 +692,55 @@ let gscale_col_ext
       (ensures e == gscale_col eM i)
 = assert (equal e (gscale_col eM i))
 #pop-options
+
+(* ---------------------------------------------------------------------- *)
+(* Epilogue.                                                              *)
+(*                                                                        *)
+(* Warp 0 folds the per-warp output tiles into the block's output tile,    *)
+(* weighting warp [w]'s row [i] by the rescaling factor published for it,  *)
+(* and normalises by the block-wide denominator. *)
+(* ---------------------------------------------------------------------- *)
+
+let ocomb_row (bm : pos) (w i : nat) : nat = bm * w + i
+
+let ocomb_row_lt (nw bm : pos) (w : natlt nw) (i : natlt bm)
+  : Lemma (ocomb_row bm w i < nw * bm)
+= FStar.Math.Lemmas.lemma_mult_le_right bm (w + 1) nw
+
+(* The escale-weighted sum of the first [n] warps' contributions to column
+   [dd] of row [i] of the block output tile. *)
+let rec ocomb
+  (#et : Type0) {| floating et |} (#nw #bm #d : pos)
+  (escale : chest2 et nw bm) (eO : chest2 et (nw * bm) d)
+  (i : natlt bm) (dd : natlt d) (n : nat { n <= nw })
+  : GTot et (decreases n)
+= if n = 0 then zero
+  else
+    (ocomb_row_lt nw bm (n - 1) i;
+     add (ocomb escale eO i dd (n - 1))
+         (mul (acc2 escale (n - 1) i) (acc2 eO (ocomb_row bm (n - 1) i) dd)))
+
+(* The reciprocal of the block-wide denominator, with the empty-row case
+   (every key masked out) mapped to zero rather than to a division by zero. *)
+inline_for_extraction noextract
+let onorm (#et : Type0) {| floating et |} (l : et) : et
+= if l `gt` zero then one `div` l else zero
+
+(* The accumulator-typed value the epilogue writes for row [i], column [dd]. *)
+let out_val
+  (#et : Type0) {| floating et |} (#nw #bm #d : pos)
+  (escale : chest2 et nw bm) (eO : chest2 et (nw * bm) d)
+  (egl : chest1 et bm)
+  (i : natlt bm) (dd : natlt d) : GTot et
+= mul (ocomb escale eO i dd nw) (onorm (acc1 egl i))
+
+let ocomb_step
+  (#et : Type0) {| floating et |} (#nw #bm #d : pos)
+  (escale : chest2 et nw bm) (eO : chest2 et (nw * bm) d)
+  (i : natlt bm) (dd : natlt d) (w : natlt nw)
+  : Lemma
+      (ocomb_row bm w i < nw * bm /\
+       ocomb escale eO i dd (w + 1)
+       == add (ocomb escale eO i dd w)
+              (mul (acc2 escale w i) (acc2 eO (ocomb_row bm w i) dd)))
+= ocomb_row_lt nw bm w i

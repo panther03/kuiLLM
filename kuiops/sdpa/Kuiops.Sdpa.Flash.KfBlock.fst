@@ -588,19 +588,24 @@ fn sdpa_flash_o_store_cell_active
   requires
     out_cell b hq sq d gout (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd)
   ensures
-    out_cell b hq sq d gout (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd)
+    out_cell_v b hq sq d gout (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r)
+      (SZ.v dd) (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd)))
 {
-  let mut acc : et_acc = zero;
+  let zer : et_acc = zero;
+  let mut acc : et_acc = zer;
   let mut ww : sz = 0sz;
+  rewrite (acc |-> zer) as (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) 0);
   while (!ww <^ nw)
     invariant
-      live acc ** live ww **
+      live ww **
       (shscale |-> Frac fscale escale) **
       (shO |-> Frac fO eO) **
       (shgl |-> Frac fgl egl) **
       out_cell b hq sq d gout
         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd) **
-      pure (SZ.v !ww <= SZ.v nw)
+      (exists* (n : (m:nat { m <= SZ.v nw })).
+        (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) n) **
+        pure (n == SZ.v !ww))
     decreases (nw - !ww)
   {
     let vww = !ww;
@@ -609,16 +614,19 @@ fn sdpa_flash_o_store_cell_active
     let orow : szlt (SZ.v nw * SZ.v bm) = bm *^ iw +^ i;
     let sv = tensor_read shscale (cidx2 iw i);
     let ov = tensor_read shO (cidx2 orow dd);
-    acc := !acc `add` (sv `mul` ov);
-    ww := !ww +^ 1sz;
+    with n0. assert (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) n0);
+    let a0 = !acc;
+    acc := a0 `add` (sv `mul` ov);
+    SF.ocomb_step escale eO (SZ.v i) (SZ.v dd) (SZ.v iw);
+    rewrite (acc |-> (a0 `add` (sv `mul` ov)))
+      as (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) (SZ.v vww + 1));
+    ww := vww +^ 1sz;
   };
+  with nend. assert (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) nend);
+  rewrite (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) nend)
+    as (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) (SZ.v nw));
   let lv = tensor_read shgl (cidx1 i);
-  let inv : et_acc =
-    if (lv `gt` (zero #et_acc #_)) {
-      (one #et_acc #_) `div` lv
-    } else {
-      zero #et_acc #_
-    };
+  let inv : et_acc = SF.onorm lv;
   let qh0 = kvh *^ group +^ (r /^ sq);
   let qh1 : szlt hq = clamp_lt hq qh0;
   let qpos : szlt sq = r %^ sq;
@@ -643,20 +651,21 @@ fn sdpa_flash_o_store_cell_active
         (SZ.v dd))
       old)
   as (tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) old);
-  tensor_write_cell gout (cidx4 bi qh1 qpos dd) (FC.fcast (!acc `mul` inv));
-  with newv. assert (
-    tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) newv);
+  let av = !acc;
+  let res : et_ab = FC.fcast (av `mul` inv);
+  tensor_write_cell gout (cidx4 bi qh1 qpos dd) res;
   rewrite
-    (tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) newv)
+    (tensor_pts_to_cell gout (up (cidx4 bi qh1 qpos dd)) res)
   as
     (tensor_pts_to_cell gout
       (idx4 (SZ.v bi)
         (out_qh (SZ.v hq) (SZ.v sq) (SZ.v kvh) (SZ.v group) (SZ.v r))
         (out_qpos (SZ.v sq) (SZ.v r))
         (SZ.v dd))
-      newv);
-  fold (out_cell b hq sq d gout
-    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd));
+      (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))));
+  fold (out_cell_v b hq sq d gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r) (SZ.v dd)
+    (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))));
 }
 
 inline_for_extraction noextract
@@ -693,8 +702,9 @@ fn sdpa_flash_o_store_cell_maybe
         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd))
   ensures
     when_ (SZ.v r0 + SZ.v i < SZ.v rows)
-      (out_cell b hq sq d gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd))
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)
+        (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))))
 {
   let r = r0 +^ i;
   let valid = r <^ rows;
@@ -712,24 +722,81 @@ fn sdpa_flash_o_store_cell_maybe
     sdpa_flash_o_store_cell_active nw bm d rows b hq sq
       shscale shO shgl gout bi kvh group i dd rr;
     rewrite
-      (out_cell b hq sq d gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rr) (SZ.v dd))
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v rr) (SZ.v dd) (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))))
     as
-      (out_cell b hq sq d gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)
+        (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))));
     when_intro_true (SZ.v r0 + SZ.v i < SZ.v rows) (
-      out_cell b hq sq d gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+      out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)
+        (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))));
   } else {
     assert pure ((SZ.v r0 + SZ.v i < SZ.v rows) == false);
     when_elim_false (SZ.v r0 + SZ.v i < SZ.v rows) (
       out_cell b hq sq d gout
         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
     when_intro_false (SZ.v r0 + SZ.v i < SZ.v rows) (
-      out_cell b hq sq d gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd));
+      out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)
+        (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd))));
   }
 }
+
+#push-options "--ifuel 1 --fuel 0 --z3rlimit 20"
+let mod_gap (n : pos) (a k : nat)
+  : Lemma (requires a % n == k % n /\ a > k) (ensures a >= k + n)
+= FStar.Math.Lemmas.euclidean_division_definition a n;
+  FStar.Math.Lemmas.euclidean_division_definition k n;
+  FStar.Math.Lemmas.distributivity_add_right n (k / n) 1;
+  if a / n <= k / n
+  then FStar.Math.Lemmas.lemma_mult_le_left n (a / n) (k / n)
+  else FStar.Math.Lemmas.lemma_mult_le_left n (k / n + 1) (a / n)
+
+let flat_inj (bm d : pos) (x y : natlt bm & natlt d)
+  : Lemma (requires x._1 * d + x._2 == y._1 * d + y._2) (ensures x == y)
+= FStar.Math.Lemmas.lemma_mod_plus x._2 x._1 d;
+  FStar.Math.Lemmas.lemma_mod_plus y._2 y._1 d;
+  FStar.Math.Lemmas.division_addition_lemma x._2 d x._1;
+  FStar.Math.Lemmas.division_addition_lemma y._2 d y._1
+
+let stride_ge_lane (bm d : pos) (lane : natlt BW.warp_size)
+  : Lemma (forall (x : stride_index2 bm d BW.warp_size lane).
+             x._1 * d + x._2 >= lane)
+= introduce forall (x : stride_index2 bm d BW.warp_size lane).
+      x._1 * d + x._2 >= lane
+  with FStar.Math.Lemmas.euclidean_division_definition
+         (x._1 * d + x._2) BW.warp_size
+
+let stride_lt_ncells (bm d : pos) (lane : natlt BW.warp_size)
+  : Lemma (forall (x : stride_index2 bm d BW.warp_size lane).
+             x._1 * d + x._2 < bm * d)
+= introduce forall (x : stride_index2 bm d BW.warp_size lane).
+      x._1 * d + x._2 < bm * d
+  with FStar.Math.Lemmas.lemma_mult_le_right d (x._1 + 1) bm
+
+let stride_step_lem (bm d : pos) (lane : natlt BW.warp_size) (k : nat)
+  (y : stride_index2 bm d BW.warp_size lane)
+  : Lemma (requires y._1 * d + y._2 == k)
+    (ensures forall (x : stride_index2 bm d BW.warp_size lane).
+      ((~(x._1 * d + x._2 < k) /\ x =!= y)
+         <==> ~(x._1 * d + x._2 < k + BW.warp_size)) /\
+      ((x._1 * d + x._2 < k \/ y == x)
+         <==> x._1 * d + x._2 < k + BW.warp_size))
+= introduce forall (x : stride_index2 bm d BW.warp_size lane).
+      ((~(x._1 * d + x._2 < k) /\ x =!= y)
+         <==> ~(x._1 * d + x._2 < k + BW.warp_size)) /\
+      ((x._1 * d + x._2 < k \/ y == x)
+         <==> x._1 * d + x._2 < k + BW.warp_size)
+  with (
+    if x._1 * d + x._2 > k
+    then mod_gap BW.warp_size (x._1 * d + x._2) k
+    else if x._1 * d + x._2 = k
+    then flat_inj bm d x y
+    else ()
+  )
+#pop-options
 
 inline_for_extraction noextract
 fn sdpa_flash_o_store_active
@@ -763,51 +830,130 @@ fn sdpa_flash_o_store_active
     (shgl |-> Frac fgl egl)
   requires out_store_cells b hq sq bm d rows gout
     (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane)
-  ensures  out_store_cells b hq sq bm d rows gout
+  ensures  out_store_cells_v nw b hq sq bm d rows gout escale eO egl
     (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane)
 {
   let ncells : sz = bm *^ d;
   let mut idx : sz = lane;
   let mut iter : sz = 0sz;
+  stride_ge_lane (SZ.v bm) (SZ.v d) (SZ.v lane);
+  unfold (out_store_cells b hq sq bm d rows gout
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
+  forevery_refine_split
+    #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2))
+    (fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v lane);
+  forevery_elim_empty
+    #(ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)
+        { ij._1 * SZ.v d + ij._2 < SZ.v lane })
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
+  forevery_intro_false
+    #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))));
+  forevery_refine_ext
+    #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    #(fun _ -> False)
+    (fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v lane)
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))));
   while (!idx <^ ncells)
     invariant
       live idx ** live iter **
       (shscale |-> Frac fscale escale) **
       (shO |-> Frac fO eO) **
       (shgl |-> Frac fgl egl) **
-      out_store_cells b hq sq bm d rows gout
-        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane) **
+      (forall+ (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)
+                  { ij._1 * SZ.v d + ij._2 < SZ.v !idx }).
+        when_ (SZ.v r0 + ij._1 < SZ.v rows)
+          (out_cell_v b hq sq d gout
+            (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+            (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)))) **
+      (forall+ (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)
+                  { ~(ij._1 * SZ.v d + ij._2 < SZ.v !idx) }).
+        when_ (SZ.v r0 + ij._1 < SZ.v rows)
+          (out_cell b hq sq d gout
+            (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2)) **
       pure (SZ.v !idx % BW.warp_size == SZ.v lane) **
       pure (SZ.v !idx < SZ.v bm * SZ.v d + BW.warp_size) **
       pure (SZ.v !iter <= SZ.v !idx)
     decreases (SZ.v ncells - SZ.v !iter)
   {
     let flat = !idx;
+    let next = flat +^ 32sz;
+    assert pure (SZ.v next == SZ.v flat + BW.warp_size);
     let i : szlt bm = flat /^ d;
     let dd : szlt d = flat %^ d;
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
-    unfold (out_store_cells b hq sq bm d rows gout
-      (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
-    forevery_extract'
+    stride_step_lem (SZ.v bm) (SZ.v d) (SZ.v lane) (SZ.v flat)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_remove'
       #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+      (fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v flat))
+      (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+        (out_cell b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2))
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
     sdpa_flash_o_store_cell_maybe nw bm d rows b hq sq
       shscale shO shgl gout bi kvh group i dd r0;
-    elim_forall
-      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) ->
-        when_ (SZ.v r0 + ij._1 < SZ.v rows) (
-          out_cell b hq sq d gout
-            (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
-    Trade.elim_trade _ _;
-    fold (out_store_cells b hq sq bm d rows gout
-      (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
-    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 BW.warp_size;
-    let next = !idx +^ 32sz;
-    assert pure (SZ.v !idx < SZ.v next);
+    forevery_refine_ext
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      #(fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v flat) /\
+                  ij =!= ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))))
+      (fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v next))
+      (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+        (out_cell b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
+    forevery_insert
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      #(fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v flat)
+      (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+        (out_cell_v b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+          (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))))
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_refine_ext
+      #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+      #(fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v flat \/
+                  (((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)))
+                     <: stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) == ij)
+      (fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v next)
+      (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+        (out_cell_v b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+          (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))));
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v flat) 1 BW.warp_size;
     idx := next;
     iter := !iter +^ 1sz;
   };
-  ()
+  stride_lt_ncells (SZ.v bm) (SZ.v d) (SZ.v lane);
+  forevery_refine_ext
+    #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun _ -> False)
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
+  forevery_elim_empty
+    #(ij : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane) { False })
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2));
+  forevery_unrefine
+    #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
+    (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))));
+  fold (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
 }
 
 inline_for_extraction noextract
@@ -844,7 +990,7 @@ fn sdpa_flash_o_store
     (out_store_cells b hq sq bm d rows gout
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
   ensures  if_ (w = 0sz)
-    (out_store_cells b hq sq bm d rows gout
+    (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
 {
   let active = w = 0sz;
@@ -853,12 +999,12 @@ fn sdpa_flash_o_store
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
     sdpa_flash_o_store_active nw bm d rows b hq sq
       shscale shO shgl gout bi kvh group r0 lane;
-    if_intro_true (out_store_cells b hq sq bm d rows gout
+    if_intro_true (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
   } else {
     if_elim_false (out_store_cells b hq sq bm d rows gout
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
-    if_intro_false (out_store_cells b hq sq bm d rows gout
+    if_intro_false (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane));
   }
 }

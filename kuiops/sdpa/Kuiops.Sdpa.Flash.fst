@@ -153,7 +153,10 @@ let sdpa_flash_kd
   block_teardown = FD.flash_block_teardown nblk nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout
-    #fQ #fK #fV #fmask #eQ #eK #eV #emask;
+    #fQ #fK #fV #fmask #eQ #eK #eV #emask
+    (fun _bid -> flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+    (fun _bid -> flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+    (fun _bid -> flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid);
   kpre = (fun sh bid tid ->
     flash_thread_pre nw nthr
       b hq hkv group sq rows tiles sk d
@@ -175,6 +178,9 @@ let sdpa_flash_kd
       #(fV /. (SZ.v nblk) /. (SZ.v nthr))
       #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
       #eQ #eK #eV #emask
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
       (bid <: natlt
         (SZ.v b * SZ.v hkv * SZ.v tiles))
       (tid / BW.warp_size) (tid % BW.warp_size));

@@ -635,7 +635,9 @@ fn flash_block_setup
 ghost
 fn flash_block_teardown
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab |} {| scalar et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nblk : szp)
   (nw nthr : szp {
     SZ.v nthr == block_threads nw })
@@ -665,6 +667,9 @@ fn flash_block_teardown
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : (natlt (SZ.v nblk)) -> chest2 et_acc (SZ.v nw) 16)
+  (eO : (natlt (SZ.v nblk)) -> chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : (natlt (SZ.v nblk)) -> chest1 et_acc 16)
   (sh : c_shmems (flash_shmems et_ab et_acc nw d))
   (bid : natlt (SZ.v nblk))
   ()
@@ -679,6 +684,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         (tid / BW.warp_size) (tid % BW.warp_size)) **
@@ -702,6 +708,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         (tid / BW.warp_size) (tid % BW.warp_size));
@@ -715,6 +722,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         w lane);
@@ -728,6 +736,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         w lane)
@@ -755,7 +764,8 @@ fn flash_block_teardown
         (flash_warp_s v w) (flash_warp_p v w)
         (flash_warp_pv v w) (flash_warp_cw v w) lane **
       when_ (w = 0)
-        (out_store_cells b hq sq 16sz d rows gout
+        (out_store_cells_v nw b hq sq 16sz d rows gout
+          (escale bid) (eO bid) (egl bid)
           (flash_bid_bi
             (SZ.v b) (SZ.v hkv) (SZ.v tiles)
             (bid <: natlt
@@ -781,6 +791,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         w lane;
@@ -842,7 +853,8 @@ fn flash_block_teardown
     (fun (w : natlt (SZ.v nw))
       (lane : natlt BW.warp_size) ->
       when_ (w = 0)
-        (out_store_cells b hq sq 16sz d rows gout
+        (out_store_cells_v nw b hq sq 16sz d rows gout
+          (escale bid) (eO bid) (egl bid)
           (flash_bid_bi
             (SZ.v b) (SZ.v hkv) (SZ.v tiles)
             (bid <: natlt
@@ -978,8 +990,14 @@ fn flash_block_teardown
   flash_gather_tensor v.shglv (block_threads nw);
 
   flash_gather_jt nw d v;
-  flash_output_remove_warps nw
+  flash_output_remove_warps_v nw
     b hq hkv group sq rows tiles d gout
+    (escale bid) (eO bid) (egl bid)
+    (bid <: natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles));
+  flash_forget_block_output_v nw
+    b hq hkv group sq rows tiles d gout
+    (escale bid) (eO bid) (egl bid)
     (bid <: natlt
       (SZ.v b * SZ.v hkv * SZ.v tiles));
   flash_gather_gm nw v.shgmv;

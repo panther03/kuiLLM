@@ -1416,42 +1416,27 @@ fn flash_output_to_pre
         bi kvh group r0 (SZ.v ls)));
 }
 
+(* Turn a warp-0 [if_] over machine indices back into the [when_] over
+   erased indices the thread postcondition is stated with. *)
 ghost
-fn flash_output_from_post
-  (#et : Type0)
-  (b hq sq rows d : szp)
-  (#lout : layout4 b hq sq d)
-  (gout : array4 et lout)
-  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
-  (r0 : nat)
+fn flash_if_when_reindex
+  (p : natlt BW.warp_size -> slprop)
   (w : nat) (lane : natlt BW.warp_size)
   (ws : sz) (ls : szlt BW.warp_size)
   requires
     pure (SZ.v ws == w /\ SZ.v ls == lane) **
-    if_ (ws = 0sz)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 (SZ.v ls))
+    if_ (ws = 0sz) (p (SZ.v ls))
   ensures
-    when_ (w = 0)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 lane)
+    when_ (w = 0) (p lane)
 {
   rewrite
-    (if_ (ws = 0sz)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 (SZ.v ls)))
-    as
-    (when_ (SZ.v ws = 0)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 (SZ.v ls)));
+    (if_ (ws = 0sz) (p (SZ.v ls)))
+  as
+    (when_ (SZ.v ws = 0) (p (SZ.v ls)));
   rewrite
-    (when_ (SZ.v ws = 0)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 (SZ.v ls)))
-    as
-    (when_ (w = 0)
-      (out_store_cells b hq sq 16sz d rows gout
-        bi kvh group r0 lane));
+    (when_ (SZ.v ws = 0) (p (SZ.v ls)))
+  as
+    (when_ (w = 0) (p lane));
 }
 
 ghost

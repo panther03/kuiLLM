@@ -2054,6 +2054,92 @@ fn flash_output_remove_warps
 }
 
 ghost
+fn flash_output_remove_warps_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  requires
+    forall+ (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size).
+      when_ (w = 0)
+        (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+          lane)
+  ensures flash_block_output_v nw
+    b hq hkv group sq rows tiles d gout escale eO egl bid
+
+  {
+  forevery_flatten
+    (fun (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size) ->
+      when_ (w = 0)
+        (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+          lane));
+  forevery_refine_pred
+    (fun (wl : natlt (SZ.v nw) & natlt BW.warp_size) ->
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+        (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (SZ.v group)
+        (flash_bid_rt
+          (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+        wl._2)
+    (fun (wl : natlt (SZ.v nw) & natlt BW.warp_size) ->
+      wl._1 = 0);
+  forevery_iso (flash_w0_bij nw)
+    (fun wl ->
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+        (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (SZ.v group)
+        (flash_bid_rt
+          (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+        wl._2);
+  forevery_map
+    (fun lane ->
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+        (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (SZ.v group)
+        (flash_bid_rt
+          (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+        ((flash_w0_bij nw).gg lane)._2)
+    (fun lane ->
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+        (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (SZ.v group)
+        (flash_bid_rt
+          (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+        lane)
+    fn lane {
+      rewrite each ((flash_w0_bij nw).gg lane)._2 as lane;
+    };
+  fold (flash_block_output_v nw
+    b hq hkv group sq rows tiles d gout escale eO egl bid);
+}
+
+ghost
 fn flash_gather_gm
   (#et : Type0)
   (nw : szp)
@@ -2227,4 +2313,108 @@ fn flash_gather_thread_rotensor
           (f /. (SZ.v nw * BW.warp_size)) e);
     };
   TRO.tensor_gather_n a (SZ.v nw * BW.warp_size) #f;
+}
+
+(* Drop the pinned output values, recovering plain cell ownership. *)
+ghost
+fn flash_forget_out_store_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw b hq sq bm d rows : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (egl : chest1 et_acc (SZ.v bm))
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r0 : nat) (lane : natlt BW.warp_size)
+  requires out_store_cells_v nw b hq sq bm d rows gout escale eO egl
+    bi kvh group r0 lane
+  ensures out_store_cells b hq sq bm d rows gout bi kvh group r0 lane
+
+{
+  unfold (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
+    bi kvh group r0 lane);
+  forevery_map
+    #(out_stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size lane)
+    (fun ij -> when_ (r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))))
+    (fun ij -> when_ (r0 + ij._1 < SZ.v rows)
+      (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2))
+    fn ij {
+      let bb : bool = (r0 + ij._1 < SZ.v rows);
+      if bb {
+        flash_when_elim_true (r0 + ij._1 < SZ.v rows)
+          (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+            (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)));
+        unfold (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+          (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)));
+        fold (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2);
+        flash_when_intro_true (r0 + ij._1 < SZ.v rows)
+          (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2);
+      } else {
+        assert pure ((r0 + ij._1 < SZ.v rows) == false);
+        flash_when_elim_false (r0 + ij._1 < SZ.v rows)
+          (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+            (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)));
+        flash_when_intro_false (r0 + ij._1 < SZ.v rows)
+          (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2);
+      }
+    };
+  fold (out_store_cells b hq sq bm d rows gout bi kvh group r0 lane);
+}
+
+(* Drop the pinned output values from a whole block's output family. *)
+ghost
+fn flash_forget_block_output_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  requires
+    flash_block_output_v nw b hq hkv group sq rows tiles d gout
+      escale eO egl bid
+  ensures
+    flash_block_output b hq hkv group sq rows tiles d gout bid
+
+{
+  unfold (flash_block_output_v nw b hq hkv group sq rows tiles d gout
+    escale eO egl bid);
+  forevery_map
+    #(natlt BW.warp_size)
+    (fun lane -> out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+      (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (SZ.v group)
+      (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+      lane)
+    (fun lane -> out_store_cells b hq sq 16sz d rows gout
+      (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (SZ.v group)
+      (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+      lane)
+    fn lane {
+      flash_forget_out_store_v nw b hq sq 16sz d rows gout escale eO egl
+        (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+        (SZ.v group)
+        (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+        lane;
+    };
 }

@@ -145,5 +145,5 @@ fn sdpa_flash_o_store
     (out_store_cells b hq sq bm d rows gout
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
   ensures if_ (w = 0sz)
-    (out_store_cells b hq sq bm d rows gout
+    (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))

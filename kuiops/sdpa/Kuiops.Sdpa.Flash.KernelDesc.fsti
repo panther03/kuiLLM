@@ -25,6 +25,7 @@ module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
+module FC = Kuiper.Float.Casts
 
 
 
@@ -165,7 +166,9 @@ fn flash_block_setup
 ghost
 fn flash_block_teardown
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab |} {| scalar et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nblk : szp)
   (nw nthr : szp {
     SZ.v nthr == block_threads nw })
@@ -195,6 +198,9 @@ fn flash_block_teardown
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : (natlt (SZ.v nblk)) -> chest2 et_acc (SZ.v nw) 16)
+  (eO : (natlt (SZ.v nblk)) -> chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : (natlt (SZ.v nblk)) -> chest1 et_acc 16)
   (sh : c_shmems (flash_shmems et_ab et_acc nw d))
   (bid : natlt (SZ.v nblk))
   ()
@@ -209,6 +215,7 @@ fn flash_block_teardown
         #(fV /. (SZ.v nblk) /. (SZ.v nthr))
         #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
         #eQ #eK #eV #emask
+        (escale bid) (eO bid) (egl bid)
         (bid <: natlt
           (SZ.v b * SZ.v hkv * SZ.v tiles))
         (tid / BW.warp_size) (tid % BW.warp_size)) **

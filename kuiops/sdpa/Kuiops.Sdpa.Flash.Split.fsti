@@ -27,6 +27,7 @@ module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 module Trade = Pulse.Lib.Trade
 
 
@@ -385,6 +386,37 @@ fn flash_output_remove_warps
     b hq hkv group sq rows tiles d gout bid
 
 ghost
+fn flash_output_remove_warps_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  requires
+    forall+ (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size).
+      when_ (w = 0)
+        (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (SZ.v group)
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+          lane)
+  ensures flash_block_output_v nw
+    b hq hkv group sq rows tiles d gout escale eO egl bid
+
+ghost
 fn flash_gather_gm
   (#et : Type0)
   (nw : szp)
@@ -460,3 +492,47 @@ fn flash_gather_thread_rotensor
       (_lane : natlt BW.warp_size).
       a |-> Frac (f /. (SZ.v nthr)) e
   ensures a |-> Frac f e
+
+(* Drop the pinned output values, recovering plain cell ownership. *)
+ghost
+fn flash_forget_out_store_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw b hq sq bm d rows : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (egl : chest1 et_acc (SZ.v bm))
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r0 : nat) (lane : natlt BW.warp_size)
+  requires out_store_cells_v nw b hq sq bm d rows gout escale eO egl
+    bi kvh group r0 lane
+  ensures out_store_cells b hq sq bm d rows gout bi kvh group r0 lane
+
+(* Drop the pinned output values from a whole block's output family. *)
+ghost
+fn flash_forget_block_output_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  requires
+    flash_block_output_v nw b hq hkv group sq rows tiles d gout
+      escale eO egl bid
+  ensures
+    flash_block_output b hq hkv group sq rows tiles d gout bid
