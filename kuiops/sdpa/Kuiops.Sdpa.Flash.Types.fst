@@ -332,6 +332,19 @@ let combine_cells
   ** cell_full_n shgm (SZ.v (clamp_lt bm lane))
   ** cell_full_n shgl (SZ.v (clamp_lt bm lane))
 
+(* [combine_cells] with the values warp 0 computes made explicit. *)
+let combine_cells_v
+  (#et : Type0) (nw bm : szp)
+  (#lgm #lgl : layout1 bm)
+  (shscale : array2 et (l2_row_major nw bm))
+  (shgm : array1 et lgm) (shgl : array1 et lgl)
+  (lane : szlt warp_size)
+  (escale : chest2 et (SZ.v nw) 1) (vgm vgl : et) : slprop
+= tensor_pts_to
+    (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v (clamp_lt bm lane))) escale
+  ** cell_full_n_v shgm (SZ.v (clamp_lt bm lane)) vgm
+  ** cell_full_n_v shgl (SZ.v (clamp_lt bm lane)) vgl
+
 let out_qh
   (hq sq : pos) (kvh : nat) (group : pos) (r : nat) : natlt hq
 = clamp_nat_lt hq (kvh * group + r / sq)

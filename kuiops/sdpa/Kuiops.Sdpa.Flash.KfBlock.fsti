@@ -105,7 +105,11 @@ fn sdpa_flash_combine_partials
       (combine_cells nw bm shscale shgm shgl lane)
   ensures
     if_ (combine_active bm w lane)
-      (combine_cells nw bm shscale shgm shgl lane)
+      (combine_cells_v nw bm shscale shgm shgl lane
+        (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+        (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+        (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+           (SZ.v (clamp_lt bm lane)) (SZ.v nw)))
 
 inline_for_extraction noextract
 fn sdpa_flash_o_store

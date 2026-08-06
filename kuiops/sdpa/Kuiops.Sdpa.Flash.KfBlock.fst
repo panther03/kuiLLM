@@ -416,17 +416,20 @@ fn sdpa_flash_combine_partials_active
     ** cell_full_n shgm (SZ.v lane)
     ** cell_full_n shgl (SZ.v lane)
   ensures
-    (exists* (e : chest2 et (SZ.v nw) 1).
-       tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e)
-    ** cell_full_n shgm (SZ.v lane)
-    ** cell_full_n shgl (SZ.v lane)
+    tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane))
+      (SF.gscale_col eM (SZ.v lane))
+    ** cell_full_n_v shgm (SZ.v lane) (SF.gmax eM (SZ.v lane) (SZ.v nw))
+    ** cell_full_n_v shgl (SZ.v lane)
+         (SF.gsum eM eL (SF.gmax eM (SZ.v lane) (SZ.v nw)) (SZ.v lane) (SZ.v nw))
 {
   let mut gm : et = neg infinity;
   let mut ww : sz = 0sz;
   while (!ww <^ nw)
     invariant
-      live gm ** live ww **
+      live ww **
       (shM |-> Frac fM eM) ** (shL |-> Frac fL eL) **
+      (exists* (n : nat { n <= SZ.v nw }).
+         (gm |-> SF.gmax eM (SZ.v lane) n) ** pure (n == SZ.v !ww)) **
       (exists* (e : chest2 et (SZ.v nw) 1).
          tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e) **
       cell_full_n shgm (SZ.v lane) **
@@ -441,14 +444,21 @@ fn sdpa_flash_combine_partials_active
     ww := !ww +^ 1sz;
   };
 
-  let mut gl : et = zero;
+  let gmv = !gm;
+  let zer : et = zero;
+  let mut gl : et = zer;
+  rewrite (gl |-> zer) as (gl |-> SF.gsum eM eL gmv (SZ.v lane) 0);
   ww := 0sz;
   while (!ww <^ nw)
     invariant
-      live gm ** live gl ** live ww **
+      live gm ** live ww **
       (shM |-> Frac fM eM) ** (shL |-> Frac fL eL) **
-      (exists* (e : chest2 et (SZ.v nw) 1).
-         tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e) **
+      (exists* (n : nat { n <= SZ.v nw }) (e : chest2 et (SZ.v nw) 1).
+         (gl |-> SF.gsum eM eL gmv (SZ.v lane) n) **
+         tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e **
+         pure (n == SZ.v !ww /\
+               (forall (w : natlt (SZ.v nw)). w < n ==>
+                  acc2 e w 0 == SF.gscale eM gmv w (SZ.v lane)))) **
       cell_full_n shgm (SZ.v lane) **
       cell_full_n shgl (SZ.v lane) **
       pure (SZ.v !ww <= SZ.v nw)
@@ -456,31 +466,46 @@ fn sdpa_flash_combine_partials_active
   {
     let vww = !ww;
     let iw : szlt nw = vww;
+    with n0 e0. assert (
+      (gl |-> SF.gsum eM eL gmv (SZ.v lane) n0) **
+      tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e0);
     let mv = tensor_read shM (cidx2 iw lane);
     let lv = tensor_read shL (cidx2 iw lane);
-    let sc = fexp (mv `sub` !gm);
+    let sc = fexp (mv `sub` gmv);
     (* TODO(line 223): clamp [sc] to zero when not finite once Kuiper has an
        extractable [isfinite].  The current [kind] test is ghost-only. *)
     tensor_write #_ #_ #_ #_ #(flash_scale_ctlayout nw bm lane)
       (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane))
       (cidx2 iw 0sz) sc;
-    gl := !gl `add` (sc `mul` lv);
+    with e1. assert (
+      tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) e1);
+    let cur = !gl;
+    gl := cur `add` (sc `mul` lv);
+    rewrite (gl |-> (cur `add` (sc `mul` lv)))
+         as (gl |-> SF.gsum eM eL gmv (SZ.v lane) (n0 + 1));
+    assert pure (forall (w : natlt (SZ.v nw)). w < n0 + 1 ==>
+      acc2 e1 w 0 == SF.gscale eM gmv w (SZ.v lane));
     ww := !ww +^ 1sz;
   };
+
+  with escale. assert (
+    tensor_pts_to (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v lane)) escale);
+  SF.gscale_col_ext eM (SZ.v lane) escale;
 
   unfold (cell_full_n shgm (SZ.v lane));
   with oldgm. assert (tensor_pts_to_cell shgm (idx1 (SZ.v lane)) oldgm);
   rewrite (tensor_pts_to_cell shgm (idx1 (SZ.v lane)) oldgm)
        as (tensor_pts_to_cell shgm (up (cidx1 lane)) oldgm);
-  tensor_write_cell shgm (cidx1 lane) !gm;
-  fold (cell_full_n shgm (SZ.v lane));
+  tensor_write_cell shgm (cidx1 lane) gmv;
+  fold (cell_full_n_v shgm (SZ.v lane) gmv);
 
   unfold (cell_full_n shgl (SZ.v lane));
   with oldgl. assert (tensor_pts_to_cell shgl (idx1 (SZ.v lane)) oldgl);
   rewrite (tensor_pts_to_cell shgl (idx1 (SZ.v lane)) oldgl)
        as (tensor_pts_to_cell shgl (up (cidx1 lane)) oldgl);
-  tensor_write_cell shgl (cidx1 lane) !gl;
-  fold (cell_full_n shgl (SZ.v lane));
+  let glv = !gl;
+  tensor_write_cell shgl (cidx1 lane) glv;
+  fold (cell_full_n_v shgl (SZ.v lane) glv);
 }
 
 inline_for_extraction noextract
@@ -501,7 +526,11 @@ fn sdpa_flash_combine_partials
       (combine_cells nw bm shscale shgm shgl lane)
   ensures
     if_ (combine_active bm w lane)
-      (combine_cells nw bm shscale shgm shgl lane)
+      (combine_cells_v nw bm shscale shgm shgl lane
+        (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+        (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+        (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+           (SZ.v (clamp_lt bm lane)) (SZ.v nw)))
 {
   let active = combine_active bm w lane;
   if active {
@@ -509,11 +538,23 @@ fn sdpa_flash_combine_partials
     unfold (combine_cells nw bm shscale shgm shgl lane);
     sdpa_flash_combine_partials_active nw bm shM shL shscale shgm shgl
       (clamp_lt bm lane);
-    fold (combine_cells nw bm shscale shgm shgl lane);
-    if_intro_true (combine_cells nw bm shscale shgm shgl lane);
+    fold (combine_cells_v nw bm shscale shgm shgl lane
+      (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+      (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+      (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+         (SZ.v (clamp_lt bm lane)) (SZ.v nw)));
+    if_intro_true (combine_cells_v nw bm shscale shgm shgl lane
+      (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+      (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+      (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+         (SZ.v (clamp_lt bm lane)) (SZ.v nw)));
   } else {
     if_elim_false (combine_cells nw bm shscale shgm shgl lane);
-    if_intro_false (combine_cells nw bm shscale shgm shgl lane);
+    if_intro_false (combine_cells_v nw bm shscale shgm shgl lane
+      (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+      (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+      (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+         (SZ.v (clamp_lt bm lane)) (SZ.v nw)));
   }
 }
 

@@ -642,3 +642,53 @@ let tile_row_eq
                    erow e1 i == erow e2 i)
 = assert (equal (ematrix_subtile e1 1 c i 0) (ematrix_subtile e2 1 c i 0));
   assert (equal (erow e1 i) (erow e2 i))
+
+(* ---------------------------------------------------------------------- *)
+(* Cross-warp combine.                                                     *)
+(*                                                                         *)
+(* Each warp published a partial maximum and denominator for every row of  *)
+(* the query tile.  Warp 0 folds them into a block-wide maximum, rescales  *)
+(* each warp's denominator to that maximum, and sums the result.           *)
+(* ---------------------------------------------------------------------- *)
+
+(* Block-wide maximum for row [i] after folding the first [n] warps.  The
+   kernel seeds the fold with [neg infinity], which is safe here because it is
+   only ever compared, never exponentiated. *)
+let rec gmax
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM : chest2 et nw bm) (i : natlt bm) (n : nat { n <= nw })
+  : GTot et (decreases n)
+= if n = 0 then neg infinity
+  else fmax (gmax eM i (n - 1)) (acc2 eM (n - 1) i)
+
+(* The factor that rescales warp [w]'s partial state for row [i] from its own
+   maximum to the block-wide one [gm]. *)
+let gscale
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM : chest2 et nw bm) (gm : et) (w : natlt nw) (i : natlt bm) : GTot et
+= fexp (acc2 eM w i `sub` gm)
+
+(* Block-wide denominator for row [i] after folding the first [n] warps. *)
+let rec gsum
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM eL : chest2 et nw bm) (gm : et) (i : natlt bm) (n : nat { n <= nw })
+  : GTot et (decreases n)
+= if n = 0 then zero
+  else add (gsum eM eL gm i (n - 1))
+           (mul (gscale eM gm (n - 1) i) (acc2 eL (n - 1) i))
+
+(* The [nw x 1] column of rescaling factors the combine writes for row [i]. *)
+let gscale_col
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM : chest2 et nw bm) (i : natlt bm) : GTot (chest2 et nw 1)
+= mk2 (fun w _ -> gscale eM (gmax eM i nw) w i)
+
+#push-options "--fuel 1 --ifuel 2"
+let gscale_col_ext
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM : chest2 et nw bm) (i : natlt bm) (e : chest2 et nw 1)
+  : Lemma
+      (requires forall (w : natlt nw). acc2 e w 0 == gscale eM (gmax eM i nw) w i)
+      (ensures e == gscale_col eM i)
+= assert (equal e (gscale_col eM i))
+#pop-options

@@ -210,6 +210,21 @@ fn block_o_tile_reindex
         e)
 
 ghost
+fn flash_combine_forget_v
+  (#et : Type0)
+  (nw : szp)
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shgm shgl : array1 et (l1_forward 16))
+  (w : szlt nw) (lane : szlt warp_size)
+  (escale : chest2 et (SZ.v nw) 1) (vgm vgl : et)
+  requires
+    if_ (combine_active 16sz w lane)
+      (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl)
+  ensures
+    if_ (combine_active 16sz w lane)
+      (combine_cells nw 16sz shscale shgm shgl lane)
+
+ghost
 fn flash_combine_to_b2_keep_gm
   (#et : Type0)
   (nw : szp)

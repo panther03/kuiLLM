@@ -473,6 +473,8 @@ fn sdpa_flash_kf
 
   sdpa_flash_combine_partials nw 16sz
     shM shL shscale shgm shgl (tid /^ 32sz) (tid %^ 32sz);
+  flash_combine_forget_v nw shscale shgm shgl
+    (tid /^ 32sz) (tid %^ 32sz) _ _ _;
 
   flash_combine_to_b2_keep_gm nw shscale shgm shgl
     (tid /^ 32sz) (tid %^ 32sz);

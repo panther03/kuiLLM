@@ -524,6 +524,38 @@ fn block_o_tile_reindex
 }
 
 ghost
+fn flash_combine_forget_v
+  (#et : Type0)
+  (nw : szp)
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shgm shgl : array1 et (l1_forward 16))
+  (w : szlt nw) (lane : szlt warp_size)
+  (escale : chest2 et (SZ.v nw) 1) (vgm vgl : et)
+  requires
+    if_ (combine_active 16sz w lane)
+      (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl)
+  ensures
+    if_ (combine_active 16sz w lane)
+      (combine_cells nw 16sz shscale shgm shgl lane)
+
+{
+  let active = combine_active 16sz w lane;
+  if active {
+    if_elim_true (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
+    unfold (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
+    fold (combine_cells nw 16sz shscale shgm shgl lane);
+    assert pure (combine_active 16sz w lane);
+    if_intro_true' (combine_active 16sz w lane)
+      (combine_cells nw 16sz shscale shgm shgl lane);
+  } else {
+    if_elim_false (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
+    assert pure (combine_active 16sz w lane == false);
+    if_intro_false' (combine_active 16sz w lane)
+      (combine_cells nw 16sz shscale shgm shgl lane);
+  }
+}
+
+ghost
 fn flash_combine_to_b2_keep_gm
   (#et : Type0)
   (nw : szp)
