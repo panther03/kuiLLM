@@ -592,3 +592,22 @@ let tsum_n_ext (#n : nat) (x y : natlt n -> GTot real) (p q : pred n) (m' : real
           (ensures tsum_n x y p m' == tsum_n x y q m')
   = sum_where_ext (fun j -> exp (x j -. m') *. y j)
                   (fun j -> exp (x j -. m') *. y j) p q
+
+(* The spec's output cell as the ratio of the two flash accumulators, with the
+   denominator in the form the kernel's registers approximate. *)
+let masked_out_cell
+  (#sk #dv #rows : pos)
+  (valid : FS.valid_pred sk)
+  (scores : chest1 real sk)
+  (probs : chest2 real rows sk)
+  (mV : chest2 real sk dv)
+  (i : natlt rows) (c : natlt dv)
+  : Lemma (requires forall (j : natlt sk).
+                      acc2 probs i j == acc1 (FS.masked_softmax_real valid scores) j)
+          (ensures dsum (acc1 scores) valid >. 0.0R /\
+                   MS.matmul_single probs mV i c
+                   == nsum (acc1 scores) (fun (j : natlt sk) -> acc2 mV j c) valid
+                      /. dsum (acc1 scores) valid)
+  = dsum_pos (acc1 scores) valid (valid_witness valid);
+    masked_matmul_cell valid scores probs mV i c;
+    dsum_is_masked_denom valid scores

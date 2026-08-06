@@ -1068,3 +1068,41 @@ let mlo_combine
            SO.lem_tsum_n x y (punion pw nw) gmr;
            SO.dsum_ext x p' (punion pw nw);
            SO.nsum_ext x y p' (punion pw nw))
+
+(* ------------------------------------------------------------------ *)
+(* The epilogue: normalising the block accumulators.                   *)
+(* ------------------------------------------------------------------ *)
+
+let one_approx (#et : Type0) {| floating et |} {| real_like et |} ()
+  : Lemma ((one #et) %~ 1.0R)
+  = a1 #et
+
+(* Dividing the block numerator by the block denominator cancels the
+   block-wide maximum and leaves the plain softmax-weighted average.  The
+   denominator being a strictly positive float is a hypothesis: nothing in the
+   [floating] laws relates the order on floats to the reals they approximate,
+   so an underflowed denominator is exactly as far out of scope as an
+   overflowed score. *)
+let gstate_out
+  (#et : Type0) {| floating et |} {| real_like et |} {| floating_real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p : SO.pred n)
+  (gm gl go : et) (j0 : natlt n)
+  : Lemma (requires gstate x y p gm gl go /\ p j0)
+          (ensures SO.dsum x p >. 0.0R /\
+                   (go `mul` (one `div` gl))
+                   %~ (SO.nsum x y p /. SO.dsum x p))
+  = pnone_witness p j0;
+    SO.dsum_pos x p j0;
+    FStar.Classical.exists_elim
+      ((go `mul` (one `div` gl)) %~ (SO.nsum x y p /. SO.dsum x p))
+      #real
+      #(fun gmr -> gm %~ gmr /\ gl %~ (SO.dsum x p /. exp gmr) /\
+                   go %~ (SO.nsum x y p /. exp gmr))
+      ()
+      (fun gmr ->
+         SO.dsum_pos x p j0;
+         one_approx #et ();
+         div_approx one gl 1.0R (SO.dsum x p /. exp gmr);
+         a_mul go (one `div` gl) (SO.nsum x y p /. exp gmr)
+           (1.0R /. (SO.dsum x p /. exp gmr));
+         SO.div_cancel (SO.nsum x y p) (SO.dsum x p) (exp gmr))

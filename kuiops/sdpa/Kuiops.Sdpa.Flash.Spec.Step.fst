@@ -2773,3 +2773,92 @@ let block_gstate
       (lane_val eVg c) pw m l o sc (row_keys row_active causal sk cbound)
 
 #pop-options
+
+(* ------------------------------------------------------------------ *)
+(* The epilogue: the stored cell as a real softmax-weighted average.    *)
+(* ------------------------------------------------------------------ *)
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+let block_out_cell
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (i : natlt 16) (c : natlt d)
+  (nw : pos) (nkt : nat)
+  (escale : chest2 et_acc nw 16) (eO : chest2 et_acc (nw * 16) d)
+  (egl : chest1 et_acc 16) (j0 : natlt sk)
+  : Lemma
+      (requires
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i
+          row_active qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        (forall (w : natlt nw).
+           cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1
+             #b #hq #sq #sk #d #sq16
+             emask has_mask row_active causal bi qh qpos cbound scale
+             eQ eKg i nw w (SF.warp_iters nw nkt w)) /\
+        (forall (w : natlt nw).
+           acc2 escale w i
+           == SF.gscale (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                           #b #hq #sq #sk #d #sq16
+                           emask has_mask causal bi kvh group rows r0 scale
+                           eQ eKg nw nkt)
+                (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                            #b #hq #sq #sk #d #sq16
+                            emask has_mask causal bi kvh group rows r0 scale
+                            eQ eKg nw nkt) i nw) w i) /\
+        (forall (w : natlt nw).
+           ocomb_val eO i c w
+           == acc2 (block_O #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask causal bi kvh group rows r0 scale
+                      eQ eKg eVg nw nkt w) i c) /\
+        acc1 egl i
+        == SF.gsum (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask causal bi kvh group rows r0 scale
+                      eQ eKg nw nkt)
+             (block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                #b #hq #sq #sk #d #sq16
+                emask has_mask causal bi kvh group rows r0 scale
+                eQ eKg nw nkt)
+             (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                         #b #hq #sq #sk #d #sq16
+                         emask has_mask causal bi kvh group rows r0 scale
+                         eQ eKg nw nkt) i nw) i nw /\
+        SF.key_ok row_active causal sk cbound j0 /\
+        acc1 egl i `gt` zero)
+      (ensures
+        (let x = lane_real emask has_mask bi qh qpos scale eQ eKg i in
+         let p = row_keys row_active causal sk cbound in
+         SO.dsum x p >. 0.0R /\
+         SF.out_val escale eO egl i c
+         %~ (SO.nsum x (lane_val eVg c) p /. SO.dsum x p)))
+  = block_gstate #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos kvh group rows r0 cbound
+      scale eQ eKg eVg i c nw nkt escale eO;
+    SB.gstate_out (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+      (lane_val eVg c) (row_keys row_active causal sk cbound)
+      (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                  #b #hq #sq #sk #d #sq16
+                  emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw nkt) i nw)
+      (acc1 egl i)
+      (SF.ocomb escale eO i c nw)
+      j0
+
+#pop-options
