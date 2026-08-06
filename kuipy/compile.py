@@ -261,6 +261,15 @@ def _build_kernel(module, ext_name,
     from torch.utils.cpp_extension import load
     build_dir = C.KUIPY_JIT_BUILD / ext_name
     build_dir.mkdir(parents=True, exist_ok=True)
+    # torch's cpp_extension guards the build directory with a file baton that it
+    # polls forever and never times out. A process killed mid-build leaves the
+    # baton behind and every later build of that kernel then hangs indefinitely.
+    # The per-extension FileLock above already excludes concurrent kuipy
+    # builders, so any baton still here is orphaned.
+    baton = build_dir / "lock"
+    if baton.exists():
+        C.log(f"removing stale build baton {baton}")
+        baton.unlink(missing_ok=True)
     C.log(f"building {ext_name} -> {build_dir}")
     with P.stage("cpp-extension-load", ext_name):
         mod = load(
