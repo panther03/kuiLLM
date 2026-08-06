@@ -370,6 +370,27 @@ let all_finite
         (SF.tile_scores emask has_mask row_active causal bi qh qpos
            k0 cbound scale (tile_score_row #et_ab #et_acc eQ eKg k0 i))
 
+(* The additive bias one lane sees, as a real.  With no mask it is exactly
+   [0.0R], matching the spec: the kernel biases by the float [zero], and
+   [zero] approximates [0.0R] by [a0]. *)
+let lane_bias
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask : bool) (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  : GTot (chest1 real sk)
+  = mk1 (fun j -> if has_mask then to_real (acc4 emask bi qh qpos j) else 0.0R)
+
+let lane_bias_ok
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (#b #hq #sq : nat) (#sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask : bool) (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  : Lemma (forall (j : natlt sk).
+             SF.mask_bias emask has_mask bi qh qpos j
+             %~ acc1 (lane_bias emask has_mask bi qh qpos) j)
+  = a0 #et_ab
+
 (* The real problem one lane solves, read off the shared tiles. *)
 let lane_real
   (#et_ab #et_acc : Type0)
@@ -382,7 +403,7 @@ let lane_real
   (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
   : GTot (natlt sk -> GTot real)
   = real_row (to_real_chest eQ) (to_real_chest eKg)
-      (mk1 (fun j -> to_real (SF.mask_bias emask has_mask bi qh qpos j)))
+      (lane_bias emask has_mask bi qh qpos)
       (to_real scale) i
 
 (* The loop invariant of one warp's key-tile loop. *)
@@ -433,10 +454,8 @@ let ml_step_loop
           eQ eKg i nw w (vjt + nw) m' l')
   = let k0 = vjt * 16 in
     let p = absorbed_pred row_active causal sk cbound nw w vjt in
-    let rbias : chest1 real sk =
-      mk1 (fun j -> to_real (SF.mask_bias emask has_mask bi qh qpos j)) in
-    assert (forall (j : natlt sk). acc1 rbias j
-              == to_real (SF.mask_bias emask has_mask bi qh qpos j));
+    let rbias : chest1 real sk = lane_bias emask has_mask bi qh qpos in
+    lane_bias_ok emask has_mask bi qh qpos;
     introduce forall (j : natlt sk). p j ==> j < k0
     with introduce _ ==> _
     with _. absorbed_lt row_active causal sk cbound nw w vjt j;
@@ -2194,10 +2213,8 @@ let mlo_step_loop
           eQ eKg eVg i c nw w (vjt + nw) m' l' o')
   = let k0 = vjt * 16 in
     let p = absorbed_pred row_active causal sk cbound nw w vjt in
-    let rbias : chest1 real sk =
-      mk1 (fun j -> to_real (SF.mask_bias emask has_mask bi qh qpos j)) in
-    assert (forall (j : natlt sk). acc1 rbias j
-              == to_real (SF.mask_bias emask has_mask bi qh qpos j));
+    let rbias : chest1 real sk = lane_bias emask has_mask bi qh qpos in
+    lane_bias_ok emask has_mask bi qh qpos;
     introduce forall (j : natlt sk). p j ==> j < k0
     with introduce _ ==> _
     with _. absorbed_lt row_active causal sk cbound nw w vjt j;
