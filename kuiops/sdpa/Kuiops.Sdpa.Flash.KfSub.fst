@@ -386,7 +386,7 @@ fn sdpa_flash_mask_bias
 inline_for_extraction noextract
 fn sdpa_flash_softmax_upd
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc, floating et_acc, real_like et_acc |}
+  {| floating et_acc, real_like et_acc |}
   {| scalar et_ab, real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}   (* mask read  (line 163): bf16 -> f32 *)
   {| FC.float_cast et_acc et_ab |}   (* prob write (line 181): f32  -> bf16 *)
@@ -492,6 +492,8 @@ fn sdpa_flash_softmax_upd
     let sv = tensor_read shS (cidx1 jj);
     let p : et_acc = SF.sel_prob sv mnew;
     shP.(cidx1 jj) <- FC.fcast p;
+    assert pure (SF.row_sum esf mnew (SZ.v vj + 1)
+                   == (SF.row_sum esf mnew (SZ.v vj)) `add` p);
     rowsum := !rowsum `add` p;
     j := !j +^ 1sz;
   };
@@ -1699,7 +1701,7 @@ fn cell_reindex (#et:Type0) (#l:layout1 16) (shA : array1 et l) (i j : natlt BW.
 inline_for_extraction noextract
 fn sdpa_flash_softmax_active
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -1812,7 +1814,7 @@ fn sdpa_flash_softmax_active
 inline_for_extraction noextract
 fn sdpa_flash_softmax_maybe
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -1882,7 +1884,7 @@ fn sdpa_flash_softmax_maybe
 inline_for_extraction noextract
 fn sdpa_flash_jt_body
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}

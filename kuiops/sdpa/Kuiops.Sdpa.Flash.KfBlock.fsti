@@ -34,7 +34,7 @@ inline_for_extraction noextract
 fn sdpa_flash_q_load
   (#et_ab #et_acc : Type0)
   {| scalar et_ab |}
-  {| scalar et_acc |} {| floating et_acc |}
+  {| floating et_acc |}
   (bm d nthr : szp)
   (b hq sq : szp)
   (#lgQ : layout4 b hq sq d) {| ctlayout lgQ |}
@@ -76,7 +76,7 @@ fn sdpa_flash_causal_mask
 
 inline_for_extraction noextract
 fn sdpa_flash_combine_partials
-  (#et : Type0) {| scalar et |} {| floating et |}
+  (#et : Type0) {| floating et |}
   (nw bm : szp)
   (#lgm #lgl : layout1 bm) {| ctlayout lgm |} {| ctlayout lgl |}
   (shM shL shscale : array2 et (l2_row_major nw bm))
@@ -97,7 +97,7 @@ fn sdpa_flash_combine_partials
 inline_for_extraction noextract
 fn sdpa_flash_o_store
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_acc et_ab |}
   (nw bm d rows b hq sq : szp)

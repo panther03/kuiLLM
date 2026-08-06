@@ -429,3 +429,69 @@ let flash_row_out
     dsum_is_masked_denom valid scores;
     flash_quotient (acc1 scores) (fun (j : natlt sk) -> acc2 mV j c) valid m l o
                    (valid_witness valid)
+
+(* ------------------------------------------------------------------ *)
+(* Restricting a global masked sum to one contiguous key tile.         *)
+(* ------------------------------------------------------------------ *)
+
+(* Extending the range of a masked sum past the support of [p] is a no-op. *)
+let rec sum_upto_stop (#n : nat) (f : natlt n -> GTot real) (p : pred n)
+                      (k : natle n) (k' : natle n)
+  : Lemma (requires k <= k' /\ (forall (j : natlt n). k <= j /\ j < k' ==> ~(p j)))
+          (ensures sum_upto f p k' == sum_upto f p k)
+          (decreases k')
+  = if k' = k then () else sum_upto_stop f p k (k' - 1)
+
+(* A masked sum supported on the tile [[k0, k0 + bn)] is the tile-local fold. *)
+let rec sum_upto_tile
+  (#n : nat) (f : natlt n -> GTot real) (p : pred n)
+  (#bn : nat) (g : natlt bn -> GTot real) (q : pred bn)
+  (k0 : nat { k0 + bn <= n }) (k : natle bn)
+  : Lemma (requires (forall (j : natlt n). j < k0 ==> ~(p j)) /\
+                    (forall (i : natlt bn).
+                       q i == p (k0 + i) /\ (q i ==> g i == f (k0 + i))))
+          (ensures sum_upto f p (k0 + k) == sum_upto g q k)
+          (decreases k)
+  = if k = 0 then sum_upto_false f p k0 else sum_upto_tile f p g q k0 (k - 1)
+
+let sum_where_tile
+  (#n : nat) (f : natlt n -> GTot real) (p : pred n)
+  (#bn : nat) (g : natlt bn -> GTot real) (q : pred bn)
+  (k0 : nat { k0 + bn <= n })
+  : Lemma (requires (forall (j : natlt n).
+                       p j ==> (k0 <= j /\ j < k0 + bn)) /\
+                    (forall (i : natlt bn).
+                       q i == p (k0 + i) /\ (q i ==> g i == f (k0 + i))))
+          (ensures sum_where f p == sum_upto g q bn)
+  = sum_upto_tile f p g q k0 bn;
+    sum_upto_stop f p (k0 + bn) n
+
+(* ------------------------------------------------------------------ *)
+(* The denominator half of the invariant, on its own.                  *)
+(* ------------------------------------------------------------------ *)
+
+(* The kernel updates [l] in the softmax pass and [o] in the P@V pass, so the
+   two halves of [flash_inv] are established at different program points. *)
+let dinv (#n : nat) (x : natlt n -> GTot real) (p : pred n) (m l : real) : GTot prop
+  = l == dsum x p /. exp m
+
+let dstep (#n : nat) (x : natlt n -> GTot real) (p t p' : pred n) (m m' l : real)
+  : Lemma (requires disjoint p t /\
+                    (forall (j : natlt n). p' j == (p j || t j)) /\
+                    dinv x p m l)
+          (ensures dinv x p' m' (rescale l m m' +. tsum_d x t m'))
+  = lem_rescale l m m' (dsum x p);
+    lem_tsum_d x t m';
+    dsum_split x p t;
+    dsum_ext x p' (por p t)
+
+let dcombine (#n : nat) (x : natlt n -> GTot real) (p1 p2 p' : pred n)
+             (m1 m2 gm l1 l2 : real)
+  : Lemma (requires disjoint p1 p2 /\
+                    (forall (j : natlt n). p' j == (p1 j || p2 j)) /\
+                    dinv x p1 m1 l1 /\ dinv x p2 m2 l2)
+          (ensures dinv x p' gm (rescale l1 m1 gm +. rescale l2 m2 gm))
+  = lem_rescale l1 m1 gm (dsum x p1);
+    lem_rescale l2 m2 gm (dsum x p2);
+    dsum_split x p1 p2;
+    dsum_ext x p' (por p1 p2)

@@ -29,7 +29,7 @@ module FC = Kuiper.Float.Casts
 inline_for_extraction noextract
 fn sdpa_flash_block_prologue
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab |} {| scalar et_acc |} {| floating et_acc |}
+  {| scalar et_ab |} {| floating et_acc |}
   (nw nthr d : szp { SZ.v nthr == block_threads nw })
   (b hq sq rows : szp)
   (#lgQ : layout4 b hq sq d)

@@ -25,7 +25,7 @@ let clamp_nat (n : pos) (x : nat) : natlt n = if x < n then x else 0
    maps to the literal zero, never to [exp (-inf - m)].  See the header of
    kuipy/unverified/flash_attn_fa1.cu. *)
 inline_for_extraction noextract
-let sel_prob (#et : Type0) {| scalar et |} {| floating et |} (sv mnew : et) : et =
+let sel_prob (#et : Type0) {| floating et |} (sv mnew : et) : et =
   if eq sv (neg infinity) then zero else fexp (sv `sub` mnew)
 
 (* Whether key [kj] contributes to query row [qpos]: the row must exist, the
@@ -37,7 +37,7 @@ let key_ok (row_active causal : bool) (sk cbound kj : nat) : bool =
 inline_for_extraction noextract
 let score_upd
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   (scale sc : et_acc) (mv : et_ab) (ok : bool)
@@ -61,7 +61,7 @@ let mask_bias
 
 (* [fmax] folded left from [-inf] over the first [k] scores. *)
 let rec row_max
-  (#et : Type0) {| scalar et |} {| floating et |} (#bn : nat)
+  (#et : Type0) {| floating et |} (#bn : nat)
   (s : chest1 et bn) (k : nat { k <= bn })
   : GTot et (decreases k)
   = if k = 0 then neg infinity
@@ -69,14 +69,14 @@ let rec row_max
 
 (* The select-to-zero probabilities summed left from [zero]. *)
 let rec row_sum
-  (#et : Type0) {| scalar et |} {| floating et |} (#bn : nat)
+  (#et : Type0) {| floating et |} (#bn : nat)
   (s : chest1 et bn) (mnew : et) (k : nat { k <= bn })
   : GTot et (decreases k)
   = if k = 0 then zero
     else (row_sum s mnew (k - 1)) `add` (sel_prob (acc1 s (k - 1)) mnew)
 
 let rec row_max_ext
-  (#et : Type0) {| scalar et |} {| floating et |} (#bn : nat)
+  (#et : Type0) {| floating et |} (#bn : nat)
   (s1 s2 : chest1 et bn) (k : nat { k <= bn })
   : Lemma (requires forall (t : natlt bn). t < k ==> acc1 s1 t == acc1 s2 t)
           (ensures row_max s1 k == row_max s2 k)
@@ -84,7 +84,7 @@ let rec row_max_ext
   = if k = 0 then () else row_max_ext s1 s2 (k - 1)
 
 let rec row_sum_ext
-  (#et : Type0) {| scalar et |} {| floating et |} (#bn : nat)
+  (#et : Type0) {| floating et |} (#bn : nat)
   (s1 s2 : chest1 et bn) (mnew : et) (k : nat { k <= bn })
   : Lemma (requires forall (t : natlt bn). t < k ==> acc1 s1 t == acc1 s2 t)
           (ensures row_sum s1 mnew k == row_sum s2 mnew k)
@@ -99,7 +99,7 @@ let rec row_sum_ext
    [es] holds the raw Q@K^T dot products. *)
 let scores_post
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
@@ -121,7 +121,7 @@ let scores_post
    max / denominator / correction registers. *)
 let softmax_upd_post
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
   (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
