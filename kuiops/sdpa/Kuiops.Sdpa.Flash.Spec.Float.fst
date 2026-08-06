@@ -138,3 +138,12 @@ let softmax_upd_post
     cw' == fexp (vm `sub` m') /\
     (forall (j : natlt bn). acc1 ep' j == FC.fcast (sel_prob (acc1 es' j) m')) /\
     l' == (vl `mul` cw') `add` (row_sum es' m' bn)
+
+(* The [bn x d] slice of a [sk x d] key/value matrix starting at key [k0], with
+   out-of-range rows clamped to row 0 (the kernel's bounds clamp; those rows are
+   masked out of the softmax and never contribute). *)
+let kv_tile
+  (#et : Type0) (#sk : pos) (#d : nat) (bn : nat)
+  (e : chest2 et sk d) (k0 : nat)
+  : chest2 et bn d
+  = mk2 fun r c -> acc2 e (clamp_nat sk (k0 + r)) c

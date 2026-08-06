@@ -130,13 +130,18 @@ fn sdpa_flash_kf
   with eQsh. assert (
     shQ |-> Frac (1.0R /. (SZ.v nthr)) eQsh);
 
-  assert (jt_rest #et_ab #et_acc d sk b hq sq
+  let vm0 = when__pin_cell16 (row shM (SZ.v (tid /^ 32sz)))
+              (SZ.v (tid %^ 32sz)) (zero #et_acc);
+  let vl0 = when__pin_cell16 (row shL (SZ.v (tid /^ 32sz)))
+              (SZ.v (tid %^ 32sz)) (zero #et_acc);
+  assert (jt_rest_v #et_ab #et_acc d sk b hq sq
     shK shV shS shP
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
     shQ shPVc shcw
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
+    (reveal vm0) (reveal vl0)
     (SZ.v (tid %^ 32sz)));
 
   let w = sdpa_flash_w nw nthr tid;
@@ -163,14 +168,15 @@ fn sdpa_flash_kf
         B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
         B.barrier_state 1 **
         (gQ |-> Frac fQ eQ) **
-        jt_rest #et_ab #et_acc d sk b hq sq
-          shK shV shS shP
-          (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
-          shQ shPVc shcw
-          (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
-          gK gV gmask
-          #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-          (SZ.v (tid %^ 32sz)) **
+        (exists* (vm vl : et_acc).
+          jt_rest_v #et_ab #et_acc d sk b hq sq
+            shK shV shS shP
+            (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
+            shQ shPVc shcw
+            (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
+            gK gV gmask
+            #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
+            vm vl (SZ.v (tid %^ 32sz))) **
         if_ (combine_active 16sz (tid /^ 32sz) (tid %^ 32sz))
           (combine_cells nw 16sz shscale shgm shgl (tid %^ 32sz)) **
         if_ (tid /^ 32sz = 0sz)
@@ -184,6 +190,14 @@ fn sdpa_flash_kf
     assert pure (SZ.v vjt <= SZ.v sk / 16);
     let k0 = vjt *^ 16sz;
     assert pure (SZ.fits (SZ.v k0 + 16));
+    with vmc vlc. assert (jt_rest_v #et_ab #et_acc d sk b hq sq
+      shK shV shS shP
+      (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
+      shQ shPVc shcw
+      (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
+      gK gV gmask
+      #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
+      vmc vlc (SZ.v (tid %^ 32sz)));
     sdpa_flash_jt_body d sk b hq sq
       #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
       #_ #_ #_ #_ #_ #_ #_ #_
@@ -206,7 +220,8 @@ fn sdpa_flash_kf
       (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
       shQ shPVc shcw
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
-      gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale;
+      gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale
+      vmc vlc;
     assert pure (SZ.fits (SZ.v !jt + SZ.v nw));
     let next = !jt +^ nw;
     assert pure (SZ.v next == SZ.v !jt + SZ.v nw);
@@ -219,14 +234,24 @@ fn sdpa_flash_kf
     iter := !iter +^ 1sz;
   };
 
-  unfold jt_rest #et_ab #et_acc d sk b hq sq
+  with vmf vlf. assert (jt_rest_v #et_ab #et_acc d sk b hq sq
     shK shV shS shP
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
     shQ shPVc shcw
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    (SZ.v (tid %^ 32sz));
+    vmf vlf (SZ.v (tid %^ 32sz)));
+  unfold jt_rest_v #et_ab #et_acc d sk b hq sq
+    shK shV shS shP
+    (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
+    shQ shPVc shcw
+    (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
+    gK gV gmask
+    #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
+    vmf vlf (SZ.v (tid %^ 32sz));
+  when__forget_cell16 (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) vmf;
+  when__forget_cell16 (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) vlf;
   assert pure (thread_w nw (SZ.v tid) == SZ.v (tid /^ 32sz));
   assert pure (thread_lane nw (SZ.v tid) == SZ.v (tid %^ 32sz));
   block_row_cell_reindex shM

@@ -12,6 +12,8 @@ open Kuiper.Tensor.Tiling
 open Kuiper.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
+open Kuiper.EMatrix
+open Kuiper.EMatrix.Tiling
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
@@ -19,7 +21,66 @@ module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
+module BM = Kuiops.Common.BlockMatmul
 open Kuiper.TensorRO { vtlayout_of_tlayout }
+
+(* The score row lane [i] sees for the key tile at [k0]: row [i] of the
+   tensor-core accumulation of [Q @ (K-tile)^T] over the [d/16] chunks of the
+   head dimension. *)
+unfold
+let jt_score_row
+  (#et_ab #et_acc : Type0) {| floating et_acc |} {| scalar et_ab |}
+  (#sk : pos) (d : nat) (#_ : squash (16 /?+ d))
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (k0 : nat) (i : natlt 16)
+  : chest1 et_acc 16
+= subtile_row (ematrix_subtile
+     (BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16))
+     1 16 i 0)
+
+unfold
+let jt_rest_v
+  (#et_ab #et_acc : Type0)
+  (d sk : szp) (b hq sq : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (#lgK #lgV : layout2 (SZ.v sk) (SZ.v d))
+  (#lgmask : TRO.vlayout4 b hq sq sk)
+  (#lcw #lm #ll : layout1 16)
+  (#lK #lV : layout2 16 (SZ.v d))
+  (#lS #lP #lPVc : layout2 16 16)
+  (#lO : layout2 16 (SZ.v d))
+  (shK : array2 et_ab lK)
+  (shV : array2 et_ab lV)
+  (shS : array2 et_acc lS)
+  (shP : array2 et_ab lP)
+  (shO : array2 et_acc lO)
+  (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (shPVc : array2 et_acc lPVc)
+  (shcw : array1 et_acc lcw)
+  (shm : array1 et_acc lm)
+  (shl : array1 et_acc ll)
+  (gK : array2 et_ab lgK) (gV : array2 et_ab lgV) (gmask : TRO.roarray4 et_ab lgmask)
+  (#fQ #fKg #fVg #fmask : perm)
+  (#eQ : chest2 et_ab 16 (SZ.v d))
+  (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (vm vl : et_acc)
+  (i : natlt BW.warp_size) : slprop
+= (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ** (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
+  ** when__ (i < 16) (fun _ -> row_subtile shP i)
+  ** when__ (i < 16) (fun _ -> cell_full shcw i)
+  ** when__ (i < 16) (fun _ -> cell_full_v shm i vm)
+  ** when__ (i < 16) (fun _ -> cell_full_v shl i vl)
+  ** (exists* (e:chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
+     array2_stride_subtile shO warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R e)
+  ** (shQ |-> Frac fQ eQ)
+  ** (exists* (e:chest2 et_acc 16 16). shPVc |-> Frac (1.0R /. BW.warp_size) e)
+  ** (gK |-> Frac fKg eKg) ** (gV |-> Frac fVg eVg) ** (gmask |-> Frac fmask emask)
 
 unfold
 let jt_rest
@@ -49,21 +110,9 @@ let jt_rest
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (i : natlt BW.warp_size) : slprop
-= (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
-     array2_stride_subtile shK warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
-  ** (exists* (r:chest2 et_ab (16 / warp_row_span) (SZ.v d / 16)).
-     array2_stride_subtile shV warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
-  ** (exists* (e:chest2 et_acc 16 16). shS |-> Frac (1.0R /. BW.warp_size) e)
-  ** when__ (i < 16) (fun _ -> row_subtile shP i)
-  ** when__ (i < 16) (fun _ -> cell_full shcw i)
-  ** when__ (i < 16) (fun _ -> cell_full shm i)
-  ** when__ (i < 16) (fun _ -> cell_full shl i)
-  ** (exists* (e:chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
-     array2_stride_subtile shO warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R e)
-  ** (shQ |-> Frac fQ eQ)
-  ** (exists* (e:chest2 et_acc 16 16). shPVc |-> Frac (1.0R /. BW.warp_size) e)
-  ** (gK |-> Frac fKg eKg) ** (gV |-> Frac fVg eVg) ** (gmask |-> Frac fmask emask)
-
+= exists* (vm vl : et_acc).
+    jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl i
 
 inline_for_extraction noextract
 fn sdpa_flash_jt_body
@@ -116,14 +165,22 @@ fn sdpa_flash_jt_body
   (#eKg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (vm vl : Ghost.erased et_acc)
   preserves thread_id (SZ.v nthr) tid
   requires pure (SZ.v lane == SZ.v tid % BW.warp_size)
   requires
-    jt_rest #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask (SZ.v lane)
+    jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl (SZ.v lane)
   ensures
-    jt_rest #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
-      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask (SZ.v lane)
+    exists* (m' l' : et_acc).
+    jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
+      gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask m' l' (SZ.v lane)
+    ** pure (SZ.v lane < 16 ==>
+              (exists (sr' : chest1 et_acc 16) (pr' : chest1 et_ab 16) (cw' : et_acc).
+                 SF.softmax_upd_post emask has_mask row_active causal
+                   (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+                   (jt_score_row (SZ.v d) eQ eKg (SZ.v k0) (SZ.v lane))
+                   vm vl sr' pr' m' l' cw'))
 
 ghost
 fn stride_reindex
@@ -178,6 +235,19 @@ ghost
 fn when__intro_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
   requires emp
   ensures when__ b q
+
+ghost
+fn when__pin_cell16 (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (lane : natlt BW.warp_size) (dflt : et)
+  requires when__ (lane < 16) (fun _ -> cell_full shA lane)
+  returns v : Ghost.erased et
+  ensures  when__ (lane < 16) (fun _ -> cell_full_v shA lane (reveal v))
+
+ghost
+fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (lane : natlt BW.warp_size) (v : et)
+  requires when__ (lane < 16) (fun _ -> cell_full_v shA lane v)
+  ensures  when__ (lane < 16) (fun _ -> cell_full shA lane)
 
 ghost
 fn when_elim_true (b:bool{b == true}) (q : slprop)
