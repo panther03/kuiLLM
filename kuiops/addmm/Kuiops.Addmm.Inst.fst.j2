@@ -9,6 +9,7 @@ module {{ module }}
 
 open Kuiper
 open Kuiops.Matmuls
+open Kuiops.GEMM.T.TensorCore2D
 
 module MS = Kuiper.Spec.GEMM
 
@@ -33,6 +34,14 @@ let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
 // materialised (rows x cols) copy, and the epilogue addresses it by column only.
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
     tc2d_to_bcast_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
+        (MS.rlincomb (to_real alpha) (to_real beta))
+        rows shared cols
+{% elif backend == "tc2d_tn_bcast" %}
+// As tc2d_to_bcast, but B is column-major, so no `B.contiguous()` copy.
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
+    tc2d_tn_bcast_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))

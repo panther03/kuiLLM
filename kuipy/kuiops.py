@@ -357,6 +357,8 @@ class ElementwiseImpl(_Family):
 #            Same spec, but B is COLUMN-major with leading dimension K, so the
 #            `B.contiguous()` copy the other backends force is not needed.
 #            Divisibility lands on k/bk instead of n/bn.
+# The `_bcast` variants of tc2d_to and tc2d_tn read C through a broadcast
+# layout: it is a length-N row vector rather than an (M, N) matrix.
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
@@ -384,7 +386,11 @@ _TC_ACC_DTYPES = {
 _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
 _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
-                "tc2d_to_bcast": "Tc2DToBcast", "bt2d": "Bt2D"}
+                "tc2d_to_bcast": "Tc2DToBcast",
+                "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D"}
+
+# Backends taking B column-major (K, N) with leading dimension K.
+_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast")
 
 
 def _tc_device_supported(dtype, device):
@@ -504,7 +510,7 @@ def _tiles(backend, dtype, batch, M, N, K):
     if backend == "bt2d":
         candidates = _bt2d_tiles(dtype, M, N, K)
     else:
-        candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend == "tc2d_tn"))
+        candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend in _TN_BACKENDS))
     return [
         tile for tile in candidates
         if batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
@@ -591,6 +597,18 @@ def _b_is_column_major(B, K, N):
         return True  # FakeTensor: undecidable here, re-checked at run time
 
 
+def _tn_filtered(backends, B, K, N):
+    """Drop the transposed-B backends unless B is exactly what they accept."""
+    if _b_is_column_major(B, K, N):
+        return tuple(backends)
+    return tuple(b for b in backends if b not in _TN_BACKENDS)
+
+
+def _tn_out_ok(backend, N, out_dtype):
+    """The TN kernels need `chunk et_cd` to divide the output row length."""
+    return backend not in _TN_BACKENDS or N % (16 // out_dtype.itemsize) == 0
+
+
 def _gemm_fst_ctx(spec, name):
     return dict(
         module=spec["module"], name=name, backend=spec["backend"],
@@ -638,15 +656,12 @@ class MmImpl(_MatmulFamily):
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
-        backends = tuple(
-            b for b in self.backends
-            if b != "tc2d_tn" or _b_is_column_major(B, K, N)
-        )
+        backends = _tn_filtered(self.backends, B, K, N)
         plans = self._plans(kwargs, A.dtype, A.device, backends)
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
             for backend, acc_dtype, out_dtype in plans
-            if backend != "tc2d_tn" or N % (16 // out_dtype.itemsize) == 0
+            if _tn_out_ok(backend, N, out_dtype)
             for tile in _tiles(backend, A.dtype, 1, M, N, K)
         ]
         return self._select(args, kwargs, specs)
@@ -708,7 +723,7 @@ class AddmmImpl(_MatmulFamily):
 
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    backends = ("tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d")
+    backends = ("tc2d_tn_bcast", "tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.addmm.default"
 
     @staticmethod
@@ -735,14 +750,16 @@ class AddmmImpl(_MatmulFamily):
         if K != K2:
             return None
         cshape = tuple(int(x) for x in Cin.shape)
+        bcast = ("tc2d_tn_bcast", "tc2d_to_bcast")
         if cshape == (M, N):
-            backends = tuple(b for b in self.backends if b != "tc2d_to_bcast")
+            backends = tuple(b for b in self.backends if b not in bcast)
         elif cshape in ((N,), (1, N)):
-            # A row bias. Only the broadcast-layout epilogue can read it; every
+            # A row bias. Only the broadcast-layout epilogues can read it; every
             # other backend needs C to have a cell per output element.
-            backends = ("tc2d_to_bcast",)
+            backends = bcast
         else:
             return None
+        backends = _tn_filtered(backends, B, K, N)
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
@@ -752,7 +769,7 @@ class AddmmImpl(_MatmulFamily):
             for backend, acc_dtype, out_dtype
             in self._plans(kwargs, A.dtype, A.device, backends)
             # C is the output buffer, so it already has to be the output type.
-            if Cin.dtype == out_dtype
+            if Cin.dtype == out_dtype and _tn_out_ok(backend, N, out_dtype)
             for tile in _tiles(backend, A.dtype, 1, M, N, K)
         ]
         return self._select(args, kwargs, specs)

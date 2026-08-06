@@ -14,8 +14,20 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
+{% if backend == "tc2d_tn_bcast" %}
+    // B is already column-major with leading dimension K, which is exactly
+    // what the kernel wants, so there is NO `B.contiguous()` copy here.
+    // `supported()` checked both of these; re-check rather than trust the
+    // dispatcher, since they are preconditions of the verified kernel.
+    TORCH_CHECK(B.stride(0) == 1 && B.stride(1) == K,
+                "kuiops tc2d_tn_bcast: B must be column-major with ld == K");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0,
+                "kuiops tc2d_tn_bcast: B must be 16-byte aligned");
+    auto &Bc = B;
+{% else %}
     auto Bc = B.contiguous();
-{% if backend in ("tc2d_to", "tc2d_to_bcast") %}
+{% endif %}
+{% if backend in ("tc2d_to", "tc2d_to_bcast", "tc2d_tn_bcast") %}
     auto Cin = C.contiguous();
     auto Cout = torch::empty({M, N}, torch::TensorOptions().dtype({{out_scalar}}).device(C.device()));
 {% else %}
@@ -30,7 +42,7 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
         (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-{% if backend in ("tc2d_to", "tc2d_to_bcast") %}
+{% if backend in ("tc2d_to", "tc2d_to_bcast", "tc2d_tn_bcast") %}
         reinterpret_cast<{{cpp_out_et}}*>(Cin.data_ptr()),
 {% endif %}
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),
