@@ -507,3 +507,49 @@ let dcombine (#n : nat) (x : natlt n -> GTot real) (p1 p2 p' : pred n)
     lem_rescale l2 m2 gm (dsum x p2);
     dsum_split x p1 p2;
     dsum_ext x p' (por p1 p2)
+
+(* ------------------------------------------------------------------ *)
+(* The numerator half of the invariant, on its own.                    *)
+(* ------------------------------------------------------------------ *)
+
+let ninv (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m o : real) : GTot prop
+  = o == nsum x y p /. exp m
+
+let nstep (#n : nat) (x y : natlt n -> GTot real) (p t p' : pred n) (m m' o : real)
+  : Lemma (requires disjoint p t /\
+                    (forall (j : natlt n). p' j == (p j || t j)) /\
+                    ninv x y p m o)
+          (ensures ninv x y p' m' (rescale o m m' +. tsum_n x y t m'))
+  = lem_rescale o m m' (nsum x y p);
+    lem_tsum_n x y t m';
+    nsum_split x y p t;
+    nsum_ext x y p' (por p t)
+
+let ncombine (#n : nat) (x y : natlt n -> GTot real) (p1 p2 p' : pred n)
+             (m1 m2 gm o1 o2 : real)
+  : Lemma (requires disjoint p1 p2 /\
+                    (forall (j : natlt n). p' j == (p1 j || p2 j)) /\
+                    ninv x y p1 m1 o1 /\ ninv x y p2 m2 o2)
+          (ensures ninv x y p' gm (rescale o1 m1 gm +. rescale o2 m2 gm))
+  = lem_rescale o1 m1 gm (nsum x y p1);
+    lem_rescale o2 m2 gm (nsum x y p2);
+    nsum_split x y p1 p2;
+    nsum_ext x y p' (por p1 p2)
+
+(* ------------------------------------------------------------------ *)
+(* Dropping a mask that the summand already implements.                *)
+(* ------------------------------------------------------------------ *)
+
+(* The kernel's [P@V] matmul sums over every slot of the key tile; the slots it
+   rejects carry a literal zero probability, so the unmasked fold agrees with
+   the masked one. *)
+let rec sum_upto_drop (#n : nat) (f : natlt n -> GTot real) (p : pred n) (k : natle n)
+  : Lemma (requires forall (j : natlt n). ~(p j) ==> f j == 0.0R)
+          (ensures sum_upto f ptrue k == sum_upto f p k)
+          (decreases k)
+  = if k = 0 then () else sum_upto_drop f p (k - 1)
+
+let sum_where_drop (#n : nat) (f : natlt n -> GTot real) (p : pred n)
+  : Lemma (requires forall (j : natlt n). ~(p j) ==> f j == 0.0R)
+          (ensures sum_where f ptrue == sum_where f p)
+  = sum_upto_drop f p n

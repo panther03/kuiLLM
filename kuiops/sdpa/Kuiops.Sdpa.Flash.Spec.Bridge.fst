@@ -499,3 +499,302 @@ let ml_step
          #(natlt bn) #(fun i -> b2t (q i))
          ()
          (fun i -> step_b_i x p t p' q xt k0 es vm vl m' l' cw' i))
+
+(* ------------------------------------------------------------------ *)
+(* The numerator register.                                             *)
+(* ------------------------------------------------------------------ *)
+
+(* Every float approximates [to_real] of itself, so a factor's real value
+   exists even when the factor is the meaningless correction weight of an
+   empty state.  That is what lets the numerator's zero be an approximation:
+   unlike the denominator, the [P@V] accumulation is an opaque tensor-core
+   chain and cannot be shown to return the literal zero on an all-zero
+   probability tile. *)
+let mul_zero_approx
+  (#et : Type0) {| scalar et |} {| real_like et |} (x y : et)
+  : Lemma (requires x %~ 0.0R) (ensures (x `mul` y) %~ 0.0R)
+  = to_real_ok y;
+    a_mul x y 0.0R (to_real y)
+
+(* [m], [l] and [o] are one lane's running maximum, denominator and output
+   accumulator for one value column, after absorbing exactly the keys in [p].
+   The single witness [mr] is shared between [l] and [o], so dividing them
+   cancels it. *)
+let mlo_state
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p : SO.pred n) (m l o : et) : prop
+  = not_nan m /\
+    (if pnone p n
+     then (m == neg infinity /\ l == zero /\ o %~ 0.0R)
+     else (exists (mr : real).
+             m %~ mr /\ l %~ (SO.dsum x p /. exp mr) /\
+             o %~ (SO.nsum x y p /. exp mr)))
+
+let mlo_state_ml
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p : SO.pred n) (m l o : et)
+  : Lemma (requires mlo_state x y p m l o) (ensures ml_state x p m l)
+  = if pnone p n then ()
+    else FStar.Classical.exists_elim
+           (ml_state x p m l)
+           #real
+           #(fun mr -> m %~ mr /\ l %~ (SO.dsum x p /. exp mr) /\
+                       o %~ (SO.nsum x y p /. exp mr))
+           ()
+           (fun mr -> ())
+
+let mlo_state_ext
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p q : SO.pred n) (m l o : et)
+  : Lemma (requires mlo_state x y p m l o /\ (forall (j : natlt n). p j == q j))
+          (ensures mlo_state x y q m l o)
+  = pnone_ext p q;
+    SO.sum_where_ext (fun j -> exp (x j)) (fun j -> exp (x j)) p q;
+    SO.sum_where_ext (fun j -> exp (x j) *. y j) (fun j -> exp (x j) *. y j) p q
+
+(* The kernel's numerator update, alongside the softmax update of [step_pre]:
+   the accumulator is rescaled by the same correction weight and the tile's
+   [P@V] contribution [pv] is added. *)
+let o_step_pre
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (vo pv o' cw' : et) : prop
+  = o' == (vo `mul` cw') `add` pv
+
+(* What the tile's [P@V] contribution must satisfy: it approximates the shifted
+   numerator sum over the tile's admitted keys, at whatever real the new
+   maximum encodes.  A tile that admits nothing makes this say [pv %~ 0]. *)
+let pv_ok
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (t : SO.pred n) (m' pv : et) : prop
+  = forall (mr' : real). m' %~ mr' ==> pv %~ SO.tsum_n x y t mr'
+
+(* An empty tile contributes an approximate zero at every shift. *)
+let pv_ok_none
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (t : SO.pred n) (m' pv : et)
+  : Lemma (requires pv_ok x y t m' pv /\ (forall (j : natlt n). ~(t j)))
+          (ensures pv %~ 0.0R)
+  = to_real_ok m';
+    SO.sum_upto_false (fun j -> exp (x j) *. y j) t n;
+    assert (SO.nsum x y t == 0.0R);
+    SO.lem_tsum_n x y t (to_real m');
+    assert (pv %~ SO.tsum_n x y t (to_real m'))
+
+(* Numerator step, in the case where the lane has already absorbed a key. *)
+let o_step_absorbed
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (vm vo pv o' m' cw' : et) (mr mr' : real)
+  : Lemma (requires SO.disjoint p t /\
+                    (forall (j : natlt n). p' j == (p j || t j)) /\
+                    o_step_pre vo pv o' cw' /\
+                    cw' == fexp (vm `sub` m') /\
+                    vm %~ mr /\ m' %~ mr' /\
+                    vo %~ (SO.nsum x y p /. exp mr) /\
+                    pv %~ SO.tsum_n x y t mr')
+          (ensures o' %~ (SO.nsum x y p' /. exp mr'))
+  = sub_approx vm m' mr mr';
+    exp_approx (vm `sub` m') (mr -. mr');
+    a_mul vo cw' (SO.nsum x y p /. exp mr) (exp (mr -. mr'));
+    a_add (vo `mul` cw') pv
+          (SO.nsum x y p /. exp mr *. exp (mr -. mr'))
+          (SO.tsum_n x y t mr');
+    SO.nstep x y p t p' mr mr' (SO.nsum x y p /. exp mr)
+
+(* Numerator step, in the case where this tile absorbs the lane's first key.
+   The old accumulator approximates zero, which annihilates the meaningless
+   correction factor. *)
+let o_step_fresh
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (vo pv o' cw' : et) (mr' : real)
+  : Lemma (requires SO.disjoint p t /\
+                    (forall (j : natlt n). p' j == (p j || t j)) /\
+                    o_step_pre vo pv o' cw' /\
+                    pnone p n /\ vo %~ 0.0R /\
+                    pv %~ SO.tsum_n x y t mr')
+          (ensures o' %~ (SO.nsum x y p' /. exp mr'))
+  = mul_zero_approx vo cw';
+    pnone_spec p n;
+    SO.sum_upto_false (fun j -> exp (x j) *. y j) p n;
+    a_add (vo `mul` cw') pv 0.0R (SO.tsum_n x y t mr');
+    SO.nstep x y p t p' mr' mr' 0.0R
+
+(* Numerator step, in the case where nothing has been or is being absorbed. *)
+let o_step_none
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (vo pv o' cw' : et)
+  : Lemma (requires o_step_pre vo pv o' cw' /\ vo %~ 0.0R /\ pv %~ 0.0R)
+          (ensures o' %~ 0.0R)
+  = mul_zero_approx vo cw';
+    a_add (vo `mul` cw') pv 0.0R 0.0R
+
+(* ------------------------------------------------------------------ *)
+(* The numerator step, by the same four cases as [ml_step].            *)
+(* ------------------------------------------------------------------ *)
+
+(* Nothing absorbed yet, and this tile admits nothing either. *)
+let mlo_aa
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    pnone q bn /\ pnone p n /\
+                    vm == neg infinity /\ vl == zero /\ vo %~ 0.0R)
+          (ensures mlo_state x y p' m' l' o')
+  = step_aa x p t p' q xt k0 es vm vl m' l' cw';
+    tile_empty t q k0;
+    pnone_ext p' p;
+    pv_ok_none x y t m' pv;
+    o_step_none vo pv o' cw'
+
+(* Already absorbing, and this tile admits nothing. *)
+let mlo_ba
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et) (mr : real)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    pnone q bn /\ ~(pnone p n) /\
+                    vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
+                    vo %~ (SO.nsum x y p /. exp mr))
+          (ensures mlo_state x y p' m' l' o')
+  = step_ba x p t p' q xt k0 es vm vl m' l' cw' mr;
+    tile_empty t q k0;
+    pnone_ext p' p;
+    row_max_where_none es q bn;
+    row_max_masked es q bn;
+    fmax_ninf_r vm;
+    step_absorbed x p t p' q xt k0 es vm vl m' l' cw' mr mr;
+    o_step_absorbed x y p t p' vm vo pv o' m' cw' mr mr
+
+(* Nothing absorbed yet, and this tile admits at least one key. *)
+let mlo_ab
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et)
+  (i : natlt bn) (rR : real)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    pnone p n /\ vm == neg infinity /\ vl == zero /\
+                    vo %~ 0.0R /\ q i /\ row_max_where es q bn %~ rR)
+          (ensures mlo_state x y p' m' l' o')
+  = step_ab x p t p' q xt k0 es vm vl m' l' cw' i rR;
+    row_max_masked es q bn;
+    row_max_where_not_nan es q bn;
+    fmax_ninf_l (row_max_where es q bn);
+    pnone_witness p' (k0 + i);
+    step_fresh x p t p' q xt k0 es vm vl m' l' cw' rR;
+    o_step_fresh x y p t p' vo pv o' cw' rR
+
+(* Already absorbing, and this tile admits at least one key. *)
+let mlo_bb
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et)
+  (i : natlt bn) (mr rR : real)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    ~(pnone p n) /\ vm %~ mr /\
+                    vl %~ (SO.dsum x p /. exp mr) /\
+                    vo %~ (SO.nsum x y p /. exp mr) /\
+                    q i /\ row_max_where es q bn %~ rR)
+          (ensures mlo_state x y p' m' l' o')
+  = step_bb x p t p' q xt k0 es vm vl m' l' cw' i mr rR;
+    row_max_masked es q bn;
+    row_max_where_not_nan es q bn;
+    fmax_not_nan vm (row_max_where es q bn);
+    fmax_approx vm (row_max_where es q bn) mr rR;
+    pnone_witness p' (k0 + i);
+    step_absorbed x p t p' q xt k0 es vm vl m' l' cw' mr (rmax mr rR);
+    o_step_absorbed x y p t p' vm vo pv o' m' cw' mr (rmax mr rR)
+
+(* ------------------------------------------------------------------ *)
+(* The numerator step, packaged.                                       *)
+(* ------------------------------------------------------------------ *)
+
+let mlo_step_b_ir
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et)
+  (i : natlt bn) (rR : real)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    mlo_state x y p vm vl vo /\
+                    q i /\ row_max_where es q bn %~ rR)
+          (ensures mlo_state x y p' m' l' o')
+  = if pnone p n
+    then mlo_ab x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' i rR
+    else FStar.Classical.exists_elim
+           (mlo_state x y p' m' l' o')
+           #real
+           #(fun mr -> vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
+                       vo %~ (SO.nsum x y p /. exp mr))
+           ()
+           (fun mr ->
+              mlo_bb x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' i mr rR)
+
+let mlo_step_b_i
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et) (i : natlt bn)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    mlo_state x y p vm vl vo /\
+                    q i /\ (exists (r : real). row_max_where es q bn %~ r))
+          (ensures mlo_state x y p' m' l' o')
+  = FStar.Classical.exists_elim
+      (mlo_state x y p' m' l' o')
+      #real #(fun r -> row_max_where es q bn %~ r)
+      ()
+      (fun r ->
+         mlo_step_b_ir x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' i r)
+
+(* One lane absorbs one tile of keys, denominator and numerator together: the
+   float-level state moves from the key set [p] to [p'], the union of [p] with
+   the tile's admitted keys [t]. *)
+let mlo_step
+  (#et : Type0) {| floating et |} {| real_like et |}
+  {| floating_real_like et |}
+  (#n #bn : nat) (x y : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et)
+  : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
+                    mlo_state x y p vm vl vo)
+          (ensures mlo_state x y p' m' l' o')
+  = row_max_where_approx es q xt bn;
+    if pnone q bn
+    then
+      (if pnone p n
+       then mlo_aa x y p t p' q xt k0 es vm vl m' l' cw' vo pv o'
+       else FStar.Classical.exists_elim
+              (mlo_state x y p' m' l' o')
+              #real
+              #(fun mr -> vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
+                          vo %~ (SO.nsum x y p /. exp mr))
+              ()
+              (fun mr ->
+                 mlo_ba x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' mr))
+    else
+      (pnone_spec q bn;
+       FStar.Classical.exists_elim
+         (mlo_state x y p' m' l' o')
+         #(natlt bn) #(fun i -> b2t (q i))
+         ()
+         (fun i ->
+            mlo_step_b_i x y p t p' q xt k0 es vm vl m' l' cw' vo pv o' i))
