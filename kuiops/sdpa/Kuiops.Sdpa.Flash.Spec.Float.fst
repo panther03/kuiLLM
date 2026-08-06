@@ -139,6 +139,46 @@ let softmax_upd_post
     (forall (j : natlt bn). acc1 ep' j == FC.fcast (sel_prob (acc1 es' j) m')) /\
     l' == (vl `mul` cw') `add` (row_sum es' m' bn)
 
+(* The score row after masking and biasing, as a function.  [scores_post] says
+   exactly that the kernel wrote this row. *)
+let tile_scores
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat)
+  (scale : et_acc)
+  (es : chest1 et_acc bn)
+  : GTot (chest1 et_acc bn)
+  = mk1 (fun j ->
+      score_upd scale (acc1 es j)
+        (mask_bias emask has_mask bi qh qpos (clamp_nat sk (k0 + j)))
+        (key_ok row_active causal sk cbound (k0 + j)))
+
+let scores_post_det
+  (#et_acc #et_ab : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat)
+  (scale : et_acc)
+  (es es' : chest1 et_acc bn)
+  : Lemma (requires scores_post emask has_mask row_active causal bi qh qpos
+                      k0 cbound scale es es')
+          (ensures es' == tile_scores emask has_mask row_active causal bi qh qpos
+                            k0 cbound scale es)
+  = assert (equal es'
+              (tile_scores emask has_mask row_active causal bi qh qpos
+                 k0 cbound scale es))
+
 (* The [bn x d] slice of a [sk x d] key/value matrix starting at key [k0], with
    out-of-range rows clamped to row 0 (the kernel's bounds clamp; those rows are
    masked out of the softmax and never contribute). *)

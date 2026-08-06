@@ -442,29 +442,41 @@ let rec sum_upto_stop (#n : nat) (f : natlt n -> GTot real) (p : pred n)
           (decreases k')
   = if k' = k then () else sum_upto_stop f p k (k' - 1)
 
+(* Agreement between a global mask [p] and a tile-local mask [q] anchored at
+   [k0].  The tile may run past the end of the range -- the kernel's last key
+   tile does -- and those local slots simply admit nothing. *)
+let tile_agree
+  (#n : nat) (f : natlt n -> GTot real) (p : pred n)
+  (#bn : nat) (g : natlt bn -> GTot real) (q : pred bn) (k0 : nat)
+  : prop
+  = forall (i : natlt bn).
+      (k0 + i < n ==> q i == p (k0 + i)) /\
+      (k0 + i >= n ==> ~(q i)) /\
+      (q i ==> (k0 + i < n /\ g i == f (k0 + i)))
+
 (* A masked sum supported on the tile [[k0, k0 + bn)] is the tile-local fold. *)
 let rec sum_upto_tile
   (#n : nat) (f : natlt n -> GTot real) (p : pred n)
   (#bn : nat) (g : natlt bn -> GTot real) (q : pred bn)
-  (k0 : nat { k0 + bn <= n }) (k : natle bn)
+  (k0 : natle n) (k : natle bn)
   : Lemma (requires (forall (j : natlt n). j < k0 ==> ~(p j)) /\
-                    (forall (i : natlt bn).
-                       q i == p (k0 + i) /\ (q i ==> g i == f (k0 + i))))
-          (ensures sum_upto f p (k0 + k) == sum_upto g q k)
+                    tile_agree f p g q k0)
+          (ensures (if k0 + k <= n
+                    then sum_upto f p (k0 + k) == sum_upto g q k
+                    else sum_upto f p n == sum_upto g q k))
           (decreases k)
   = if k = 0 then sum_upto_false f p k0 else sum_upto_tile f p g q k0 (k - 1)
 
 let sum_where_tile
   (#n : nat) (f : natlt n -> GTot real) (p : pred n)
   (#bn : nat) (g : natlt bn -> GTot real) (q : pred bn)
-  (k0 : nat { k0 + bn <= n })
+  (k0 : natle n)
   : Lemma (requires (forall (j : natlt n).
                        p j ==> (k0 <= j /\ j < k0 + bn)) /\
-                    (forall (i : natlt bn).
-                       q i == p (k0 + i) /\ (q i ==> g i == f (k0 + i))))
+                    tile_agree f p g q k0)
           (ensures sum_where f p == sum_upto g q bn)
   = sum_upto_tile f p g q k0 bn;
-    sum_upto_stop f p (k0 + bn) n
+    if k0 + bn <= n then sum_upto_stop f p (k0 + bn) n else ()
 
 (* ------------------------------------------------------------------ *)
 (* The denominator half of the invariant, on its own.                  *)

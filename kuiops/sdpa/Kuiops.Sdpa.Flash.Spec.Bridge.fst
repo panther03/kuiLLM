@@ -270,13 +270,14 @@ let ml_state
 let step_pre
   (#et : Type0) {| floating et |} {| real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) : prop
   = SO.disjoint p t /\
     (forall (j : natlt n). p' j == (p j || t j)) /\
     (forall (j : natlt n). t j ==> (k0 <= j /\ j < k0 + bn)) /\
-    (forall (i : natlt bn). q i == t (k0 + i)) /\
-    (forall (i : natlt bn). xt i == x (k0 + i)) /\
+    (forall (i : natlt bn). k0 + i < n ==> q i == t (k0 + i)) /\
+    (forall (i : natlt bn). k0 + i >= n ==> ~(q i)) /\
+    (forall (i : natlt bn). q i ==> (k0 + i < n /\ xt i == x (k0 + i))) /\
     (forall (i : natlt bn). not_nan (acc1 es i)) /\
     (forall (i : natlt bn). ~(q i) ==> acc1 es i == neg infinity) /\
     (forall (i : natlt bn). q i ==>
@@ -288,9 +289,9 @@ let step_pre
 
 (* The tile predicate is empty exactly when the tile absorbs nothing. *)
 let tile_empty
-  (#n #bn : nat) (t : SO.pred n) (q : SO.pred bn) (k0 : nat { k0 + bn <= n })
+  (#n #bn : nat) (t : SO.pred n) (q : SO.pred bn) (k0 : natle n)
   : Lemma (requires (forall (j : natlt n). t j ==> (k0 <= j /\ j < k0 + bn)) /\
-                    (forall (i : natlt bn). q i == t (k0 + i)) /\
+                    (forall (i : natlt bn). k0 + i < n ==> q i == t (k0 + i)) /\
                     pnone q bn)
           (ensures forall (j : natlt n). ~(t j))
   = pnone_spec q bn;
@@ -303,7 +304,7 @@ let step_absorbed
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (mr mr' : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     vm %~ mr /\ m' %~ mr' /\ vl %~ (SO.dsum x p /. exp mr))
@@ -327,7 +328,7 @@ let step_fresh
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (mr' : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     pnone p n /\ vl == zero /\ m' %~ mr')
@@ -352,7 +353,7 @@ let step_fresh
 let step_aa
   (#et : Type0) {| floating et |} {| real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     pnone q bn /\ pnone p n /\
@@ -375,7 +376,7 @@ let step_ab
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (i : natlt bn) (rR : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     pnone p n /\ vm == neg infinity /\ vl == zero /\
@@ -392,7 +393,7 @@ let step_ba
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (mr : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     pnone q bn /\ ~(pnone p n) /\
@@ -410,7 +411,7 @@ let step_bb
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (i : natlt bn) (mr rR : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     ~(pnone p n) /\ vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
@@ -431,7 +432,7 @@ let step_b_ir
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (i : natlt bn) (rR : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     ml_state x p vm vl /\
@@ -449,7 +450,7 @@ let step_b_i
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (i : natlt bn)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     ml_state x p vm vl /\
@@ -467,7 +468,7 @@ let ml_step
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
   (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
-  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : nat { k0 + bn <= n })
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     ml_state x p vm vl)
