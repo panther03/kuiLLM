@@ -27,6 +27,7 @@ open Kuiops.Sdpa.Flash.Shmem
 module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
 module FC = Kuiper.Float.Casts
+module FSp = Kuiops.Sdpa.Flash.Split
 module Trade = Pulse.Lib.Trade
 module BW = Kuiper.Barrier.Warp
 
@@ -212,124 +213,6 @@ fn flash_setup
         gQ gK gV gmask gout #fQ #fK #fV #fmask
         #eQ #eK #eV #emask bid;
     };
-}
-
-ghost
-fn flash_teardown
-  (#et_ab : Type0)
-  (nblk : szp)
-  (b hq hkv group sq rows tiles sk d : szp {
-    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
-    SZ.v hq == SZ.v hkv * SZ.v group /\
-    SZ.v rows == SZ.v group * SZ.v sq /\
-    SZ.v rows <= SZ.v tiles * 16 /\
-    SZ.fits (SZ.v tiles * 16) })
-  (#lgQ : layout4 b hq sq d)
-  (#lgK #lgV : layout4 b hkv sk d)
-  (#lgmask : TRO.vlayout4 b hq sq sk)
-  (#lout : layout4 b hq sq d)
-  {| ctlayout lout |}
-  (gQ : array4 et_ab lgQ)
-  (gK : array4 et_ab lgK)
-  (gV : array4 et_ab lgV)
-  (gmask : TRO.roarray4 et_ab lgmask)
-  (gout : array4 et_ab lout)
-  (#fQ #fK #fV #fmask : perm)
-  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
-  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
-  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
-  ()
-  norewrite
-  requires
-    (forall+ (bid : natlt (SZ.v nblk)).
-      flash_block_state nblk b hq hkv group sq rows tiles sk d
-        gQ gK gV gmask gout #fQ #fK #fV #fmask
-        #eQ #eK #eV #emask bid) **
-    emp
-  ensures
-    (gQ |-> Frac fQ eQ) **
-    (gK |-> Frac fK eK) **
-    (gV |-> Frac fV eV) **
-    (gmask |-> Frac fmask emask) **
-    live gout
-{
-  assert pure (SZ.fits (tlayout_ulen lout));
-  forevery_map #(natlt (SZ.v nblk))
-    (fun bid ->
-      flash_block_state nblk b hq hkv group sq rows tiles sk d
-        gQ gK gV gmask gout #fQ #fK #fV #fmask
-        #eQ #eK #eV #emask bid)
-    (fun bid ->
-      (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
-      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
-      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
-      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)))
-    fn bid {
-      unfold flash_block_state nblk
-        b hq hkv group sq rows tiles sk d
-        gQ gK gV gmask gout #fQ #fK #fV #fmask
-        #eQ #eK #eV #emask bid;
-    };
-  forevery_unzip
-    (fun _ -> gQ |-> Frac (fQ /. (SZ.v nblk)) eQ)
-    (fun (bid : natlt (SZ.v nblk)) ->
-      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
-      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
-      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)));
-  forevery_unzip
-    (fun _ -> gK |-> Frac (fK /. (SZ.v nblk)) eK)
-    (fun (bid : natlt (SZ.v nblk)) ->
-      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
-      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)));
-  forevery_unzip
-    (fun _ -> gV |-> Frac (fV /. (SZ.v nblk)) eV)
-    (fun (bid : natlt (SZ.v nblk)) ->
-      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)));
-  forevery_unzip
-    (fun _ -> gmask |-> Frac (fmask /. (SZ.v nblk)) emask)
-    (fun (bid : natlt (SZ.v nblk)) ->
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)));
-  tensor_gather_n gQ (SZ.v nblk) #fQ;
-  tensor_gather_n gK (SZ.v nblk) #fK;
-  tensor_gather_n gV (SZ.v nblk) #fV;
-  TRO.tensor_gather_n gmask (SZ.v nblk) #fmask;
-  forevery_rw_size
-    (SZ.v nblk) (SZ.v b * SZ.v hkv * SZ.v tiles)
-    #(fun (bid : natlt (SZ.v nblk)) ->
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)));
-  forevery_map
-    (fun (bid : natlt
-      (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
-      flash_block_output b hq hkv group sq rows tiles d gout
-        (bid <: natlt
-          (SZ.v b * SZ.v hkv * SZ.v tiles)))
-    (fun bid ->
-      flash_block_output b hq hkv group sq rows tiles d gout bid)
-    fn bid {
-      rewrite
-        (flash_block_output b hq hkv group sq rows tiles d gout
-          (bid <: natlt
-            (SZ.v b * SZ.v hkv * SZ.v tiles)))
-        as
-        (flash_block_output b hq hkv group sq rows tiles d gout bid);
-    };
-  flash_gather_output b hq hkv group sq rows tiles d gout;
 }
 
 ghost
@@ -691,9 +574,10 @@ fn flash_block_teardown
     emp
   ensures
     live_c_shmems sh **
-    flash_block_state nblk b hq hkv group sq rows tiles sk d
+    flash_block_state_v nw nblk b hq hkv group sq rows tiles sk d
       gQ gK gV gmask gout #fQ #fK #fV #fmask
-      #eQ #eK #eV #emask bid
+      #eQ #eK #eV #emask
+      (escale bid) (eO bid) (egl bid) bid
 {
   let v = flash_views_of nw d sh;
   rewrite each (flash_views_of nw d sh) as v;
@@ -995,20 +879,16 @@ fn flash_block_teardown
     (escale bid) (eO bid) (egl bid)
     (bid <: natlt
       (SZ.v b * SZ.v hkv * SZ.v tiles));
-  flash_forget_block_output_v nw
-    b hq hkv group sq rows tiles d gout
-    (escale bid) (eO bid) (egl bid)
-    (bid <: natlt
-      (SZ.v b * SZ.v hkv * SZ.v tiles));
   flash_gather_gm nw v.shgmv;
 
   fold flash_views_live v;
   rewrite each v as (flash_views_of nw d sh);
   flash_close_shmems nw d sh;
-  fold flash_block_state nblk
+  fold flash_block_state_v nw nblk
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout #fQ #fK #fV #fmask
-    #eQ #eK #eV #emask bid;
+    #eQ #eK #eV #emask
+    (escale bid) (eO bid) (egl bid) bid;
 }
 
 ghost
@@ -1037,3 +917,171 @@ fn flash_b0_to_descriptor
   fold b0_raw nw d v.shQv v.shOv tid;
 }
 
+(* Valued grid teardown: reassembles the whole output tensor, with every
+   logical cell pinned to the value [flash_out_vfun] gives it. *)
+ghost
+fn flash_teardown_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nblk nw : szp)
+  (b hq hkv group sq rows tiles sk : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (d : szp { 16 /?+ SZ.v d })
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  {| ctlayout lout |}
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : TRO.roarray4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (has_mask causal : bool) (scale : et_acc)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  ()
+  norewrite
+  requires
+    (forall+ (bid : natlt (SZ.v nblk)).
+      flash_block_state_v nw nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        bid) **
+    emp
+  ensures
+    (gQ |-> Frac fQ eQ) **
+    (gK |-> Frac fK eK) **
+    (gV |-> Frac fV eV) **
+    (gmask |-> Frac fmask emask) **
+    (gout |-> Frac 1.0R
+      (FSp.flash_out_chest b hq hkv group sq rows d (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)))
+{
+  assert pure (SZ.fits (tlayout_ulen lout));
+  flash_out_vfun_all nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale;
+  forevery_map #(natlt (SZ.v nblk))
+    (fun bid ->
+      flash_block_state_v nw nblk b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        bid)
+    (fun bid ->
+      (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    fn bid {
+      unfold flash_block_state_v nw nblk
+        b hq hkv group sq rows tiles sk d
+        gQ gK gV gmask gout #fQ #fK #fV #fmask
+        #eQ #eK #eV #emask
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        bid;
+    };
+  forevery_unzip
+    (fun _ -> gQ |-> Frac (fQ /. (SZ.v nblk)) eQ)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gK |-> Frac (fK /. (SZ.v nblk)) eK)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gV |-> Frac (fV /. (SZ.v nblk)) eV)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_unzip
+    (fun _ -> gmask |-> Frac (fmask /. (SZ.v nblk)) emask)
+    (fun (bid : natlt (SZ.v nblk)) ->
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  tensor_gather_n gQ (SZ.v nblk) #fQ;
+  tensor_gather_n gK (SZ.v nblk) #fK;
+  tensor_gather_n gV (SZ.v nblk) #fV;
+  TRO.tensor_gather_n gmask (SZ.v nblk) #fmask;
+  forevery_rw_size
+    (SZ.v nblk) (SZ.v b * SZ.v hkv * SZ.v tiles)
+    #(fun (bid : natlt (SZ.v nblk)) ->
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)));
+  forevery_map
+    (fun (bid : natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (fun (bid : natlt
+      (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale bid)
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+        bid)
+    fn bid {
+      rewrite
+        (flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        as
+        (flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale bid)
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+        bid);
+    };
+  FSp.flash_gather_output_v nw b hq hkv group sq rows tiles d gout
+    (fun bid -> (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid))
+    (fun bid -> (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale bid))
+    (fun bid -> (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid))
+    (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale);
+}

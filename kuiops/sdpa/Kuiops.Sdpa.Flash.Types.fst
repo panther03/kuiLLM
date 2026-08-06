@@ -1767,3 +1767,133 @@ let from_tiles_row16 (#et : Type0) (e : chest2 et 16 16)
              (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc) == e)
   = assert (equal (ematrix_from_tiles 1 16
                      (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc)) e)
+
+(* The value the kernel leaves in the logical output cell [(bi, kvh, r, dd)]:
+   the epilogue of the row tile [r / 16] owned by block [(bi, kvh, r / 16)]. *)
+let flash_out_vfun
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+       natlt (SZ.v rows) & natlt (SZ.v d))
+  : GTot et_ab
+= FC.fcast (SF.out_val
+    (flash_escale_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (flash_eO_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eV))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (flash_egl_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (y._3 % 16) y._4)
+
+let flash_out_vfun_bid
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  (i : natlt 16) (dd : natlt (SZ.v d))
+  (_ : squash (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+               + i < SZ.v rows))
+  : Lemma
+      (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+         emask has_mask causal scale
+         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+          flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+          clamp_nat_lt (SZ.v rows)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+          dd)
+       == FC.fcast (SF.out_val
+            (flash_escale nw d b hq hkv group sq rows tiles sk
+               eQ eK emask has_mask causal scale bid)
+            (flash_eO nw d b hq hkv group sq rows tiles sk
+               eQ eK eV emask has_mask causal scale bid)
+            (flash_egl nw d b hq hkv group sq rows tiles sk
+               eQ eK emask has_mask causal scale bid)
+            i dd))
+= let rt = flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid in
+  FStar.Math.Lemmas.lemma_div_plus i rt 16;
+  FStar.Math.Lemmas.lemma_mod_plus i rt 16;
+  FStar.Math.Lemmas.small_div i 16;
+  FStar.Math.Lemmas.small_mod i 16
+
+let flash_out_vfun_all
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  : Lemma
+      (forall (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+         (i : natlt 16) (dd : natlt (SZ.v d)).
+        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+          + i < SZ.v rows ==>
+        flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+          emask has_mask causal scale
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+           flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+           clamp_nat_lt (SZ.v rows)
+             (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+           dd)
+        == FC.fcast (SF.out_val
+             (flash_escale nw d b hq hkv group sq rows tiles sk
+                eQ eK emask has_mask causal scale bid)
+             (flash_eO nw d b hq hkv group sq rows tiles sk
+                eQ eK eV emask has_mask causal scale bid)
+             (flash_egl nw d b hq hkv group sq rows tiles sk
+                eQ eK emask has_mask causal scale bid)
+             i dd))
+= let aux (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+          (i : natlt 16) (dd : natlt (SZ.v d))
+    : Lemma
+        (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+           + i < SZ.v rows ==>
+         flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+           emask has_mask causal scale
+           (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            clamp_nat_lt (SZ.v rows)
+              (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+            dd)
+         == FC.fcast (SF.out_val
+              (flash_escale nw d b hq hkv group sq rows tiles sk
+                 eQ eK emask has_mask causal scale bid)
+              (flash_eO nw d b hq hkv group sq rows tiles sk
+                 eQ eK eV emask has_mask causal scale bid)
+              (flash_egl nw d b hq hkv group sq rows tiles sk
+                 eQ eK emask has_mask causal scale bid)
+              i dd))
+    = if flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+           + i < SZ.v rows
+      then flash_out_vfun_bid nw d b hq hkv group sq rows tiles sk
+             eQ eK eV emask has_mask causal scale bid i dd ()
+  in
+  FStar.Classical.forall_intro_3 aux

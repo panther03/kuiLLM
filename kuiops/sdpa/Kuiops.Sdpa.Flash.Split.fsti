@@ -320,22 +320,6 @@ fn flash_split_output
       flash_block_output b hq hkv group sq rows tiles d gout bid
 
 ghost
-fn flash_gather_output
-  (#et : Type0)
-  (b hq hkv group sq rows tiles d : szp {
-    SZ.v hq == SZ.v hkv * SZ.v group /\
-    SZ.v rows == SZ.v group * SZ.v sq /\
-    SZ.v rows <= SZ.v tiles * 16 /\
-    SZ.fits (SZ.v tiles * 16) })
-  (#lout : layout4 b hq sq d)
-  (gout : array4 et lout)
-  requires
-    pure (SZ.fits (tlayout_ulen lout)) **
-    (forall+ (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)).
-      flash_block_output b hq hkv group sq rows tiles d gout bid)
-  ensures live gout
-
-ghost
 fn flash_output_add_warps
   (#et : Type0)
   (nw : szp)
@@ -359,31 +343,6 @@ fn flash_output_add_warps
           (flash_bid_rt
             (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
           lane)
-
-ghost
-fn flash_output_remove_warps
-  (#et : Type0)
-  (nw : szp)
-  (b hq hkv group sq rows tiles d : szp {
-    SZ.v hq == SZ.v hkv * SZ.v group /\
-    SZ.v rows == SZ.v group * SZ.v sq /\
-    SZ.v rows <= SZ.v tiles * 16 /\
-    SZ.fits (SZ.v tiles * 16) })
-  (#lout : layout4 b hq sq d)
-  (gout : array4 et lout)
-  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
-  requires
-    forall+ (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size).
-      when_ (w = 0)
-        (out_store_cells b hq sq 16sz d rows gout
-          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (SZ.v group)
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
-          lane)
-  ensures flash_block_output
-    b hq hkv group sq rows tiles d gout bid
 
 ghost
 fn flash_output_remove_warps_v
@@ -493,28 +452,34 @@ fn flash_gather_thread_rotensor
       a |-> Frac (f /. (SZ.v nthr)) e
   ensures a |-> Frac f e
 
-(* Drop the pinned output values, recovering plain cell ownership. *)
-ghost
-fn flash_forget_out_store_v
-  (#et_ab #et_acc : Type0)
-  {| floating et_acc |} {| real_like et_acc |}
-  {| scalar et_ab |} {| real_like et_ab |}
-  {| FC.float_cast et_acc et_ab |}
-  (nw b hq sq bm d rows : szp)
-  (#lout : layout4 b hq sq d)
-  (gout : array4 et_ab lout)
-  (escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
-  (eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
-  (egl : chest1 et_acc (SZ.v bm))
-  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
-  (r0 : nat) (lane : natlt BW.warp_size)
-  requires out_store_cells_v nw b hq sq bm d rows gout escale eO egl
-    bi kvh group r0 lane
-  ensures out_store_cells b hq sq bm d rows gout bi kvh group r0 lane
+(* The output chest determined by a per-logical-cell value function. *)
+[@@erasable]
+val flash_out_chest
+  (#et : Type0)
+  (b hq hkv group sq rows d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq })
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et)
+  : GTot (chest (b @| hq @| sq @| d @| INil) et)
 
-(* Drop the pinned output values from a whole block's output family. *)
+val flash_out_chest_acc
+  (#et : Type0)
+  (b hq hkv group sq rows d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq })
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et)
+  : Lemma (forall (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+             natlt (SZ.v rows) & natlt (SZ.v d)).
+      acc (flash_out_chest b hq hkv group sq rows d vfun)
+        ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+      == vfun y)
+
 ghost
-fn flash_forget_block_output_v
+fn flash_gather_output_v
   (#et_ab #et_acc : Type0)
   {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
@@ -527,12 +492,22 @@ fn flash_forget_block_output_v
     SZ.fits (SZ.v tiles * 16) })
   (#lout : layout4 b hq sq d)
   (gout : array4 et_ab lout)
-  (escale : chest2 et_acc (SZ.v nw) 16)
-  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
-  (egl : chest1 et_acc 16)
-  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  (escale : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest2 et_acc (SZ.v nw) 16)
+  (eO : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest1 et_acc 16)
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et_ab)
   requires
-    flash_block_output_v nw b hq hkv group sq rows tiles d gout
-      escale eO egl bid
+    pure (SZ.fits (tlayout_ulen lout)) **
+    pure (forall (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) (i : natlt 16) (dd : natlt (SZ.v d)).
+      flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i < SZ.v rows ==>
+      vfun (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            clamp_nat_lt (SZ.v rows) (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+            dd)
+      == FC.fcast (SF.out_val (escale bid) (eO bid) (egl bid) i dd)) **
+    (forall+ (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)).
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (escale bid) (eO bid) (egl bid) bid)
   ensures
-    flash_block_output b hq hkv group sq rows tiles d gout bid
+    gout |-> Frac 1.0R (flash_out_chest b hq hkv group sq rows d vfun)

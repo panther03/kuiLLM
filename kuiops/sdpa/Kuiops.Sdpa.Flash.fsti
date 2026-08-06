@@ -15,6 +15,7 @@ module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module FSp = Kuiops.Sdpa.Flash.Split
 
 inline_for_extraction noextract
 fn sdpa_flash_async
@@ -84,4 +85,6 @@ fn sdpa_flash_async
         (gK |-> Frac fK eK) **
         (gV |-> Frac fV eV) **
         (gmask |-> Frac fmask emask) **
-        live gout))
+        (gout |-> Frac 1.0R
+           (FSp.flash_out_chest b hq hkv group sq rows d
+              (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)))))

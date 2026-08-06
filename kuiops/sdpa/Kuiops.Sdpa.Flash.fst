@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module FD = Kuiops.Sdpa.Flash.KernelDesc
+module FSp = Kuiops.Sdpa.Flash.Split
 module FB = Kuiops.Sdpa.Flash.Barrier
 module Trade = Pulse.Lib.Trade
 
@@ -98,7 +99,9 @@ let sdpa_flash_kd
        (gK |-> Frac fK eK) **
        (gV |-> Frac fV eV) **
        (gmask |-> Frac fmask emask) **
-       live gout)
+       (gout |-> Frac 1.0R
+          (FSp.flash_out_chest b hq hkv group sq rows d
+             (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale))))
 = {
   nblk;
   nthr;
@@ -133,17 +136,24 @@ let sdpa_flash_kd
       gQ gK gV gmask gout #fQ #fK #fV #fmask
       #eQ #eK #eV #emask bid);
   block_post = (fun bid ->
-    flash_block_state nblk
+    flash_block_state_v nw nblk
       b hq hkv group sq rows tiles sk d
       gQ gK gV gmask gout #fQ #fK #fV #fmask
-      #eQ #eK #eV #emask bid);
+      #eQ #eK #eV #emask
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      bid);
   setup = FD.flash_setup nblk
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout
     #fQ #fK #fV #fmask #eQ #eK #eV #emask;
-  teardown = FD.flash_teardown nblk
+  teardown = FD.flash_teardown_v nblk nw
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout
+    gQ gK gV gmask gout has_mask causal scale
     #fQ #fK #fV #fmask #eQ #eK #eV #emask;
   block_frame = (fun _sh _bid -> emp);
   block_setup = FD.flash_block_setup nblk nw nthr
@@ -265,7 +275,9 @@ fn sdpa_flash_async
         (gK |-> Frac fK eK) **
         (gV |-> Frac fV eV) **
         (gmask |-> Frac fmask emask) **
-        live gout))
+        (gout |-> Frac 1.0R
+           (FSp.flash_out_chest b hq hkv group sq rows d
+              (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)))))
 {
   launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
