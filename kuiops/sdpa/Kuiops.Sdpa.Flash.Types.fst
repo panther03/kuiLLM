@@ -19,6 +19,7 @@ open Kuiper.ForEvery
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 module SZ = Kuiper.SizeT
+module EM = Kuiper.EMatrix
 module TRO = Kuiper.TensorRO
 module BW = Kuiper.Barrier.Warp
 module B = Kuiper.Barrier
@@ -85,10 +86,16 @@ let strided_cells2
     exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v
 
 unfold
+let cell_full_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (i : natlt len) (v : et) : slprop
+= Cell a (idx1 i) |-> Frac 1.0R v
+
+unfold
 let cell_full
   (#et : Type0) (#len : nat) (#l : layout1 len)
   (a : array1 et l) (i : natlt len) : slprop
-= exists* (v : et). Cell a (idx1 i) |-> Frac 1.0R v
+= exists* (v : et). cell_full_v a i v
 
 let row_layout
   (#et : Type0) (#rows #cols : erased nat) (#l : layout2 rows cols)
@@ -106,12 +113,24 @@ let clamp_nat_lt (n : pos) (x : nat) : natlt n =
   if x < n then x else 0
 
 unfold
+let row_subtile_v
+  (#et:Type0) (#l : layout2 16 16)
+  (shA : array2 et l)
+  (i : natlt 16) (r : chest2 et 1 16) : slprop
+= array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
+
+unfold
 let row_subtile
   (#et:Type0) (#l : layout2 16 16)
   (shA : array2 et l)
   (i : natlt 16) : slprop
-= exists* (r : chest2 et 1 16).
-    array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
+= exists* (r : chest2 et 1 16). row_subtile_v shA i r
+
+(* The single row of a [1 x 16] subtile, as the [chest1] the per-lane
+   online-softmax update sees. *)
+unfold
+let subtile_row (#et : Type0) (r : chest2 et 1 16) : GTot (chest1 et 16)
+= tr_val (EM.ematrix_row r 0)
 
 inline_for_extraction noextract
 let clamp_lt (sk : szp) (x : sz) : szlt sk =
@@ -1153,3 +1172,9 @@ instance cvl4_bcast_keys (d0 d1 d2 d3 : nat {
     cimap = (fun (i : conc (d0 @| d1 @| d2 @| d3 @| INil)) ->
                let (_, (_, (_, (l, ())))) = i in l);
   }
+
+(* [mextract_row] hands out the row as an [lseq]; writing it back through the
+   trade and reading it out again is the identity. *)
+let subtile_row_upd (#et : Type0) (r : chest2 et 1 16) (s : chest1 et 16)
+  : Lemma (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s)) == s)
+  = assert (equal (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s))) s)

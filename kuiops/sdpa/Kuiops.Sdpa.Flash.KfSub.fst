@@ -1722,19 +1722,33 @@ fn sdpa_flash_softmax_active
   (cbound : sz) (row_active : bool) (causal : bool) (has_mask : bool) (scale : et_acc)
   (#fmask : perm)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (#rS0 : chest2 et_acc 1 16)
+  (#rP0 : chest2 et_ab 1 16)
+  (#vm #vl #vcw : erased et_acc)
   preserves (gmask |-> Frac fmask emask)
   requires
-    row_subtile shS (SZ.v lane16) ** row_subtile shP (SZ.v lane16)
-    ** cell_full shcw (SZ.v lane16) ** cell_full shm (SZ.v lane16) ** cell_full shl (SZ.v lane16)
+    row_subtile_v shS (SZ.v lane16) rS0 ** row_subtile_v shP (SZ.v lane16) rP0
+    ** cell_full_v shcw (SZ.v lane16) vcw
+    ** cell_full_v shm (SZ.v lane16) vm
+    ** cell_full_v shl (SZ.v lane16) vl
   ensures
-    row_subtile shS (SZ.v lane16) ** row_subtile shP (SZ.v lane16)
-    ** cell_full shcw (SZ.v lane16) ** cell_full shm (SZ.v lane16) ** cell_full shl (SZ.v lane16)
+    exists* (rS' : chest2 et_acc 1 16) (rP' : chest2 et_ab 1 16)
+            (m' l' cw' : et_acc).
+    row_subtile_v shS (SZ.v lane16) rS' ** row_subtile_v shP (SZ.v lane16) rP'
+    ** cell_full_v shcw (SZ.v lane16) cw'
+    ** cell_full_v shm (SZ.v lane16) m'
+    ** cell_full_v shl (SZ.v lane16) l'
+    ** pure (SF.softmax_upd_post emask has_mask row_active causal
+               (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
+               (subtile_row rS0) vm vl
+               (subtile_row rS') (subtile_row rP') m' l' cw'
+             /\ kind cw' == Finite)
 {
-  unfold (row_subtile shS (SZ.v lane16));
-  unfold (row_subtile shP (SZ.v lane16));
-  unfold (cell_full shcw (SZ.v lane16));
-  unfold (cell_full shm (SZ.v lane16));
-  unfold (cell_full shl (SZ.v lane16));
+  unfold (row_subtile_v shS (SZ.v lane16) rS0);
+  unfold (row_subtile_v shP (SZ.v lane16) rP0);
+  unfold (cell_full_v shcw (SZ.v lane16) vcw);
+  unfold (cell_full_v shm (SZ.v lane16) vm);
+  unfold (cell_full_v shl (SZ.v lane16) vl);
 
   with rS. assert (array2_subtile shS 1 16 (SZ.v lane16) 0 |-> Frac 1.0R rS);
   mextract_row (array2_subtile shS 1 16 (SZ.v lane16) 0) 0;
@@ -1800,11 +1814,13 @@ fn sdpa_flash_softmax_active
   rewrite (rcw |-> Frac 1.0R vcr) as (ref_of_array_cell shcw (SZ.v lane16) |-> Frac 1.0R vcr);
   array1_cell_from_ref shcw (SZ.v lane16);
 
-  fold (row_subtile shS (SZ.v lane16));
-  fold (row_subtile shP (SZ.v lane16));
-  fold (cell_full shcw (SZ.v lane16));
-  fold (cell_full shm (SZ.v lane16));
-  fold (cell_full shl (SZ.v lane16));
+  fold (row_subtile_v shS (SZ.v lane16) (ematrix_upd_row rS0 0 (chest1_to_seq vSr)));
+  fold (row_subtile_v shP (SZ.v lane16) (ematrix_upd_row rP0 0 (chest1_to_seq vPr)));
+  fold (cell_full_v shcw (SZ.v lane16) vcr);
+  fold (cell_full_v shm (SZ.v lane16) vmr);
+  fold (cell_full_v shl (SZ.v lane16) vlr);
+  subtile_row_upd rS0 vSr;
+  subtile_row_upd rP0 vPr;
 }
 
 (* Guarded wrapper: run the online-softmax update on the [< 16] active lanes and
