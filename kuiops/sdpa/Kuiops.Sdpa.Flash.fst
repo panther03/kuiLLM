@@ -31,6 +31,8 @@ module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module FD = Kuiops.Sdpa.Flash.KernelDesc
 module FSp = Kuiops.Sdpa.Flash.Split
+module FSpec = Kuiops.Sdpa.Flash.Spec
+module FTop = Kuiops.Sdpa.Flash.Spec.Top
 module FB = Kuiops.Sdpa.Flash.Barrier
 module Trade = Pulse.Lib.Trade
 
@@ -267,7 +269,9 @@ fn sdpa_flash_async
       (gK |-> Frac fK eK) **
       (gV |-> Frac fV eV) **
       (gmask |-> Frac fmask emask) **
-      live gout)
+      live gout) **
+    pure (FTop.flash_no_overflow nw d b hq hkv group sq rows sk
+            eQ eK emask has_mask causal scale)
   ensures
     pledge0 (epoch_done s e)
       (on gpu_loc (
@@ -277,8 +281,15 @@ fn sdpa_flash_async
         (gmask |-> Frac fmask emask) **
         (gout |-> Frac 1.0R
            (FSp.flash_out_chest b hq hkv group sq rows d
-              (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)))))
+              (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale))))) **
+    pure (FSp.flash_out_chest b hq hkv group sq rows d
+            (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)
+          %~ FSpec.sdpa_flash_real (SZ.v group)
+               (to_real_chest eQ) (to_real_chest eK) (to_real_chest eV)
+               (to_real_chest emask) (to_real scale) causal has_mask)
 {
+  FTop.flash_out_approx nw d b hq hkv group sq rows sk
+    eQ eK eV emask has_mask causal scale;
   launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout causal has_mask scale) s;
