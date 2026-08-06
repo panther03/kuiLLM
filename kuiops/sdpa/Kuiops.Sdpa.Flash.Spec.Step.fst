@@ -646,3 +646,153 @@ let lane_step
     else ()
 
 #pop-options
+
+(* ------------------------------------------------------------------ *)
+(* Determinacy of the running registers.                               *)
+(*                                                                     *)
+(* The whole warp must agree on the value a shared tile holds, so the  *)
+(* barriers around [scale]/[pv_mm] can only pin the probability tile   *)
+(* if the per-lane running maximum is a function of data every lane    *)
+(* knows.  It is: the registers are determined by the tiles the warp   *)
+(* has consumed.                                                       *)
+(* ------------------------------------------------------------------ *)
+
+let step_ml
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (k0 : nat) (vm vl : et_acc) : GTot (et_acc & et_acc)
+  = let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
+                k0 cbound scale (tile_score_row #et_ab #et_acc eQ eKg k0 i) in
+    let m' = fmax vm (SF.row_max es' 16) in
+    (m', (vl `mul` fexp (vm `sub` m')) `add` SF.row_sum es' m' 16)
+
+(* The registers after the warp's first [t] tiles: it owns tile [w], then
+   every [nw]-th one after it. *)
+let rec run_ml
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat) : GTot (et_acc & et_acc) (decreases t)
+  = if t = 0 then (neg infinity, zero)
+    else
+      let ml = run_ml emask has_mask row_active causal bi qh qpos cbound scale
+                 eQ eKg i nw w (t - 1) in
+      step_ml emask has_mask row_active causal bi qh qpos cbound scale
+        eQ eKg i ((w + (t - 1) * nw) * 16) (fst ml) (snd ml)
+
+let lane_ml
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : nat)
+  (nw w t : nat) (vm vl : et_acc) : prop
+  = i < 16 ==>
+      (vm == fst (run_ml emask has_mask row_active causal bi qh qpos cbound
+                    scale eQ eKg i nw w t) /\
+       vl == snd (run_ml emask has_mask row_active causal bi qh qpos cbound
+                    scale eQ eKg i nw w t))
+
+let lane_ml_init
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : nat)
+  (nw w : nat)
+  : Lemma (lane_ml emask has_mask row_active causal bi qh qpos cbound scale
+             eQ eKg i nw w 0 (neg infinity) zero)
+  = ()
+
+(* [softmax_upd_post] pins the primed registers exactly. *)
+let softmax_upd_det
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (es : chest1 et_acc bn) (vm vl m' l' : et_acc)
+  : Lemma
+      (requires
+        exists (es' : chest1 et_acc bn) (ep' : chest1 et_ab bn) (cw' : et_acc).
+          SF.softmax_upd_post emask has_mask row_active causal bi qh qpos
+            k0 cbound scale es vm vl es' ep' m' l' cw')
+      (ensures
+        (let ts = SF.tile_scores emask has_mask row_active causal bi qh qpos
+                    k0 cbound scale es in
+         m' == fmax vm (SF.row_max ts bn) /\
+         l' == (vl `mul` fexp (vm `sub` m')) `add` SF.row_sum ts m' bn))
+  = FStar.Classical.forall_intro
+      (FStar.Classical.move_requires
+         (SF.scores_post_det #et_acc #et_ab #_f #_r #_s #_rb #_c1
+            #b #hq #sq #sk #bn emask has_mask row_active causal bi qh qpos
+            k0 cbound scale es))
+
+#push-options "--z3rlimit 20 --fuel 2 --ifuel 2"
+
+let lane_ml_step
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : nat)
+  (nw w t : nat) (vm vl m' l' : et_acc)
+  : Lemma
+      (requires
+        lane_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+          #b #hq #sq #sk #d #sq16 emask has_mask row_active causal bi qh qpos
+          cbound scale eQ eKg i nw w t vm vl /\
+        (i < 16 ==>
+          (exists (es' : chest1 et_acc 16) (ep' : chest1 et_ab 16)
+                  (cw' : et_acc).
+             step_out #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+               #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+               bi qh qpos ((w + t * nw) * 16) cbound scale eQ eKg i vm vl
+               es' ep' m' l' cw')))
+      (ensures
+        lane_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+          #b #hq #sq #sk #d #sq16 emask has_mask row_active causal bi qh qpos
+          cbound scale eQ eKg i nw w (t + 1) m' l')
+  = if i < 16
+    then softmax_upd_det #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+           #b #hq #sq #sk #16 emask has_mask row_active causal bi qh qpos
+           ((w + t * nw) * 16) cbound scale
+           (tile_score_row #et_ab #et_acc eQ eKg ((w + t * nw) * 16) i)
+           vm vl m' l'
+    else ()
+
+#pop-options

@@ -34,6 +34,8 @@ module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SS = Kuiops.Sdpa.Flash.Spec.Step
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
+#push-options "--z3rlimit 15"
+
 inline_for_extraction noextract
 fn sdpa_flash_kf
   (#et_ab #et_acc : Type0)
@@ -157,6 +159,9 @@ fn sdpa_flash_kf
   SS.lane_state_init #et_ab #et_acc emask has_mask row_active causal
     (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
     (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz));
+  SS.lane_ml_init #et_ab #et_acc emask has_mask row_active causal
+    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+    (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz));
   let mut jt : sz = w;
   let mut iter : sz = 0sz;
   while (!jt <^ nkt)
@@ -165,7 +170,8 @@ fn sdpa_flash_kf
         jt |-> vjt **
         live iter **
         pure (SZ.v !iter <= SZ.v vjt /\
-              SZ.v vjt % SZ.v nw == SZ.v (tid /^ 32sz)) **
+              SZ.v vjt % SZ.v nw == SZ.v (tid /^ 32sz) /\
+              SZ.v vjt == SZ.v (tid /^ 32sz) + SZ.v !iter * SZ.v nw) **
         gpu **
         thread_id (block_threads nw) tid **
         B.barrier_tok (barrier_contract nw d shQ
@@ -184,7 +190,11 @@ fn sdpa_flash_kf
           pure (SS.lane_state #et_ab #et_acc emask has_mask row_active causal
                   (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale
                   eQsh eKg (SZ.v (tid %^ 32sz)) (SZ.v nw)
-                  (SZ.v (tid /^ 32sz)) (SZ.v vjt) vm vl)) **
+                  (SZ.v (tid /^ 32sz)) (SZ.v vjt) vm vl /\
+                SS.lane_ml #et_ab #et_acc emask has_mask row_active causal
+                  (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale
+                  eQsh eKg (SZ.v (tid %^ 32sz)) (SZ.v nw)
+                  (SZ.v (tid /^ 32sz)) (SZ.v !iter) vm vl)) **
         if_ (combine_active 16sz (tid /^ 32sz) (tid %^ 32sz))
           (combine_cells nw 16sz shscale shgm shgl (tid %^ 32sz)) **
         if_ (tid /^ 32sz = 0sz)
@@ -243,6 +253,10 @@ fn sdpa_flash_kf
     SS.lane_step #et_ab #et_acc emask has_mask row_active causal
       (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
       (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v vjt)
+      vmc vlc vmn vln;
+    SS.lane_ml_step #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+      (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v !iter)
       vmc vlc vmn vln;
     assert pure (SZ.fits (SZ.v !jt + SZ.v nw));
     let next = !jt +^ nw;
@@ -400,3 +414,5 @@ fn sdpa_flash_kf
     shM shL shscale shO shgl tid bi r0 group kvh
     #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask;
 }
+
+#pop-options
