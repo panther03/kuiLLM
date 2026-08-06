@@ -263,6 +263,15 @@ let ml_state
      then (m == neg infinity /\ l == zero)
      else (exists (mr : real). m %~ mr /\ l %~ (SO.dsum x p /. exp mr)))
 
+(* [ml_state] only depends on the extension of the key set. *)
+let ml_state_ext
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n : nat) (x : natlt n -> GTot real) (p q : SO.pred n) (m l : et)
+  : Lemma (requires ml_state x p m l /\ (forall (j : natlt n). p j == q j))
+          (ensures ml_state x q m l)
+  = pnone_ext p q;
+    SO.sum_where_ext (fun j -> exp (x j)) (fun j -> exp (x j)) p q
+
 (* Hypotheses shared by every case of the step: the tile [q] of [bn] local keys
    starting at [k0] describes exactly the part of [t] the lane absorbs, the
    scores [es] carry the sentinel on rejected keys and approximate [x] on

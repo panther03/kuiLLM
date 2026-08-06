@@ -2047,7 +2047,7 @@ fn sdpa_flash_softmax_maybe
                  SF.softmax_upd_post emask has_mask row_active causal
                    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
                    (subtile_row (ematrix_subtile eS 1 16 (SZ.v lane) 0)) vm vl
-                   sr' pr' m' l' cw'))
+                   sr' pr' m' l' cw' /\ Finite? (kind cw')))
 {
   let active = lane <^ 16sz;
   if active {
@@ -2156,7 +2156,7 @@ fn sdpa_flash_jt_body
                  SF.softmax_upd_post emask has_mask row_active causal
                    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
                    (jt_score_row (SZ.v d) eQ eKg (SZ.v k0) (SZ.v lane))
-                   vm vl sr' pr' m' l' cw'))
+                   vm vl sr' pr' m' l' cw' /\ Finite? (kind cw')))
 {
   assert pure (SZ.v lane % BW.warp_size == SZ.v lane);
 

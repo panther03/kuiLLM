@@ -31,12 +31,13 @@ module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module Trade = Pulse.Lib.Trade
 module SF = Kuiops.Sdpa.Flash.Spec.Float
+module SS = Kuiops.Sdpa.Flash.Spec.Step
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 inline_for_extraction noextract
 fn sdpa_flash_kf
   (#et_ab #et_acc : Type0)
-  {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |} {| floating_real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -152,6 +153,10 @@ fn sdpa_flash_kf
   let row_active = r <^ rows;
   let cbound = qpos +^ (sk -^ sq);
   let nkt = sdpa_flash_causal_mask 16sz 16sz sk sq rows r0 causal;
+  assert pure (SZ.v (tid /^ 32sz) < SZ.v nw);
+  SS.lane_state_init #et_ab #et_acc emask has_mask row_active causal
+    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+    (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz));
   let mut jt : sz = w;
   let mut iter : sz = 0sz;
   while (!jt <^ nkt)
@@ -159,7 +164,8 @@ fn sdpa_flash_kf
       exists* (vjt : sz).
         jt |-> vjt **
         live iter **
-        pure (SZ.v !iter <= SZ.v vjt) **
+        pure (SZ.v !iter <= SZ.v vjt /\
+              SZ.v vjt % SZ.v nw == SZ.v (tid /^ 32sz)) **
         gpu **
         thread_id (block_threads nw) tid **
         B.barrier_tok (barrier_contract nw d shQ
@@ -174,7 +180,11 @@ fn sdpa_flash_kf
             (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
             gK gV gmask
             #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-            vm vl (SZ.v (tid %^ 32sz))) **
+            vm vl (SZ.v (tid %^ 32sz)) **
+          pure (SS.lane_state #et_ab #et_acc emask has_mask row_active causal
+                  (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale
+                  eQsh eKg (SZ.v (tid %^ 32sz)) (SZ.v nw)
+                  (SZ.v (tid /^ 32sz)) (SZ.v vjt) vm vl)) **
         if_ (combine_active 16sz (tid /^ 32sz) (tid %^ 32sz))
           (combine_cells nw 16sz shscale shgm shgl (tid %^ 32sz)) **
         if_ (tid /^ 32sz = 0sz)
@@ -220,11 +230,26 @@ fn sdpa_flash_kf
       (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
       gK gV gmask bi qh qpos k0 cbound row_active causal has_mask scale
       vmc vlc;
+    jt_score_row_eq_g #et_ab #et_acc (SZ.v d) eQsh eKg (SZ.v k0)
+      (SZ.v (tid %^ 32sz));
+    with vmn vln. assert (jt_rest_v #et_ab #et_acc d sk b hq sq
+      shK shV shS shP
+      (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
+      shQ shPVc shcw
+      (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
+      gK gV gmask
+      #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
+      vmn vln (SZ.v (tid %^ 32sz)));
+    SS.lane_step #et_ab #et_acc emask has_mask row_active causal
+      (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v cbound) scale eQsh eKg
+      (SZ.v (tid %^ 32sz)) (SZ.v nw) (SZ.v (tid /^ 32sz)) (SZ.v vjt)
+      vmc vlc vmn vln;
     assert pure (SZ.fits (SZ.v !jt + SZ.v nw));
     let next = !jt +^ nw;
     assert pure (SZ.v next == SZ.v !jt + SZ.v nw);
     assert pure (SZ.v !jt < SZ.v next);
     assert pure (SZ.fits (SZ.v !iter + 1));
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v vjt) 1 (SZ.v nw);
     (* [jt := next] must not be the final statement: karamel would turn the
        loop into a [for] whose increment reads [next], which is scoped to the
        body, and the emitted CUDA would not compile. *)

@@ -23,6 +23,7 @@ module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module BM = Kuiops.Common.BlockMatmul
+module SS = Kuiops.Sdpa.Flash.Spec.Step
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 (* The score row lane [i] sees for the key tile at [k0]: row [i] of the
@@ -37,6 +38,27 @@ let jt_score_row
 = subtile_row (ematrix_subtile
      (BM.emma_chain #et_ab #et_acc 16 eQ (mtranspose (SF.kv_tile 16 eKg k0)) (d / 16))
      1 16 i 0)
+
+(* [jt_score_row] is exactly the row of raw tile scores the bridge speaks
+   about, so the two descriptions of one lane's tile can be interchanged. *)
+let jt_score_row_eq
+  (#et_ab #et_acc : Type0) {| floating et_acc |} {| scalar et_ab |}
+  (#sk : pos) (d : pos) (#_ : squash (16 /?+ d))
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (k0 : nat) (i : natlt 16)
+  : Lemma (jt_score_row #et_ab #et_acc d eQ eKg k0 i
+           == SS.tile_score_row #et_ab #et_acc eQ eKg k0 i)
+  = assert (equal (jt_score_row #et_ab #et_acc d eQ eKg k0 i)
+                  (SS.tile_score_row #et_ab #et_acc eQ eKg k0 i))
+
+(* The same, for an unrefined lane index. *)
+let jt_score_row_eq_g
+  (#et_ab #et_acc : Type0) {| floating et_acc |} {| scalar et_ab |}
+  (#sk : pos) (d : pos) (#_ : squash (16 /?+ d))
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (k0 : nat) (i : nat)
+  : Lemma (i < 16 ==>
+             jt_score_row #et_ab #et_acc d eQ eKg k0 i
+             == SS.tile_score_row #et_ab #et_acc eQ eKg k0 i)
+  = if i < 16 then jt_score_row_eq #et_ab #et_acc d eQ eKg k0 i else ()
 
 unfold
 let jt_rest_v
@@ -180,7 +202,7 @@ fn sdpa_flash_jt_body
                  SF.softmax_upd_post emask has_mask row_active causal
                    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
                    (jt_score_row (SZ.v d) eQ eKg (SZ.v k0) (SZ.v lane))
-                   vm vl sr' pr' m' l' cw'))
+                   vm vl sr' pr' m' l' cw' /\ Finite? (kind cw')))
 
 ghost
 fn stride_reindex
