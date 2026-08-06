@@ -1815,3 +1815,204 @@ let pv_cell_approx
             %~ acc (MS.matmul rP
                       (Kuiper.EMatrix.Tiling.ematrix_subtile rV 16 16 0 cb))
                    ((r, (cc, ())) <: Kuiper.Shape.abs (16 @| 16 @| INil)))
+
+(* ------------------------------------------------------------------ *)
+(* The tile's probability row, and the [P@V] cell it produces.         *)
+(* ------------------------------------------------------------------ *)
+
+(* The exact real probability the kernel's [sel_prob] approximates: the shifted
+   exponential of an admitted score, and a literal zero where the mask rejects
+   the key.  This is what makes the [-inf] skirt harmless -- see the header of
+   kuipy/unverified/flash_attn_fa1.cu. *)
+let prob_real
+  (#sk #d : pos)
+  (rQ : chest2 real 16 d) (rK : chest2 real sk d)
+  (rbias : chest1 real sk) (rscale : real)
+  (row_active causal : bool) (cbound k0 : nat) (i : natlt 16) (mr' : real)
+  (u : natlt 16) : GTot real
+  = if SF.key_ok row_active causal sk cbound (k0 + u)
+    then exp (local_real rQ rK rbias rscale i k0 u -. mr')
+    else 0.0R
+
+#push-options "--fuel 1 --ifuel 2"
+
+let acc2_mk2 (#et : Type) (#d0 #d1 : nat) (f : natlt d0 -> natlt d1 -> GTot et)
+  : Lemma (forall (i : natlt d0) (j : natlt d1). acc2 (mk2 f) i j == f i j)
+  = ()
+
+#pop-options
+
+(* A real probability tile that is exact on row [i] and merely faithful
+   elsewhere: only row [i] contributes to row [i] of [P@V]. *)
+let prob_chest
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (eP : chest2 et_ab 16 16) (i : natlt 16) (rho : natlt 16 -> GTot real)
+  : GTot (chest2 real 16 16)
+  = mk2 (fun r k -> if r = i then rho k else to_real (acc2 eP r k))
+
+let prob_chest_approx
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (eP : chest2 et_ab 16 16) (i : natlt 16) (rho : natlt 16 -> GTot real)
+  : Lemma (requires forall (k : natlt 16). acc2 eP i k %~ rho k)
+          (ensures eP %~ prob_chest eP i rho)
+  = acc2_mk2 (fun (r : natlt 16) (k : natlt 16) ->
+                if r = i then rho k else to_real (acc2 eP r k));
+    introduce forall (rk : Kuiper.Shape.abs (16 @| 16 @| INil)).
+                acc eP rk %~ acc (prob_chest eP i rho) rk
+    with (let (r, (k, ())) = rk in
+          to_real_ok (acc2 eP r k))
+
+#push-options "--z3rlimit 30 --fuel 0 --ifuel 1"
+
+#push-options "--fuel 1 --ifuel 2"
+
+(* [SF.tile_scores] is exactly what [SF.scores_post] describes. *)
+let tile_scores_post
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc) (es : chest1 et_acc bn)
+  : Lemma (SF.scores_post emask has_mask row_active causal bi qh qpos k0 cbound
+             scale es
+             (SF.tile_scores emask has_mask row_active causal bi qh qpos k0
+                cbound scale es))
+  = ()
+
+#pop-options
+
+(* Entry [u] of the probability row lane [i] writes for the tile at [k0]. *)
+let prob_float
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (i : natlt 16) (m' : et_acc) (u : natlt 16) : GTot et_ab
+  = FC.fcast
+      (SF.sel_prob
+         (acc1 (SF.tile_scores #et_acc #et_ab #_f #_r #_s #_rb #_c1
+                  emask has_mask row_active causal bi qh qpos k0 cbound scale
+                  (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j))) u)
+         m')
+
+(* One entry of the probability row approximates its real counterpart. *)
+let prob_row_approx
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  {| _fr : floating_real_like et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (rQ : chest2 real 16 d) (rK : chest2 real sk d)
+  (rbias : chest1 real sk) (rscale : real)
+  (i : natlt 16) (p : SO.pred sk) (m' : et_acc) (mr' : real) (u : natlt 16)
+  : Lemma
+      (requires
+        step_ok emask has_mask row_active causal bi qh qpos k0 cbound scale
+          eQ eKg rQ rK rbias rscale i p /\ m' %~ mr')
+      (ensures
+        prob_float #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+          #b #hq #sq #sk #d #sq16 emask has_mask row_active causal bi qh qpos
+          k0 cbound scale eQ eKg i m' u
+        %~ prob_real rQ rK rbias rscale row_active causal cbound k0 i mr' u)
+  = let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
+                k0 cbound scale
+                (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j)) in
+    tile_scores_post emask has_mask row_active causal bi qh qpos k0 cbound scale
+      (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j));
+    let sv = acc1 es' u in
+    if SF.key_ok row_active causal sk cbound (k0 + u)
+    then begin
+      SB.sel_prob_admitted sv m';
+      masked_score_approx emask has_mask row_active causal bi qh qpos
+        k0 cbound scale eQ eKg rQ rK rbias rscale i u;
+      sub_approx sv m' (local_real rQ rK rbias rscale i k0 u) mr';
+      exp_approx (sv `sub` m') (local_real rQ rK rbias rscale i k0 u -. mr');
+      FC.fcast_approx #et_acc #et_ab (SF.sel_prob sv m')
+        (exp (local_real rQ rK rbias rscale i k0 u -. mr'))
+    end
+    else begin
+      SB.sel_prob_masked sv m';
+      SB.zero_approx #et_acc ();
+      FC.fcast_approx #et_acc #et_ab (SF.sel_prob sv m') 0.0R
+    end
+
+#pop-options
+
+
+#push-options "--z3rlimit 40 --fuel 0 --ifuel 1"
+
+(* Cell [(i, c)] of the tile's [P@V] product is the shifted numerator of the
+   tile's admitted keys against value column [c].  The keys the mask rejects
+   carry a literal zero probability, so summing over the whole tile -- which is
+   what the tensor cores do -- agrees with summing over the admitted keys. *)
+let pv_cell_ok
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  {| _fr : floating_real_like et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (rQ : chest2 real 16 d) (rK rV : chest2 real sk d)
+  (rbias : chest1 real sk) (rscale : real)
+  (i : natlt 16) (p : SO.pred sk)
+  (eP : chest2 et_ab 16 16) (m' : et_acc) (mr' : real) (c : natlt d)
+  : Lemma
+      (requires
+        step_ok emask has_mask row_active causal bi qh qpos k0 cbound scale
+          eQ eKg rQ rK rbias rscale i p /\
+        eVg %~ rV /\ m' %~ mr' /\
+        (forall (u : natlt 16).
+           acc2 eP i u
+           == prob_float #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+                bi qh qpos k0 cbound scale eQ eKg i m' u))
+      (ensures
+        acc2 (SF.pv_chunk #et_ab #et_acc eP (SF.kv_tile 16 eVg k0)
+                (SF.clamp_nat (d / 16) (c / 16))) i (c % 16)
+        %~ SO.tsum_n (real_row rQ rK rbias rscale i)
+             (fun (j : natlt sk) -> acc2 rV j c)
+             (tile_pred row_active causal sk cbound k0 16) mr')
+  = let x : natlt sk -> GTot real = real_row rQ rK rbias rscale i in
+    let y : natlt sk -> GTot real = fun (j : natlt sk) -> acc2 rV j c in
+    let t = tile_pred row_active causal sk cbound k0 16 in
+    let q : SO.pred 16 = local_pred row_active causal sk cbound k0 16 in
+    let rho : natlt 16 -> GTot real =
+      prob_real rQ rK rbias rscale row_active causal cbound k0 i mr' in
+    let rP = prob_chest eP i rho in
+    let rVt = SF.kv_tile 16 rV k0 in
+    introduce forall (u : natlt 16). acc2 eP i u %~ rho u
+    with prob_row_approx emask has_mask row_active causal bi qh qpos k0 cbound
+           scale eQ eKg rQ rK rbias rscale i p m' mr' u;
+    prob_chest_approx eP i rho;
+    kv_tile_approx 16 eVg rV k0;
+    pv_cell_approx #et_ab #et_acc eP (SF.kv_tile 16 eVg k0) rP rVt i c;
+    acc2_mk2 (fun (r : natlt 16) (k : natlt 16) ->
+                if r = i then rho k else to_real (acc2 eP r k));
+    acc2_mk2 (fun (r : natlt 16) (cc : natlt d) ->
+                acc2 rV (SF.clamp_nat sk (k0 + r)) cc);
+    SO.sum_where_drop #16 (fun (k : natlt 16) -> acc2 rP i k *. acc2 rVt k c) q;
+    SO.sum_where_tile #sk (fun (j : natlt sk) -> exp (x j -. mr') *. y j) t
+      #16 (fun (k : natlt 16) -> acc2 rP i k *. acc2 rVt k c) q k0
+
+#pop-options
