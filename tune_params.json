@@ -1,6 +1,6 @@
 {
   "entries": {
-    "57bb620deb3ce920602569bcfa23da5932ee3c227cd36e440a38cff6cf4ffd36": {
+    "00d70a2b329c06cd58d6d7dedf322c69dd844fb31ce82348153043aadbbf9b59": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -33,17 +33,17 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 4
+        "tuning_schema": 5
       },
       "spec": {
         "acc_dtype": "float32",
         "backend": "tc2d_tn",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 32,
-          "bm": 64,
+          "bm": 128,
           "bn": 64,
           "tk": 16,
           "tm": 16,
@@ -53,7 +53,7 @@
         }
       }
     },
-    "70b4d8c183020fa38123d54bf68b9403b70ebb9b3d5e03e4a0f6f5f13422edc7": {
+    "7cf2a2dbbf7f40b82379286f227890b3742e1929d782524ad3c00aaf102a4d86": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -86,7 +86,7 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 4
+        "tuning_schema": 5
       },
       "spec": {
         "acc_dtype": "float32",
@@ -106,7 +106,7 @@
         }
       }
     },
-    "b4161228aaa47a1386465ec72f6daa9f44c2b809c01a428a9262291dbe5f75b2": {
+    "8684db8c5e04043577a574dced478b34f51cd55d920cc959d5464bf90af011b1": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -114,22 +114,22 @@
             "dtype": "bfloat16",
             "shape": [
               256,
-              896
+              4864
             ],
             "strides": [
-              896,
+              4864,
               1
             ]
           },
           {
             "dtype": "bfloat16",
             "shape": [
-              896,
+              4864,
               896
             ],
             "strides": [
               1,
-              896
+              4864
             ]
           }
         ],
@@ -139,17 +139,17 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 4
+        "tuning_schema": 5
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_tn",
+        "backend": "tc2d_to",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 32,
-          "bm": 128,
+          "bm": 64,
           "bn": 64,
           "tk": 16,
           "tm": 16,
@@ -159,7 +159,7 @@
         }
       }
     },
-    "df02207ea173b05dd198a1954c07517ef4ba05a431b9f805d69b2f3e663265f7": {
+    "d8cc9b75840929556b7fa2cc790c35ed3602e8e75892d51522acceb97d3e2899": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -201,13 +201,13 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 4
+        "tuning_schema": 5
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_to_bcast",
+        "backend": "tc2d_tn_bcast",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Addmm.Tc2DToBcast.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Addmm.Tc2DTnBcast.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 32,
@@ -221,7 +221,7 @@
         }
       }
     },
-    "e3f161f576d5202fb2a01af3f25d5bba542f91e8b92ce3918d029c925a837544": {
+    "fa3bf181ad767a178628083586c9c04f3907426ed7d334993d48bdf6cad96fa0": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -229,22 +229,22 @@
             "dtype": "bfloat16",
             "shape": [
               256,
-              4864
+              896
             ],
             "strides": [
-              4864,
+              896,
               1
             ]
           },
           {
             "dtype": "bfloat16",
             "shape": [
-              4864,
+              896,
               896
             ],
             "strides": [
               1,
-              4864
+              896
             ]
           }
         ],
@@ -254,18 +254,18 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 4
+        "tuning_schema": 5
       },
       "spec": {
         "acc_dtype": "float32",
         "backend": "tc2d_tn",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn128_bk32_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 32,
           "bm": 64,
-          "bn": 64,
+          "bn": 128,
           "tk": 16,
           "tm": 16,
           "tn": 16,
@@ -275,5 +275,5 @@
       }
     }
   },
-  "tuning_schema": 4
+  "tuning_schema": 5
 }
