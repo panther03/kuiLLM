@@ -611,3 +611,15 @@ let masked_out_cell
   = dsum_pos (acc1 scores) valid (valid_witness valid);
     masked_matmul_cell valid scores probs mV i c;
     dsum_is_masked_denom valid scores
+
+(* Both sums also transport along a pointwise-equal score / value function. *)
+let dsum_ext2 (#n : nat) (x1 x2 : natlt n -> GTot real) (p q : pred n)
+  : Lemma (requires forall (j : natlt n). p j == q j /\ x1 j == x2 j)
+          (ensures dsum x1 p == dsum x2 q)
+  = sum_where_ext (fun j -> exp (x1 j)) (fun j -> exp (x2 j)) p q
+
+let nsum_ext2 (#n : nat) (x1 x2 y1 y2 : natlt n -> GTot real) (p q : pred n)
+  : Lemma (requires forall (j : natlt n).
+                      p j == q j /\ x1 j == x2 j /\ y1 j == y2 j)
+          (ensures nsum x1 y1 p == nsum x2 y2 q)
+  = sum_where_ext (fun j -> exp (x1 j) *. y1 j) (fun j -> exp (x2 j) *. y2 j) p q

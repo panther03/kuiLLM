@@ -30,6 +30,7 @@ module BM = Kuiops.Common.BlockMatmul
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SO = Kuiops.Sdpa.Flash.Spec.Online
 module SB = Kuiops.Sdpa.Flash.Spec.Bridge
+module FSpec = Kuiops.Sdpa.Flash.Spec
 
 (* ------------------------------------------------------------------ *)
 (* A matmul cell depends on the right operand only through its column. *)
@@ -2877,5 +2878,207 @@ let block_out_cell
       (acc1 egl i)
       (SF.ocomb escale eO i c nw)
       j0
+
+#pop-options
+
+(* ------------------------------------------------------------------ *)
+(* From the tile's real problem to the page's.                         *)
+(* ------------------------------------------------------------------ *)
+
+(* A matmul cell depends on the left operand only through its row. *)
+let rec matmul_single_row_ext
+  (#et : Type) {| scalar et |}
+  (#rows1 #rows2 #shared #cols : nat)
+  (a : chest2 et rows1 shared) (e : chest2 et rows2 shared)
+  (m : chest2 et shared cols)
+  (r1 : natlt rows1) (r2 : natlt rows2) (col : natlt cols) (to : natle shared)
+  : Lemma (requires forall (k : natlt shared). acc2 a r1 k == acc2 e r2 k)
+          (ensures MS.__matmul_single a m r1 col to
+                   == MS.__matmul_single e m r2 col to)
+          (decreases to)
+  = if to = 0 then ()
+    else matmul_single_row_ext a e m r1 r2 col (to - 1)
+
+let matmul_row_ext
+  (#et : Type) {| scalar et |}
+  (#rows1 #rows2 #shared #cols : nat)
+  (a : chest2 et rows1 shared) (e : chest2 et rows2 shared)
+  (m : chest2 et shared cols)
+  (r1 : natlt rows1) (r2 : natlt rows2) (col : natlt cols)
+  : Lemma (requires forall (k : natlt shared). acc2 a r1 k == acc2 e r2 k)
+          (ensures acc2 (MS.matmul a m) r1 col == acc2 (MS.matmul e m) r2 col)
+  = MS.lemma_matmul_index a m r1 col;
+    MS.lemma_matmul_index e m r2 col;
+    matmul_single_row_ext a e m r1 r2 col shared
+
+(* Reading a page entry is reading the underlying 4-D entry. *)
+let acc_slice_page4 (#et : Type) (#d0 #d1 #d2 #d3 : nat)
+  (m : chest4 et d0 d1 d2 d3) (i : natlt d0) (j : natlt d1)
+  (a : natlt d2) (c : natlt d3)
+  : Lemma (acc2 (slice_page4 m i j) a c == acc4 m i j a c)
+          [SMTPat (acc2 (slice_page4 m i j) a c)]
+  = ()
+
+(* The page of Q, K, V, bias and scores the lane's row belongs to. *)
+let page_q
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (#b : pos) (#hq #sq #d : pos)
+  (eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (bi : natlt b) (qh : natlt hq) : GTot (chest2 real sq d)
+  = slice_page4 (to_real_chest eQ) bi qh
+
+let page_bias
+  (#et_ab : Type0) {| scalar et_ab |} {| real_like et_ab |}
+  (#b #hq #sq #sk : pos)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask : bool) (bi : natlt b) (qh : natlt hq)
+  : GTot (chest2 real sq sk)
+  = slice_page4 (FSpec.attn_bias has_mask (to_real_chest emask)) bi qh
+
+#push-options "--z3rlimit 30 --fuel 1 --ifuel 2"
+
+(* Row [i] of the lane's tile-local real problem is row [qpos] of the page's. *)
+let lane_real_page
+  (#et_ab #et_acc : Type0)
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _sa : scalar et_acc |} {| _ra : real_like et_acc |}
+  (#b #hq #sq #sk #d : pos)
+  (eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (eKg : chest2 et_ab sk d)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group r0 cbound : nat) (rows : pos) (scale : et_acc)
+  (i : natlt 16) (j : natlt sk)
+  : Lemma
+      (requires
+        SF.lane_params_ok hq sq sk kvh group rows r0 i true qh qpos cbound)
+      (ensures
+        lane_real #et_ab #et_acc emask has_mask bi qh qpos scale
+          (SF.q_tile 16 rows group eQ bi kvh r0) eKg i j
+        == acc2 (FSpec.attn_scores (page_q eQ bi qh) (to_real_chest eKg)
+                   (page_bias emask has_mask bi qh) (to_real scale)) qpos j)
+  = let rQt : chest2 real 16 d = to_real_chest (SF.q_tile 16 rows group eQ bi kvh r0) in
+    let rQp : chest2 real sq d = page_q eQ bi qh in
+    assert (forall (k : natlt d). acc2 rQt i k == acc2 rQp qpos k);
+    matmul_row_ext rQt rQp (mtranspose (to_real_chest eKg)) i qpos j;
+    assert (acc1 (lane_bias emask has_mask bi qh qpos) j
+            == acc2 (page_bias emask has_mask bi qh) qpos j)
+
+#pop-options
+
+(* Reading a row of a matrix is reading the matrix. *)
+let acc_chest2_row (#et : Type) (#rows #cols : nat)
+  (m : chest2 et rows cols) (i : natlt rows) (j : natlt cols)
+  : Lemma (acc1 (chest2_row m i) j == acc2 m i j)
+          [SMTPat (acc1 (chest2_row m i) j)]
+  = ()
+
+(* The kernel's key admission predicate is the spec's causal mask. *)
+let row_keys_page
+  (causal : bool) (sq : pos) (sk : pos { sq <= sk }) (qpos : natlt sq)
+  (rows r0 : nat) (i : natlt 16) (cbound : nat)
+  : Lemma (requires cbound == SF.lane_cbound sq sk rows r0 i /\
+                    qpos == SF.lane_qpos sq rows r0 i)
+          (ensures forall (j : natlt sk).
+                     row_keys true causal sk cbound j
+                     == FSpec.row_keys causal sq sk qpos j)
+  = ()
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+(* The block's stored cell is the spec's attention output for the page row. *)
+let page_out_cell
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq #sk #d : pos) (#sq16 : squash (16 /?+ d))
+  (eQ4 : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group r0 cbound : nat) (rows : pos) (scale : et_acc)
+  (eKg eVg : chest2 et_ab sk d)
+  (i : natlt 16) (c : natlt d)
+  (nw : pos) (nkt : nat)
+  (escale : chest2 et_acc nw 16) (eO : chest2 et_acc (nw * 16) d)
+  (egl : chest1 et_acc 16) (j0 : natlt sk)
+  : Lemma
+      (requires
+       (let eQ = SF.q_tile 16 rows group eQ4 bi kvh r0 in
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i true qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask true causal bi qh qpos cbound scale
+          (eQ) eKg i /\
+        (forall (w : natlt nw).
+           cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1
+             #b #hq #sq #sk #d #sq16
+             emask has_mask true causal bi qh qpos cbound scale
+             eQ eKg i nw w
+             (SF.warp_iters nw nkt w)) /\
+        (forall (w : natlt nw).
+           acc2 escale w i
+           == SF.gscale (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                           #b #hq #sq #sk #d #sq16
+                           emask has_mask causal bi kvh group rows r0 scale
+                           eQ eKg nw nkt)
+                (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                            #b #hq #sq #sk #d #sq16
+                            emask has_mask causal bi kvh group rows r0 scale
+                            eQ eKg nw nkt) i nw) w i) /\
+        (forall (w : natlt nw).
+           ocomb_val eO i c w
+           == acc2 (block_O #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask causal bi kvh group rows r0 scale
+                      eQ eKg eVg nw nkt w) i c) /\
+        acc1 egl i
+        == SF.gsum (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask causal bi kvh group rows r0 scale
+                      eQ eKg nw nkt)
+             (block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                #b #hq #sq #sk #d #sq16
+                emask has_mask causal bi kvh group rows r0 scale
+                eQ eKg nw nkt)
+             (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                         #b #hq #sq #sk #d #sq16
+                         emask has_mask causal bi kvh group rows r0 scale
+                         eQ eKg nw nkt) i nw) i nw /\
+        SF.key_ok true causal sk cbound j0 /\
+        acc1 egl i `gt` zero))
+      (ensures
+        SF.out_val escale eO egl i c
+        %~ acc2 (FSpec.attention_page_real
+                   (page_q eQ4 bi qh) (to_real_chest eKg) (to_real_chest eVg)
+                   (page_bias emask has_mask bi qh) (to_real scale) causal)
+                qpos c)
+  = let eQt = SF.q_tile 16 rows group eQ4 bi kvh r0 in
+    let x = lane_real #et_ab #et_acc emask has_mask bi qh qpos scale eQt eKg i in
+    let p = row_keys true causal sk cbound in
+    let y = lane_val eVg c in
+    block_out_cell #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask true causal bi qh qpos kvh group rows r0 cbound
+      scale eQt eKg eVg i c nw nkt escale eO egl j0;
+    let sm = FSpec.attn_scores (page_q eQ4 bi qh) (to_real_chest eKg)
+               (page_bias emask has_mask bi qh) (to_real scale) in
+    let valid : FSpec.valid_pred sk = FSpec.row_keys causal sq sk qpos in
+    let srow : chest1 real sk = chest2_row sm qpos in
+    let probs = FSpec.attn_probs causal sm in
+    introduce forall (j : natlt sk). x j == acc1 srow j
+    with lane_real_page #et_ab #et_acc #_s #_rb #_ #_r
+           #b #hq #sq #sk #d eQ4 eKg emask has_mask bi qh qpos
+           kvh group r0 cbound rows scale i j;
+    row_keys_page causal sq sk qpos rows r0 i cbound;
+    SO.dsum_ext2 x (acc1 srow) p valid;
+    SO.nsum_ext2 x (acc1 srow) y (fun (j : natlt sk) -> acc2 (to_real_chest eVg) j c)
+      p valid;
+    SO.masked_out_cell #sk #d #sq valid srow probs (to_real_chest eVg) qpos c;
+    MS.lemma_matmul_index probs (to_real_chest eVg) qpos c
 
 #pop-options
