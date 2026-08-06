@@ -2529,3 +2529,247 @@ let block_O_state
                eQ eKg eVg nw w t) i c)
 
 #pop-options
+
+(* ------------------------------------------------------------------ *)
+(* The kernel's cross-warp folds are the bridge's folds.               *)
+(* ------------------------------------------------------------------ *)
+
+let rec gmax_fold_eq
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM : chest2 et nw bm) (i : natlt bm) (m : natlt nw -> GTot et)
+  (k : nat { k <= nw })
+  : Lemma (requires forall (w : natlt nw). m w == acc2 eM w i)
+          (ensures SF.gmax eM i k == SB.gmax_fold m k)
+          (decreases k)
+  = if k = 0 then () else gmax_fold_eq eM i m (k - 1)
+
+let rec gsum_fold_eq
+  (#et : Type0) {| floating et |} (#nw #bm : nat)
+  (eM eL : chest2 et nw bm) (gm : et) (i : natlt bm)
+  (sc l : natlt nw -> GTot et) (k : nat { k <= nw })
+  : Lemma (requires
+             (forall (w : natlt nw). sc w == SF.gscale eM gm w i) /\
+             (forall (w : natlt nw). l w == acc2 eL w i))
+          (ensures SF.gsum eM eL gm i k == SB.gfold sc l k)
+          (decreases k)
+  = if k = 0 then () else gsum_fold_eq eM eL gm i sc l (k - 1)
+
+(* Warp [w]'s contribution to row [i], column [dd] of the block output. *)
+let ocomb_val
+  (#et : Type0) (#nw #bm #d : pos)
+  (eO : chest2 et (nw * bm) d) (i : natlt bm) (dd : natlt d) (w : natlt nw)
+  : GTot et
+  = SF.ocomb_row_lt nw bm w i;
+    acc2 eO (SF.ocomb_row bm w i) dd
+
+let rec ocomb_fold_eq
+  (#et : Type0) {| floating et |} (#nw #bm #d : pos)
+  (escale : chest2 et nw bm) (eO : chest2 et (nw * bm) d)
+  (i : natlt bm) (dd : natlt d) (sc o : natlt nw -> GTot et)
+  (k : nat { k <= nw })
+  : Lemma (requires
+             (forall (w : natlt nw). sc w == acc2 escale w i) /\
+             (forall (w : natlt nw). o w == ocomb_val eO i dd w))
+          (ensures SF.ocomb escale eO i dd k == SB.gfold sc o k)
+          (decreases k)
+  = if k = 0 then () else ocomb_fold_eq escale eO i dd sc o (k - 1)
+
+(* The warps' key sets, as an [nw]-indexed family. *)
+let warp_keys_f
+  (row_active causal : bool) (sk : pos) (cbound : nat) (nw : pos)
+  : natlt nw -> SO.pred sk
+  = fun w -> warp_keys row_active causal sk cbound nw w
+
+(* Every key belongs to exactly one warp. *)
+let warp_keys_disjoint
+  (row_active causal : bool) (sk : pos) (cbound : nat) (nw : pos)
+  (w1 w2 : natlt nw)
+  : Lemma (requires ~(w1 == w2))
+          (ensures SO.disjoint (warp_keys row_active causal sk cbound nw w1)
+                               (warp_keys row_active causal sk cbound nw w2))
+  = ()
+
+let warp_keys_cover
+  (row_active causal : bool) (sk : pos) (cbound : nat) (nw : pos)
+  (j : natlt sk)
+  : Lemma (SB.punion (warp_keys_f row_active causal sk cbound nw) nw j
+           == SF.key_ok row_active causal sk cbound j)
+  = SB.punion_spec (warp_keys_f row_active causal sk cbound nw) nw j
+
+(* ------------------------------------------------------------------ *)
+(* The block's published state, warp by warp and then combined.        *)
+(* ------------------------------------------------------------------ *)
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+(* [block_O_state] restated against the published [(m, l)] vectors. *)
+let block_mlo_state
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (i : natlt 16) (c : natlt d)
+  (nw : pos) (w : natlt nw) (nkt : nat)
+  : Lemma
+      (requires
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i
+          row_active qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i nw w (SF.warp_iters nw nkt w))
+      (ensures
+        SB.mlo_state (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+          (lane_val eVg c)
+          (warp_keys row_active causal sk cbound nw w)
+          (acc2 (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                   #b #hq #sq #sk #d #sq16
+                   emask has_mask causal bi kvh group rows r0 scale
+                   eQ eKg nw nkt) w i)
+          (acc2 (block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                   #b #hq #sq #sk #d #sq16
+                   emask has_mask causal bi kvh group rows r0 scale
+                   eQ eKg nw nkt) w i)
+          (acc2 (block_O #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                   #b #hq #sq #sk #d #sq16
+                   emask has_mask causal bi kvh group rows r0 scale
+                   eQ eKg eVg nw nkt w) i c))
+  = let t = SF.warp_iters nw nkt w in
+    block_ml_acc #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+      emask has_mask causal bi kvh group rows r0 scale eQ eKg nw nkt w i;
+    run_mlv_t_acc #et_ab #et_acc #_f #_r #_s #_rb #_c1
+      #b #hq #sq #sk #d #sq16
+      emask has_mask causal bi kvh group rows r0 scale eQ eKg i nw w t;
+    assert (run_ml_t #et_ab #et_acc #_f #_r #_s #_rb #_c1
+              #b #hq #sq #sk #d #sq16
+              emask has_mask causal bi kvh group rows r0 scale eQ eKg i nw w t
+            == run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                 #b #hq #sq #sk #d #sq16
+                 emask has_mask row_active causal bi qh qpos cbound scale
+                 eQ eKg i nw w t);
+    block_O_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos kvh group rows r0 cbound
+      scale eQ eKg eVg i c nw w nkt
+
+#pop-options
+
+(* The row's admitted keys, as a predicate. *)
+let row_keys (row_active causal : bool) (sk : pos) (cbound : nat) : SO.pred sk
+  = fun j -> SF.key_ok row_active causal sk cbound j
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+(* What the block holds for row [i], column [c] once warp 0 has folded every
+   warp's partial state into the block-wide maximum, denominator and output:
+   the real online-softmax state over all of the row's admitted keys. *)
+let block_gstate
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg eVg : chest2 et_ab sk d)
+  (i : natlt 16) (c : natlt d)
+  (nw : pos) (nkt : nat)
+  (escale : chest2 et_acc nw 16) (eO : chest2 et_acc (nw * 16) d)
+  : Lemma
+      (requires
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i
+          row_active qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        (forall (w : natlt nw).
+           cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1
+             #b #hq #sq #sk #d #sq16
+             emask has_mask row_active causal bi qh qpos cbound scale
+             eQ eKg i nw w (SF.warp_iters nw nkt w)) /\
+        (forall (w : natlt nw).
+           acc2 escale w i
+           == SF.gscale (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                           #b #hq #sq #sk #d #sq16
+                           emask has_mask causal bi kvh group rows r0 scale
+                           eQ eKg nw nkt)
+                (SF.gmax (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                            #b #hq #sq #sk #d #sq16
+                            emask has_mask causal bi kvh group rows r0 scale
+                            eQ eKg nw nkt) i nw) w i) /\
+        (forall (w : natlt nw).
+           ocomb_val eO i c w
+           == acc2 (block_O #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask causal bi kvh group rows r0 scale
+                      eQ eKg eVg nw nkt w) i c))
+      (ensures
+        (let eM = block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask causal bi kvh group rows r0 scale
+                    eQ eKg nw nkt in
+         let eL = block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask causal bi kvh group rows r0 scale
+                    eQ eKg nw nkt in
+         SB.gstate (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+           (lane_val eVg c)
+           (row_keys row_active causal sk cbound)
+           (SF.gmax eM i nw)
+           (SF.gsum eM eL (SF.gmax eM i nw) i nw)
+           (SF.ocomb escale eO i c nw)))
+  = let eM = block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+               #b #hq #sq #sk #d #sq16
+               emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw nkt in
+    let eL = block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+               #b #hq #sq #sk #d #sq16
+               emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw nkt in
+    let gm = SF.gmax eM i nw in
+    let pw = warp_keys_f row_active causal sk cbound nw in
+    let m : natlt nw -> GTot et_acc = fun w -> acc2 eM w i in
+    let l : natlt nw -> GTot et_acc = fun w -> acc2 eL w i in
+    let o : natlt nw -> GTot et_acc =
+      fun w -> acc2 (block_O #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+                       #b #hq #sq #sk #d #sq16
+                       emask has_mask causal bi kvh group rows r0 scale
+                       eQ eKg eVg nw nkt w) i c in
+    let sc : natlt nw -> GTot et_acc = fun w -> acc2 escale w i in
+    introduce forall (w : natlt nw).
+      SB.mlo_state (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+        (lane_val eVg c) (pw w) (m w) (l w) (o w)
+    with block_mlo_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+           #b #hq #sq #sk #d #sq16
+           emask has_mask row_active causal bi qh qpos kvh group rows r0
+           cbound scale eQ eKg eVg i c nw w nkt;
+    introduce forall (w1 w2 : natlt nw). ~(w1 == w2) ==>
+      SO.disjoint (pw w1) (pw w2)
+    with introduce _ ==> _
+    with _. warp_keys_disjoint row_active causal sk cbound nw w1 w2;
+    introduce forall (j : natlt sk).
+      row_keys row_active causal sk cbound j == SB.punion pw nw j
+    with warp_keys_cover row_active causal sk cbound nw j;
+    gmax_fold_eq eM i m nw;
+    gsum_fold_eq eM eL gm i sc l nw;
+    ocomb_fold_eq escale eO i c sc o nw;
+    SB.mlo_combine (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+      (lane_val eVg c) pw m l o sc (row_keys row_active causal sk cbound)
+
+#pop-options
