@@ -1257,20 +1257,6 @@ fn lift_16to32 (p : natlt 16 -> slprop)
     (fun (i:natlt BW.warp_size) (_:squash (i < 16)) -> p i);
 }
 
-ghost
-fn lower_32to16 (p : natlt 16 -> slprop)
-  requires forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> p i)
-  ensures  forall+ (i:natlt 16). p i
-{
-  forevery_refine_split (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> p i))
-    (fun (i:natlt BW.warp_size) -> i < 16);
-  drop_ (forall+ (i:natlt BW.warp_size { ~(i < 16) }). when__ (i < 16) (fun _ -> p i));
-  forevery_ext #(i:natlt BW.warp_size { i < 16 })
-    (fun (i:natlt BW.warp_size { i < 16 }) -> when__ (i < 16) (fun _ -> p i))
-    (fun (i:natlt BW.warp_size { i < 16 }) -> p i);
-  forevery_natlt_restrict BW.warp_size p;
-}
-
 
 (* Whole 1/warp fraction (all 32 lanes) <-> 16 exclusive row-subtiles.  Used by
    b2 (whole->rows, forward), b3/b5 (rows->whole, reverse). *)
@@ -1929,6 +1915,41 @@ fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
   when__forget g (fun (pf : squash (b2t g)) (w:et) -> cell_full_v shA lane w) v;
   rewrite (when__ g (fun (pf : squash (b2t g)) -> exists* (w:et). cell_full_v shA lane w))
        as (when__ (lane < 16) (fun _ -> cell_full shA lane));
+}
+
+ghost
+fn when__cell16_setval (#et:Type0) (#rows:nat) (#l:layout2 rows 16)
+  (a : array2 et l) (w1 w2 : natlt rows) (lane1 lane2 : natlt BW.warp_size)
+  (e : chest2 et rows 16) (v : et)
+  requires
+    when__ (lane1 < 16) (fun _ -> cell_full_v (row a w1) lane1 v)
+    ** pure (w1 == w2 /\ lane1 == lane2 /\
+             (lane1 < 16 ==> v == acc2 e w1 (clamp_nat_lt 16 lane1)))
+  ensures
+    when__ (lane2 < 16) (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2))
+{
+  let g : bool = lane1 < 16;
+  rewrite (when__ (lane1 < 16) (fun _ -> cell_full_v (row a w1) lane1 v))
+       as (when__ g (fun (pf : squash (b2t g)) -> cell_full_v (row a w1) lane1 v));
+  if g {
+    when__elim_true g (fun (pf : squash (b2t g)) -> cell_full_v (row a w1) lane1 v);
+    rewrite (cell_full_v (row a w1) lane1 v)
+         as (cell_full_v (row a w2) lane2 (acc2 e w2 lane2));
+    when__intro_true g
+      (fun (pf : squash (b2t g)) -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2));
+    rewrite (when__ g
+               (fun (pf : squash (b2t g)) -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2)))
+         as (when__ (lane2 < 16)
+               (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2)));
+  } else {
+    when__elim_false g (fun (pf : squash (b2t g)) -> cell_full_v (row a w1) lane1 v);
+    when__intro_false g
+      (fun (pf : squash (b2t g)) -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2));
+    rewrite (when__ g
+               (fun (pf : squash (b2t g)) -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2)))
+         as (when__ (lane2 < 16)
+               (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2)));
+  }
 }
 
 ghost

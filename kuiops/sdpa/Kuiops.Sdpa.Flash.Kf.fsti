@@ -100,13 +100,23 @@ fn sdpa_flash_kf
     sdpa_flash_pre #et_ab #et_acc nw nthr d sk b hq sq rows
       #lgQ #lgK #lgV #lgmask #lout #lcw
       gQ gK gV gmask gout shQ shK shV shS shP shPVc shcw
-      shM shL shscale shO shgm shgl tid bi r0 group kvh
+      shM shL
+      (flash_eM_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      shscale shO shgm shgl tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask
   ensures
     sdpa_flash_post #et_ab #et_acc nw nthr d sk b hq sq rows
       #lgQ #lgK #lgV #lgmask #lout #lcw
       gQ gK gV gmask gout shQ shK shV shS shP shPVc shcw
-      shM shL shscale shO shgl tid bi r0 group kvh
+      shM shL
+      (flash_eM_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      shscale shO shgl tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask **
     if_ (combine_active 16sz
       (sdpa_flash_w nw nthr tid) (sdpa_flash_lane nw nthr tid))

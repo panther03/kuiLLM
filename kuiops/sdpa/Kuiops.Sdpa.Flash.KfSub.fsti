@@ -492,6 +492,19 @@ fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
   requires when__ (lane < 16) (fun _ -> cell_full_v shA lane v)
   ensures  when__ (lane < 16) (fun _ -> cell_full shA lane)
 
+(* Re-express a pinned row cell as a cell of a whole-matrix value, at the same
+   time renaming the warp/lane indices. *)
+ghost
+fn when__cell16_setval (#et:Type0) (#rows:nat) (#l:layout2 rows 16)
+  (a : array2 et l) (w1 w2 : natlt rows) (lane1 lane2 : natlt BW.warp_size)
+  (e : chest2 et rows 16) (v : et)
+  requires
+    when__ (lane1 < 16) (fun _ -> cell_full_v (row a w1) lane1 v)
+    ** pure (w1 == w2 /\ lane1 == lane2 /\
+             (lane1 < 16 ==> v == acc2 e w1 (clamp_nat_lt 16 lane1)))
+  ensures
+    when__ (lane2 < 16) (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2))
+
 ghost
 fn when_elim_true (b:bool{b == true}) (q : slprop)
   requires when_ b q

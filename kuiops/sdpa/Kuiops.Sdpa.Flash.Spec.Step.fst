@@ -1192,6 +1192,34 @@ let block_l
 = mk2 (fun w i -> acc1 (run_lv_t emask has_mask causal bi kvh group rows r0
                           scale eQ eKg nw w (SF.warp_iters nw nkt w)) i)
 
+#push-options "--fuel 1 --ifuel 2"
+
+(* Cell [(w, i)] of the block's published vectors is row [i] of warp [w]'s
+   register vector after its last key tile. *)
+let block_ml_acc
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (nw : pos) (nkt : nat) (w : natlt nw) (i : natlt 16)
+  : Lemma
+      (acc2 (block_m emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw nkt) w i
+       == acc1 (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w (SF.warp_iters nw nkt w)) i /\
+       acc2 (block_l emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw nkt) w i
+       == acc1 (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+                  eQ eKg nw w (SF.warp_iters nw nkt w)) i)
+  = ()
+
+#pop-options
+
 (* The block's output tile: warp [w] owns rows [16w .. 16w+15]. *)
 let block_O
   (#et_ab #et_acc : Type0)
