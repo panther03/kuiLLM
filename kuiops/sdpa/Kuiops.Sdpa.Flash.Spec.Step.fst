@@ -1235,3 +1235,394 @@ let block_O
   : GTot (chest2 et_acc 16 d)
 = run_O emask has_mask causal bi kvh group rows r0 scale eQ eKg eVg nw w
     (SF.warp_iters nw nkt w)
+
+
+(* ------------------------------------------------------------------ *)
+(* The warp's registers satisfy the real flash invariant.              *)
+(* ------------------------------------------------------------------ *)
+
+(* The correction weight the lane applies when it absorbs its [t]th tile. *)
+let cw_at
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat) : GTot et_acc
+  = fexp (fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
+                 eQ eKg i nw w t)
+          `sub`
+          fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
+                 eQ eKg i nw w (t + 1)))
+
+(* Every correction weight of the first [t] steps is finite.  Like [all_finite]
+   this is an overflow hypothesis and is not derivable from the [floating]
+   laws; the kernel exports it (see the [kind cw' == Finite] conjunct of
+   [Kuiops.Sdpa.Flash.KfSub.sdpa_flash_softmax_upd]'s postcondition). *)
+let cw_upto
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat) : prop
+  = forall (u : nat).
+      {:pattern (cw_at #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                   #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+                   bi qh qpos cbound scale eQ eKg i nw w u)}
+      u < t ==>
+      Finite? (kind (cw_at #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                       #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+                       bi qh qpos cbound scale eQ eKg i nw w u))
+
+#push-options "--fuel 1 --ifuel 2"
+
+let acc1_mk1 (#et : Type) (#d0 : nat) (f : natlt d0 -> GTot et)
+  : Lemma (forall (j : natlt d0). acc1 (mk1 f) j == f j)
+  = ()
+
+(* The canonical witnesses of [softmax_upd_post]. *)
+let softmax_upd_canon
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#bn : nat)
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (es : chest1 et_acc bn) (vm vl : et_acc)
+  : Lemma
+      (ensures
+        (let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
+                     k0 cbound scale es in
+         let m' = fmax vm (SF.row_max es' bn) in
+         SF.softmax_upd_post emask has_mask row_active causal bi qh qpos
+           k0 cbound scale es vm vl es'
+           (mk1 (fun j -> FC.fcast (SF.sel_prob (acc1 es' j) m')))
+           m'
+           ((vl `mul` fexp (vm `sub` m')) `add` SF.row_sum es' m' bn)
+           (fexp (vm `sub` m'))))
+  = ()
+
+let run_ml_zero
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w : nat)
+  : Lemma (run_ml emask has_mask row_active causal bi qh qpos cbound scale
+             eQ eKg i nw w 0 == (neg infinity, zero))
+  = ()
+
+let run_ml_unfold
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat)
+  : Lemma
+      (ensures
+        (let ml = run_ml emask has_mask row_active causal bi qh qpos cbound
+                    scale eQ eKg i nw w t in
+         run_ml emask has_mask row_active causal bi qh qpos cbound scale
+           eQ eKg i nw w (t + 1)
+         == step_ml emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i ((w + t * nw) * 16) (fst ml) (snd ml)))
+  = ()
+
+#pop-options
+
+(* The first tile the warp has NOT yet visited after [t] steps. *)
+let warp_tile (nw : pos) (w t : nat) : nat = w + t * nw
+
+let warp_tile_succ (nw : pos) (w t : nat)
+  : Lemma (warp_tile nw w t + nw == warp_tile nw w (t + 1))
+  = FStar.Math.Lemmas.distributivity_add_left t 1 nw
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+let rec run_ml_state
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw : pos) (w t : nat)
+  : Lemma
+      (requires
+        w < nw /\
+        (forall (u : nat). u < t ==> (w + u * nw) * 16 <= sk) /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i nw w t)
+      (ensures
+        (let ml = run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask row_active causal bi qh qpos cbound scale
+                    eQ eKg i nw w t in
+         loop_state #et_ab #et_acc #_f #_r #_s #_rb #b #hq #sq #sk #d
+           emask has_mask row_active causal bi qh qpos cbound scale
+           eQ eKg i nw w (warp_tile nw w t) (fst ml) (snd ml)))
+      (decreases t)
+= if t = 0
+  then begin
+    run_ml_zero #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos cbound scale eQ eKg i nw w;
+    loop_state_init #et_ab #et_acc #_f #_r #_s #_rb #b #hq #sq #sk #d
+      emask has_mask row_active causal bi qh qpos cbound
+      scale eQ eKg i nw w
+  end
+  else begin
+    let t1 : nat = t - 1 in
+    let vjt : nat = w + t1 * nw in
+    warp_tile_succ nw w t1;
+    assert (vjt + nw == warp_tile nw w t);
+    run_ml_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i nw w t1;
+    let ml = run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+               emask has_mask row_active causal bi qh qpos cbound scale
+               eQ eKg i nw w t1 in
+    let vm = fst ml in
+    let vl = snd ml in
+    let es = tile_score_row #et_ab #et_acc eQ eKg (vjt * 16) i in
+    let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
+                (vjt * 16) cbound scale es in
+    let m' = fmax vm (SF.row_max es' 16) in
+    let cw' = fexp (vm `sub` m') in
+    let l' = (vl `mul` cw') `add` SF.row_sum es' m' 16 in
+    let ep' : chest1 et_ab 16 =
+      mk1 (fun j -> FC.fcast (SF.sel_prob (acc1 es' j) m')) in
+    run_ml_unfold #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i nw w t1;
+    assert (run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+              emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w t == (m', l'));
+    assert (cw' == cw_at #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                     #b #hq #sq #sk #d #sq16
+                     emask has_mask row_active causal bi qh qpos cbound scale
+                     eQ eKg i nw w t1);
+    softmax_upd_canon #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #16 emask has_mask row_active causal bi qh qpos
+      (vjt * 16) cbound scale es vm vl;
+    FStar.Math.Lemmas.lemma_mod_plus w t1 nw;
+    FStar.Math.Lemmas.small_mod w nw;
+    assert (SF.scores_post emask has_mask row_active causal bi qh qpos
+              (vjt * 16) cbound scale
+              (tile_score_row #et_ab #et_acc eQ eKg (vjt * 16) i) es');
+    acc1_mk1 #et_ab #16 (fun j -> FC.fcast (SF.sel_prob (acc1 es' j) m'));
+    assert (forall (j : natlt 16).
+              acc1 ep' j == FC.fcast (SF.sel_prob (acc1 es' j) m'));
+    assert (SF.softmax_upd_post emask has_mask row_active causal bi qh qpos
+              (vjt * 16) cbound scale
+              (tile_score_row #et_ab #et_acc eQ eKg (vjt * 16) i) vm vl
+              es' ep' m' l' cw');
+    assert (Finite? (kind cw'));
+    assert (w < nw);
+    assert (vjt % nw == w);
+    assert (vjt * 16 <= sk);
+    assert (all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+              emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i);
+    assert (loop_state #et_ab #et_acc #_f #_r #_s #_rb #b #hq #sq #sk #d
+              emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w vjt vm vl);
+    assert (w < nw /\ vjt % nw == w /\ vjt * 16 <= sk /\
+            all_finite emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i /\
+            SF.softmax_upd_post emask has_mask row_active causal bi qh qpos
+              (vjt * 16) cbound scale
+              (tile_score_row #et_ab #et_acc eQ eKg (vjt * 16) i) vm vl
+              es' ep' m' l' cw' /\
+            Finite? (kind cw') /\
+            loop_state emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w vjt vm vl);
+    assert (step_out #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
+              #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+              bi qh qpos (vjt * 16) cbound scale eQ eKg i vm vl
+              es' ep' m' l' cw');
+    FStar.Math.Lemmas.distributivity_add_left t1 1 nw;
+    assert (vjt + nw == warp_tile nw w t);
+    ml_step_loop_fa #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i nw w vjt vm vl
+  end
+
+#pop-options
+
+(* ------------------------------------------------------------------ *)
+(* Coverage: the block's tile count reaches every key a lane admits.   *)
+(* ------------------------------------------------------------------ *)
+
+(* The causal scan's running maximum dominates every active row's position. *)
+let rec tile_maxpos_ge (sq : pos) (rows r0 n i : nat)
+  : Lemma (requires i < n /\ r0 + i < rows)
+          (ensures (let mf = SF.tile_maxpos sq rows r0 n in
+                    snd mf /\ SF.lane_qpos sq rows r0 i <= fst mf))
+          (decreases n)
+  = if i < n - 1 then tile_maxpos_ge sq rows r0 (n - 1) i else ()
+
+let key_ok_lt_kmax
+  (sq : pos) (sk : nat { sq <= sk }) (rows r0 : nat) (causal : bool)
+  (i : natlt 16) (j : nat)
+  : Lemma (requires SF.key_ok (SF.lane_active_row rows r0 i) causal sk
+                      (SF.lane_cbound sq sk rows r0 i) j)
+          (ensures j < (if causal then SF.causal_kmax 16 sq sk rows r0 else sk))
+  = if causal then tile_maxpos_ge sq rows r0 16 i else ()
+
+let div_lt_divup (e j : nat)
+  : Lemma (requires j < e) (ensures j / 16 < Kuiper.Divides.divup e 16)
+  = FStar.Math.Lemmas.euclidean_division_definition j 16;
+    if j / 16 >= Kuiper.Divides.divup e 16
+    then FStar.Math.Lemmas.lemma_mult_le_left 16
+           (Kuiper.Divides.divup e 16) (j / 16)
+    else ()
+
+let divup_pred_lt (e : nat) (k : pos)
+  : Lemma (requires e > 0) (ensures (Kuiper.Divides.divup e k - 1) * k < e)
+  = FStar.Math.Lemmas.euclidean_division_definition (e + (k - 1)) k;
+    FStar.Math.Lemmas.distributivity_sub_left (Kuiper.Divides.divup e k) 1 k
+
+(* Every key a lane admits lies in one of the block's key tiles. *)
+let key_ok_tile_lt
+  (sq : pos) (sk : nat { sq <= sk }) (rows r0 : nat) (causal : bool)
+  (i : natlt 16) (j : nat)
+  : Lemma (requires SF.key_ok (SF.lane_active_row rows r0 i) causal sk
+                      (SF.lane_cbound sq sk rows r0 i) j)
+          (ensures j / 16 < SF.key_tiles 16 16 sq sk rows r0 causal)
+  = key_ok_lt_kmax sq sk rows r0 causal i j;
+    div_lt_divup (if causal then SF.causal_kmax 16 sq sk rows r0 else sk) j
+
+(* The last key tile starts inside the key range. *)
+let key_tiles_last (sq : pos) (sk : nat { sq <= sk }) (rows r0 : nat)
+  (causal : bool)
+  : Lemma (ensures (let nkt = SF.key_tiles 16 16 sq sk rows r0 causal in
+                    nkt == 0 \/ (nkt - 1) * 16 < sk))
+  = let e = if causal then SF.causal_kmax 16 sq sk rows r0 else sk in
+    if e = 0 then () else divup_pred_lt e 16
+
+(* The warp's step count reaches the last tile and no further. *)
+let warp_iters_bounds (nw : pos) (nkt w : nat)
+  : Lemma (ensures (let t = SF.warp_iters nw nkt w in
+                    w + t * nw >= nkt /\
+                    (forall (u : nat). u < t ==> w + u * nw < nkt)))
+  = if w >= nkt then ()
+    else begin
+      let t = SF.warp_iters nw nkt w in
+      Kuiper.Divides.lem_divup_back (nkt - w) nw;
+      FStar.Math.Lemmas.euclidean_division_definition (nkt - w + nw - 1) nw;
+      FStar.Math.Lemmas.distributivity_sub_left t 1 nw;
+      introduce forall (u : nat). u < t ==> w + u * nw < nkt
+      with introduce _ ==> _
+      with _. FStar.Math.Lemmas.lemma_mult_le_right nw u (t - 1)
+    end
+
+(* ------------------------------------------------------------------ *)
+(* The warp's final registers as a real online-softmax state.          *)
+(* ------------------------------------------------------------------ *)
+
+(* The keys warp [w] of [nw] is responsible for. *)
+let warp_keys
+  (row_active causal : bool) (sk : pos) (cbound : nat) (nw : pos) (w : nat)
+  : SO.pred sk
+  = fun j -> SF.key_ok row_active causal sk cbound j && (j / 16) % nw = w
+
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
+
+let warp_ml_state
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw : pos) (w : natlt nw) (nkt : nat)
+  : Lemma
+      (requires
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i
+          row_active qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i nw w (SF.warp_iters nw nkt w))
+      (ensures
+        (let ml = run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask row_active causal bi qh qpos cbound scale
+                    eQ eKg i nw w (SF.warp_iters nw nkt w) in
+         SB.ml_state (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+           (warp_keys row_active causal sk cbound nw w) (fst ml) (snd ml)))
+  = let t = SF.warp_iters nw nkt w in
+    warp_iters_bounds nw nkt w;
+    key_tiles_last sq sk rows r0 causal;
+    introduce forall (u : nat). u < t ==> (w + u * nw) * 16 <= sk
+    with introduce _ ==> _
+    with _. FStar.Math.Lemmas.lemma_mult_le_right 16 (w + u * nw) (nkt - 1);
+    run_ml_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i nw w t;
+    introduce forall (j : natlt sk).
+      absorbed_pred row_active causal sk cbound nw w (warp_tile nw w t) j
+      == warp_keys row_active causal sk cbound nw w j
+    with (if SF.key_ok row_active causal sk cbound j
+          then key_ok_tile_lt sq sk rows r0 causal i j
+          else ());
+    SB.ml_state_ext (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+      (absorbed_pred row_active causal sk cbound nw w (warp_tile nw w t))
+      (warp_keys row_active causal sk cbound nw w)
+      (fst (run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+              #b #hq #sq #sk #d #sq16
+              emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w t))
+      (snd (run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+              #b #hq #sq #sk #d #sq16
+              emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w t))
+
+#pop-options
