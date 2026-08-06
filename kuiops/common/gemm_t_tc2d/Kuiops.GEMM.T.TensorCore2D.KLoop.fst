@@ -275,6 +275,12 @@ fn k_loop_step
     as CV2.own_strided_chunks (atranspose sB) eB0 nthr tid;
   fold CV2.live_strided_chunks (atranspose sB) nthr tid;
 
+  (* The copies take the thread count as the literal tile expression, not the
+     [nthr] parameter: [nthr] is opaque at extraction, so the copy loop's stride
+     stays a runtime value and nvcc can neither unroll it nor fold the index
+     arithmetic.  Upstream's [copy_tiles_out_of_matrices_vec] call does the
+     same. *)
+
   (* ---- A tile: verbatim from upstream copy_tiles_out_of_matrices_vec ---- *)
   {
     unfold CV2.live_strided_chunks sA nthr tid;
@@ -285,7 +291,8 @@ fn k_loop_step
     Kuiper.Divides.lemma_divides_product_r (chunk et_ab) v bk;
     divides_helper (chunk et_ab) str_A.offset str_A.stride (mrow * bm) (v * bk);
 
-    cp_array2_vec bm bk tileA sA nthr tid;
+    cp_array2_vec bm bk tileA sA
+      (bm /^ (wm *^ tm) *^ (bn /^ (wn *^ tn)) *^ warp_size) tid;
 
     elim_trade _ _;
   };
@@ -309,7 +316,8 @@ fn k_loop_step
     Kuiper.Divides.lemma_divides_product_r (chunk et_ab) v bk;
     divides_helper (chunk et_ab) str_B.offset str_B.stride (mcol * bn) (v * bk);
 
-    cp_array2_vec bn bk tileB (atranspose sB) nthr tid;
+    cp_array2_vec bn bk tileB (atranspose sB)
+      (bm /^ (wm *^ tm) *^ (bn /^ (wn *^ tn)) *^ warp_size) tid;
 
     elim_trade _ _;
     atranspose_back gB;
