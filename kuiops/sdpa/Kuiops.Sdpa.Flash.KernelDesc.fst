@@ -1005,7 +1005,7 @@ fn flash_b0_to_descriptor
     pure (thread_w nw tid == w /\
           thread_lane nw tid == lane) **
     flash_b0_local nw d v w lane
-  ensures b0_pre nw d v.shQv v.shOv tid
+  ensures b0_raw nw d v.shQv v.shOv tid
 {
   unfold flash_b0_local nw d v w lane;
   rewrite each w as (thread_w nw tid);
@@ -1016,6 +1016,6 @@ fn flash_b0_to_descriptor
     (thread_w nw tid * BW.warp_size +
       thread_lane nw tid)
     as tid;
-  fold b0_pre nw d v.shQv v.shOv tid;
+  fold b0_raw nw d v.shQv v.shOv tid;
 }
 

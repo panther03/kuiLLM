@@ -158,6 +158,85 @@ fn strided_cells2_gather
 }
 
 ghost
+fn cells2_gather_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (e : chest2 et rows cols)
+  requires
+    pure (SZ.fits (tlayout_ulen l)) **
+    (forall+ (i : natlt rows) (j : natlt cols).
+      Cell a (idx2 i j) |-> Frac 1.0R (acc2 e i j))
+  ensures a |-> Frac 1.0R e
+{
+  forevery_map_2
+    (fun (i : natlt rows) (j : natlt cols) ->
+      Cell a (idx2 i j) |-> Frac 1.0R (acc2 e i j))
+    (fun (i : natlt rows) (j : natlt cols) ->
+      Cell a (idx2 i j) |-> Frac 1.0R (acc e (idx2 i j)))
+    fn i j {
+      assert pure (acc e (idx2 i j) == acc2 e i j);
+      rewrite
+        (Cell a (idx2 i j) |-> Frac 1.0R (acc2 e i j))
+        as
+        (Cell a (idx2 i j) |-> Frac 1.0R (acc e (idx2 i j)));
+    };
+  tensor_iraise2 a #1.0R #e;
+}
+
+ghost
+fn strided_cells2_gather_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (nthr : pos) (e : chest2 et rows cols)
+  requires
+    pure (SZ.fits (tlayout_ulen l)) **
+    (forall+ (tid : natlt nthr). strided_cells2_v a nthr tid e)
+  ensures a |-> Frac 1.0R e
+{
+  forevery_map #(natlt nthr)
+    (fun tid -> strided_cells2_v a nthr tid e)
+    (fun tid ->
+      forall+ (ij : stride_index2 rows cols nthr tid).
+        Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2))
+    fn tid {
+      unfold strided_cells2_v a nthr tid e;
+    };
+  forevery_flatten_dep
+    (fun (tid : natlt nthr) (ij : stride_index2 rows cols nthr tid) ->
+      Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2));
+  forevery_iso (stride_partition_bij rows cols nthr)
+    (fun x ->
+      Cell a (idx2 x._2._1 x._2._2) |-> Frac 1.0R (acc2 e x._2._1 x._2._2));
+  forevery_map #(natlt rows & natlt cols)
+    (fun ij ->
+      Cell a
+        (idx2
+          ((stride_partition_bij rows cols nthr).gg ij)._2._1
+          ((stride_partition_bij rows cols nthr).gg ij)._2._2)
+        |-> Frac 1.0R
+          (acc2 e
+            ((stride_partition_bij rows cols nthr).gg ij)._2._1
+            ((stride_partition_bij rows cols nthr).gg ij)._2._2))
+    (fun ij -> Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2))
+    fn ij {
+      assert pure (
+        ((stride_partition_bij rows cols nthr).gg ij)._2 == ij);
+      rewrite
+        (tensor_pts_to_cell a #1.0R
+          (idx2
+            ((stride_partition_bij rows cols nthr).gg ij)._2._1
+            ((stride_partition_bij rows cols nthr).gg ij)._2._2)
+          (acc2 e
+            ((stride_partition_bij rows cols nthr).gg ij)._2._1
+            ((stride_partition_bij rows cols nthr).gg ij)._2._2))
+        as
+        (tensor_pts_to_cell a #1.0R (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+    };
+  forevery_unflatten'
+    (fun (ij : natlt rows & natlt cols) ->
+      Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2));
+  cells2_gather_v a e;
+}
+
+ghost
 fn b0_o_transform
   (#et : Type0) (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
@@ -604,6 +683,7 @@ fn barrier_ok
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
@@ -611,53 +691,44 @@ fn barrier_ok
   (it : nat)
   requires
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rin nw d shQ shM shL shscale shO shgl it tid
+      barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid
   ensures
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rout nw d shQ shM shL shscale shO shgl it tid
+      barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid
 {
   if (it = 0) {
     forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> b0_pre nw d shQ shO tid)
+      (fun tid -> barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
+      (fun tid -> b0_pre nw d shQ eQsh shO tid)
       fn tid {
         rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
+          (barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
           as
-          (b0_pre nw d shQ shO tid);
+          (b0_pre nw d shQ eQsh shO tid);
       };
     forevery_map #(natlt (block_threads nw))
-      (fun tid -> b0_pre nw d shQ shO tid)
+      (fun tid -> b0_pre nw d shQ eQsh shO tid)
       (fun tid ->
-        strided_cells2 shQ (block_threads nw) tid **
+        strided_cells2_v shQ (block_threads nw) tid eQsh **
         strided_cells2
           (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
           BW.warp_size (thread_lane nw tid))
       fn tid {
-        unfold b0_pre nw d shQ shO tid;
+        unfold b0_pre nw d shQ eQsh shO tid;
       };
     forevery_unzip #(natlt (block_threads nw))
-      (fun tid -> strided_cells2 shQ (block_threads nw) tid)
+      (fun tid -> strided_cells2_v shQ (block_threads nw) tid eQsh)
       (fun tid ->
         strided_cells2
           (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
           BW.warp_size (thread_lane nw tid));
 
-    strided_cells2_gather shQ (block_threads nw);
-    with eQ. assert (shQ |-> Frac 1.0R eQ);
+    strided_cells2_gather_v shQ (block_threads nw) eQsh;
     tensor_share_n shQ (block_threads nw);
-    forevery_map #(natlt (block_threads nw))
-      (fun _ -> shQ |-> Frac (1.0R /. (block_threads nw)) eQ)
-      (fun _ ->
-        exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e)
-      fn tid { () };
 
     b0_o_transform nw d shO;
     forevery_zip #(natlt (block_threads nw))
-      (fun _ ->
-        exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e)
+      (fun _ -> shQ |-> Frac (1.0R /. (block_threads nw)) eQsh)
       (fun tid ->
         exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
           array2_stride_subtile
@@ -667,19 +738,17 @@ fn barrier_ok
             |-> Frac 1.0R e);
     forevery_map #(natlt (block_threads nw))
       (fun tid ->
-        (exists* (e : chest2 et_ab 16 (SZ.v d)).
-          shQ |-> Frac (1.0R /. (block_threads nw)) e) **
+        (shQ |-> Frac (1.0R /. (block_threads nw)) eQsh) **
         (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
           array2_stride_subtile
             (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
             warp_row_span 16
             (thread_lane nw tid / 16) (thread_lane nw tid % 16)
             |-> Frac 1.0R e))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid)
       fn tid {
         rewrite
-          ((exists* (e : chest2 et_ab 16 (SZ.v d)).
-              shQ |-> Frac (1.0R /. (block_threads nw)) e) **
+          ((shQ |-> Frac (1.0R /. (block_threads nw)) eQsh) **
            (exists* (e : chest2 et_acc (16 / warp_row_span) (SZ.v d / 16)).
               array2_stride_subtile
                 (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw tid) 0)
@@ -687,19 +756,19 @@ fn barrier_ok
                 (thread_lane nw tid / 16) (thread_lane nw tid % 16)
                 |-> Frac 1.0R e))
           as
-          (b0_post nw d shQ shO tid);
+          (b0_post nw d shQ eQsh shO tid);
         rewrite
-          (b0_post nw d shQ shO tid)
+          (b0_post nw d shQ eQsh shO tid)
           as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
+          (barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid);
       };
   } else if (it = 1) {
     forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
       (fun tid -> b1_pre nw shM shL tid)
       fn tid {
         rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
+          (barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
           as
           (b1_pre nw shM shL tid);
       };
@@ -727,7 +796,7 @@ fn barrier_ok
           shM |-> Frac (1.0R /. (block_threads nw)) e) **
         (exists* (e : chest2 et_acc (SZ.v nw) 16).
           shL |-> Frac (1.0R /. (block_threads nw)) e))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid)
       fn tid {
         rewrite
           ((exists* (e : chest2 et_acc (SZ.v nw) 16).
@@ -739,15 +808,15 @@ fn barrier_ok
         rewrite
           (b1_post nw shM shL tid)
           as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
+          (barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid);
       };
   } else if (it = 2) {
     forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
       (fun tid -> b2_pre nw d shscale shO shgl tid)
       fn tid {
         rewrite
-          (barrier_rin nw d shQ shM shL shscale shO shgl it tid)
+          (barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
           as
           (b2_pre nw d shscale shO shgl tid);
       };
@@ -787,7 +856,7 @@ fn barrier_ok
           shO |-> Frac (1.0R /. (block_threads nw)) e) **
          (exists* (e : chest1 et_acc 16).
           shgl |-> Frac (1.0R /. (block_threads nw)) e)))
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid)
       fn tid {
         rewrite
           ((exists* (e : chest2 et_acc (SZ.v nw) 16).
@@ -801,16 +870,16 @@ fn barrier_ok
         rewrite
           (b2_post nw d shscale shO shgl tid)
           as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
+          (barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid);
       };
   } else {
     forevery_map #(natlt (block_threads nw))
-      (fun tid -> barrier_rin nw d shQ shM shL shscale shO shgl it tid)
-      (fun tid -> barrier_rout nw d shQ shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid)
+      (fun tid -> barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid)
       fn tid {
-        rewrite (barrier_rin nw d shQ shM shL shscale shO shgl it tid) as emp;
+        rewrite (barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid) as emp;
         rewrite emp as
-          (barrier_rout nw d shQ shM shL shscale shO shgl it tid);
+          (barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid);
       };
   }
 }

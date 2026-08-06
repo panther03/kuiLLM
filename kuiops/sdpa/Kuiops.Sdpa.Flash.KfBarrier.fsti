@@ -24,6 +24,7 @@ module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 
 
 inline_for_extraction noextract
@@ -56,10 +57,10 @@ fn sdpa_flash_block_prologue
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl) **
     B.barrier_state 0 **
     (gQ |-> Frac fQ eQ) **
-    b0_pre nw d shQ shO (SZ.v tid) **
+    b0_raw nw d shQ shO (SZ.v tid) **
     if_ (lane_active 16sz (tid %^ 32sz))
       (ml_cells 16sz
         (row shM (SZ.v (tid /^ 32sz)))
@@ -68,14 +69,15 @@ fn sdpa_flash_block_prologue
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl) **
     B.barrier_state 1 **
     (gQ |-> Frac fQ eQ) **
-    b0_post nw d shQ shO (SZ.v tid) **
+    b0_post nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid) **
     when__ (SZ.v (tid %^ 32sz) < 16) (fun _ ->
-      cell_full (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)))
+      cell_full_v (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz))
+        (neg infinity))
     ** when__ (SZ.v (tid %^ 32sz) < 16) (fun _ ->
-      cell_full (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)))
+      cell_full_v (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) zero)
 
 inline_for_extraction noextract
 fn sdpa_flash_block_barrier1
@@ -87,17 +89,18 @@ fn sdpa_flash_block_barrier1
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   (tid : szlt nthr)
+  (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 1 **
     b1_pre nw shM shL (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 2 **
     b1_post nw shM shL (SZ.v tid)
 
@@ -111,17 +114,18 @@ fn sdpa_flash_block_barrier2
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   (tid : szlt nthr)
+  (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 2 **
     b2_pre nw d shscale shO shgl (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 3 **
     b2_post nw d shscale shO shgl (SZ.v tid)
 

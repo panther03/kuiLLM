@@ -18,6 +18,7 @@ module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 
 inline_for_extraction noextract
 let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
@@ -29,6 +30,13 @@ let strided_cells2
   (shA : array2 et l) (nthr : pos) (tid : natlt nthr) : slprop
 = forall+ (ij : stride_index2 rows cols nthr tid).
     exists* (v : et). tensor_pts_to_cell shA (idx2 ij._1 ij._2) v
+
+let strided_cells2_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (shA : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (e : chest2 et rows cols) : slprop
+= forall+ (ij : stride_index2 rows cols nthr tid).
+    tensor_pts_to_cell shA (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2)
 
 inline_for_extraction noextract
 fn sdpa_flash_q_load
@@ -60,9 +68,12 @@ fn sdpa_flash_q_load
     if_ (lane_active bm lane) (ml_cells bm shm shl lane)
   ensures
     (gQ |-> Frac fQ eQ) **
-    strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+    strided_cells2_v shQ (SZ.v nthr) (SZ.v tid)
+      (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group)
+         eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
     strided_cells2 shO BW.warp_size (SZ.v lane) **
-    if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+    if_ (lane_active bm lane)
+      (ml_cells_v bm shm shl lane (neg infinity) zero)
 
 inline_for_extraction noextract
 fn sdpa_flash_causal_mask

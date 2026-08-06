@@ -23,6 +23,7 @@ module EM = Kuiper.EMatrix
 module TRO = Kuiper.TensorRO
 module BW = Kuiper.Barrier.Warp
 module B = Kuiper.Barrier
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 
 inline_for_extraction noextract
 let flash_scale_cimap
@@ -77,6 +78,126 @@ let thread_lane (nw : szp) (tid : natlt (block_threads nw)) : natlt BW.warp_size
 
 let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
   ij:(natlt rows & natlt cols) { (ij._1 * cols + ij._2) % nthr == tid }
+
+(* Ownership of one cell of a strided load loop: written cells carry their
+   final value, the rest are still arbitrary. *)
+let q_cell
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols) : slprop
+= if ij._1 * cols + ij._2 < cur
+  then tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2)
+  else exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v
+
+ghost fn q_cell_intro_todo
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v) **
+           pure (ij._1 * cols + ij._2 >= cur)
+  ensures q_cell a qt cur ij
+{
+  rewrite (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v)
+       as (q_cell a qt cur ij);
+}
+
+ghost fn q_cell_elim_todo
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij ** pure (ij._1 * cols + ij._2 >= cur)
+  ensures exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v
+{
+  rewrite (q_cell a qt cur ij)
+       as (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v);
+}
+
+ghost fn q_cell_intro_done
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2) **
+           pure (ij._1 * cols + ij._2 < cur)
+  ensures q_cell a qt cur ij
+{
+  rewrite (tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2))
+       as (q_cell a qt cur ij);
+}
+
+ghost fn q_cell_bump
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur cur' : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij **
+           pure ((ij._1 * cols + ij._2 < cur) == (ij._1 * cols + ij._2 < cur'))
+  ensures q_cell a qt cur' ij
+{
+  rewrite (q_cell a qt cur ij) as (q_cell a qt cur' ij);
+}
+
+ghost fn q_cell_elim_done
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij ** pure (ij._1 * cols + ij._2 < cur)
+  ensures tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2)
+{
+  rewrite (q_cell a qt cur ij)
+       as (tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2));
+}
+
+(* A strided thread's cells all lie at or past its own offset ... *)
+let stride_ge_tid (nthr : pos) (tid : natlt nthr) (f : nat)
+  : Lemma (requires f % nthr == tid) (ensures f >= tid)
+  = if f < tid then FStar.Math.Lemmas.small_mod f nthr else ()
+
+(* ... and two distinct ones are at least a stride apart. *)
+let stride_gap (nthr : pos) (tid : natlt nthr) (cur f : nat)
+  : Lemma (requires cur % nthr == tid /\ f % nthr == tid /\ f <> cur)
+          (ensures f < cur \/ f >= cur + nthr)
+  = FStar.Math.Lemmas.euclidean_division_definition f nthr;
+    FStar.Math.Lemmas.euclidean_division_definition cur nthr;
+    if f > cur && f < cur + nthr then
+      FStar.Math.Lemmas.lemma_mult_lt_right nthr (cur / nthr) (f / nthr)
+    else ()
+
+(* A flat row-major index determines its cell. *)
+let flat_inj (cols : pos) (i : nat) (j : natlt cols)
+  : Lemma ((i * cols + j) / cols == i /\ (i * cols + j) % cols == j)
+  = FStar.Math.Lemmas.lemma_div_plus j i cols;
+    FStar.Math.Lemmas.lemma_mod_plus j i cols;
+    FStar.Math.Lemmas.small_div j cols;
+    FStar.Math.Lemmas.small_mod j cols
+
+let flat_lt (rows cols : nat) (i : natlt rows) (j : natlt cols)
+  : Lemma (i * cols + j < rows * cols)
+  = FStar.Math.Lemmas.lemma_mult_le_right cols (i + 1) rows
+
+(* Advancing the "done" watermark by one stride leaves every other cell of the
+   thread's stride class on the same side of it. *)
+let stride_next (nthr : pos) (tid : natlt nthr) (rows : nat) (cols : pos)
+  (i : natlt rows) (j : natlt cols) (ij : natlt rows & natlt cols)
+  : Lemma
+    (requires (i * cols + j) % nthr == tid /\
+              (ij._1 * cols + ij._2) % nthr == tid /\
+              ij =!= ((i, j) <: (natlt rows & natlt cols)))
+    (ensures (ij._1 * cols + ij._2 < i * cols + j) ==
+             (ij._1 * cols + ij._2 < i * cols + j + nthr))
+  = flat_inj cols i j;
+    flat_inj cols ij._1 ij._2;
+    stride_gap nthr tid (i * cols + j) (ij._1 * cols + ij._2)
+
+inline_for_extraction noextract
+let q_sel (#et : Type0) {| scalar et |} (cond : bool) (v : et) : et =
+  if cond then v else zero
+
+unfold
+let strided_cells2_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (e : chest2 et rows cols) : slprop
+= forall+ (ij : stride_index2 rows cols nthr tid).
+    Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2)
 
 unfold
 let strided_cells2
@@ -142,14 +263,28 @@ let out_stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 
     (ij._1 * cols + ij._2) % nthr == tid}
 
 unfold
+let cell_full_n_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (shA : array1 et l) (i : natlt len) (v : et) : slprop
+= tensor_pts_to_cell shA (idx1 i) v
+
+unfold
 let cell_full_n
   (#et : Type0) (#len : nat) (#l : layout1 len)
   (shA : array1 et l) (i : natlt len) : slprop
-= exists* (v : et). tensor_pts_to_cell shA (idx1 i) v
+= exists* (v : et). cell_full_n_v shA i v
 
 inline_for_extraction noextract
 let lane_active (bm : szp) (lane : szlt warp_size) : bool =
   lane <^ bm
+
+let ml_cells_v
+  (#et : Type0) (bm : szp)
+  (#lm #ll : layout1 bm)
+  (shm : array1 et lm) (shl : array1 et ll)
+  (lane : szlt warp_size) (vm vl : et) : slprop
+= cell_full_n_v shm (SZ.v (clamp_lt bm lane)) vm **
+  cell_full_n_v shl (SZ.v (clamp_lt bm lane)) vl
 
 let ml_cells
   (#et : Type0) (bm : szp)
@@ -600,6 +735,18 @@ let flash_block_output
       lane
 
 unfold
+let flash_eQsh
+  (#et_ab : Type0) {| scalar et_ab |}
+  (d : szp) (b hq hkv group sq rows tiles : szp)
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_ab 16 (SZ.v d))
+= SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+unfold
 let flash_views_live
   (#et_ab #et_acc : Type0) (#nw #d : pos)
   (v : flash_views et_ab et_acc nw d) : slprop =
@@ -664,7 +811,7 @@ let flash_w0_bij (nw : szp)
 }
 
 unfold
-let b0_pre
+let b0_raw
   (#et_q #et_o : Type0) (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
@@ -676,16 +823,29 @@ let b0_pre
   strided_cells2 (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
 
 unfold
-let b0_post
+let b0_pre
   (#et_q #et_o : Type0) (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_q 16 (SZ.v d))
   (shO : array2 et_o (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (tid : natlt (block_threads nw)) : slprop
 = let w = thread_w nw tid in
   let lane = thread_lane nw tid in
-  (exists* (e : chest2 et_q 16 (SZ.v d)).
-     shQ |-> Frac (1.0R /. (block_threads nw)) e)
+  strided_cells2_v shQ (block_threads nw) tid eQsh **
+  strided_cells2 (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
+
+unfold
+let b0_post
+  (#et_q #et_o : Type0) (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_q 16 (SZ.v d))
+  (shO : array2 et_o (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (tid : natlt (block_threads nw)) : slprop
+= let w = thread_w nw tid in
+  let lane = thread_lane nw tid in
+  (shQ |-> Frac (1.0R /. (block_threads nw)) eQsh)
   ** (exists* (o : chest2 et_o (16 / warp_row_span) (SZ.v d / 16)).
         array2_stride_subtile
           (array2_subtile shO 16 (SZ.v d <: pos) w 0)
@@ -785,13 +945,14 @@ let barrier_rin
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   : B.barrier_side (block_threads nw)
 = fun it tid ->
-    if it = 0 then b0_pre nw d shQ shO tid
+    if it = 0 then b0_pre nw d shQ eQsh shO tid
     else if it = 1 then b1_pre nw shM shL tid
     else if it = 2 then b2_pre nw d shscale shO shgl tid
     else emp
@@ -801,13 +962,14 @@ let barrier_rout
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   : B.barrier_side (block_threads nw)
 = fun it tid ->
-    if it = 0 then b0_post nw d shQ shO tid
+    if it = 0 then b0_post nw d shQ eQsh shO tid
     else if it = 1 then b1_post nw shM shL tid
     else if it = 2 then b2_post nw d shscale shO shgl tid
     else emp
@@ -817,14 +979,15 @@ let barrier_contract
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   : B.contract (block_threads nw)
 = {
-  rin = barrier_rin nw d shQ shM shL shscale shO shgl;
-  rout = barrier_rout nw d shQ shM shL shscale shO shgl;
+  rin = barrier_rin nw d shQ eQsh shM shL shscale shO shgl;
+  rout = barrier_rout nw d shQ eQsh shM shL shscale shO shgl;
 }
 
 let barrier_count (_nw : szp) : GTot nat = 3
@@ -1010,7 +1173,7 @@ let sdpa_flash_jt_frame
 
 unfold
 let sdpa_flash_pre
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_ab |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1048,10 +1211,12 @@ let sdpa_flash_pre
   : slprop
 = gpu **
   thread_id (block_threads nw) tid **
-  B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+  B.barrier_tok (barrier_contract nw d shQ
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))
+    shM shL shscale shO shgl) **
   B.barrier_state 0 **
   (gQ |-> Frac fQ eQ) **
-  b0_pre nw d shQ shO tid **
+  b0_raw nw d shQ shO tid **
   if_ (lane_active 16sz (sdpa_flash_lane nw nthr tid))
     (ml_cells 16sz
       (row shM (SZ.v (sdpa_flash_w nw nthr tid)))
@@ -1070,7 +1235,7 @@ let sdpa_flash_pre
 
 unfold
 let sdpa_flash_post
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_ab |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1108,11 +1273,13 @@ let sdpa_flash_post
   : slprop
 = gpu **
   thread_id (block_threads nw) tid **
-  B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+  B.barrier_tok (barrier_contract nw d shQ
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))
+    shM shL shscale shO shgl) **
   B.barrier_state 3 **
   (gQ |-> Frac fQ eQ) **
-  (exists* (e : chest2 et_ab 16 (SZ.v d)).
-    shQ |-> Frac (1.0R /. (block_threads nw)) e) **
+  (shQ |-> Frac (1.0R /. (block_threads nw))
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))) **
   b1_post nw shM shL tid **
   b2_post nw d shscale shO shgl tid **
   sdpa_flash_jt_frame d sk b hq sq

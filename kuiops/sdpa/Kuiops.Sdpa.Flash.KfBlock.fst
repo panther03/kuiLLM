@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 module FT = Kuiops.Sdpa.Flash.Types
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
@@ -70,7 +71,8 @@ fn sdpa_flash_ml_init_active
   (#fQ : perm) (#eQ : chest (b @| hq @| sq @| d @| INil) et_q)
   preserves (gQ |-> Frac fQ eQ)
   requires cell_full_n shm (SZ.v lane) ** cell_full_n shl (SZ.v lane)
-  ensures  cell_full_n shm (SZ.v lane) ** cell_full_n shl (SZ.v lane)
+  ensures  cell_full_n_v shm (SZ.v lane) (neg infinity)
+        ** cell_full_n_v shl (SZ.v lane) zero
 {
   unfold (cell_full_n shm (SZ.v lane));
   unfold (cell_full_n shl (SZ.v lane));
@@ -78,12 +80,16 @@ fn sdpa_flash_ml_init_active
   rewrite (tensor_pts_to_cell shm (idx1 (SZ.v lane)) vm)
        as (tensor_pts_to_cell shm (up (cidx1 lane)) vm);
   tensor_write_cell shm (cidx1 lane) (neg infinity);
+  rewrite (tensor_pts_to_cell shm (up (cidx1 lane)) (neg infinity))
+       as (tensor_pts_to_cell shm (idx1 (SZ.v lane)) (neg infinity));
   with vl. assert (tensor_pts_to_cell shl (idx1 (SZ.v lane)) vl);
   rewrite (tensor_pts_to_cell shl (idx1 (SZ.v lane)) vl)
        as (tensor_pts_to_cell shl (up (cidx1 lane)) vl);
   tensor_write_cell shl (cidx1 lane) zero;
-  fold (cell_full_n shm (SZ.v lane));
-  fold (cell_full_n shl (SZ.v lane));
+  rewrite (tensor_pts_to_cell shl (up (cidx1 lane)) zero)
+       as (tensor_pts_to_cell shl (idx1 (SZ.v lane)) zero);
+  fold (cell_full_n_v shm (SZ.v lane) (neg infinity));
+  fold (cell_full_n_v shl (SZ.v lane) (zero #et));
 }
 
 inline_for_extraction noextract
@@ -99,18 +105,19 @@ fn sdpa_flash_ml_init_maybe
   (#fQ : perm) (#eQ : chest (b @| hq @| sq @| d @| INil) et_q)
   preserves (gQ |-> Frac fQ eQ)
   requires if_ (lane_active bm lane) (ml_cells bm shm shl lane)
-  ensures  if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+  ensures  if_ (lane_active bm lane)
+             (ml_cells_v bm shm shl lane (neg infinity) zero)
 {
   let active = lane_active bm lane;
   if active {
     if_elim_true _;
     unfold (ml_cells bm shm shl lane);
     sdpa_flash_ml_init_active bm b hq sq d shm shl gQ (clamp_lt bm lane);
-    fold (ml_cells bm shm shl lane);
-    if_intro_true (ml_cells bm shm shl lane);
+    fold (ml_cells_v bm shm shl lane (neg infinity) (zero #et));
+    if_intro_true (ml_cells_v bm shm shl lane (neg infinity) (zero #et));
   } else {
     if_elim_false (ml_cells bm shm shl lane);
-    if_intro_false (ml_cells bm shm shl lane);
+    if_intro_false (ml_cells_v bm shm shl lane (neg infinity) (zero #et));
   }
 }
 
@@ -146,18 +153,31 @@ fn sdpa_flash_q_load
     if_ (lane_active bm lane) (ml_cells bm shm shl lane)
   ensures
     (gQ |-> Frac fQ eQ) **
-    strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+    strided_cells2_v shQ (SZ.v nthr) (SZ.v tid)
+      (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group)
+         eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
     strided_cells2 shO BW.warp_size (SZ.v lane) **
-    if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+    if_ (lane_active bm lane)
+      (ml_cells_v bm shm shl lane (neg infinity) zero)
 {
   let ncells : sz = bm *^ d;
+  unfold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
+  forevery_map #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
+    (fun ij -> exists* (v : et_ab). tensor_pts_to_cell shQ (idx2 ij._1 ij._2) v)
+    (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v tid) ij)
+    fn ij {
+      stride_ge_tid (SZ.v nthr) (SZ.v tid) (ij._1 * SZ.v d + ij._2);
+      q_cell_intro_todo shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v tid) ij;
+    };
+
   let mut idx : sz = tid;
   let mut iter : sz = 0sz;
   while (!idx <^ ncells)
     invariant
       live idx ** live iter **
       (gQ |-> Frac fQ eQ) **
-      strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+      (forall+ (ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)).
+        q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v !idx) ij) **
       strided_cells2 shO BW.warp_size (SZ.v lane) **
       if_ (lane_active bm lane) (ml_cells bm shm shl lane) **
       pure (SZ.v !idx % SZ.v nthr == SZ.v tid) **
@@ -166,6 +186,8 @@ fn sdpa_flash_q_load
     decreases (SZ.v ncells - SZ.v !iter)
   {
     let flat = !idx;
+    let next = flat +^ nthr;
+    assert pure (SZ.v next == SZ.v flat + SZ.v nthr);
     let i : szlt bm = flat /^ d;
     let dd : szlt d = flat %^ d;
     let r = r0 +^ i;
@@ -174,30 +196,58 @@ fn sdpa_flash_q_load
     let qh1 : szlt hq = clamp_lt hq qh0;
     let qpos : szlt sq = rr %^ sq;
     let qread = tensor_read gQ (cidx4 bi qh1 qpos dd);
-    let qv : et_ab = if (r <^ rows) { qread } else { zero #et_ab #_ };
+    let qv : et_ab = q_sel (r <^ rows) qread;
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
-    unfold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
-    forevery_extract'
+    assert pure (SZ.v i * SZ.v d + SZ.v dd == SZ.v flat);
+    assert pure (acc2 (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v i) (SZ.v dd) == qv);
+    forevery_remove
       #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))) _;
+      (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v flat) ij)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    q_cell_elim_todo shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v flat)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
     with oldq. assert (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) oldq);
     rewrite (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) oldq)
          as (tensor_pts_to_cell shQ (up (cidx2 i dd)) oldq);
     tensor_write_cell shQ (cidx2 i dd) qv;
-    with newq. assert (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq);
-    rewrite (tensor_pts_to_cell shQ (up (cidx2 i dd)) newq)
-         as (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) newq);
-    elim_forall
-      (fun (ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) ->
-        exists* x. tensor_pts_to_cell shQ (idx2 ij._1 ij._2) x);
-    Trade.elim_trade _ _;
-    fold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
-    FStar.Math.Lemmas.lemma_mod_plus (SZ.v !idx) 1 (SZ.v nthr);
-    let next = !idx +^ nthr;
+    rewrite (tensor_pts_to_cell shQ (up (cidx2 i dd)) qv)
+         as (tensor_pts_to_cell shQ (idx2 (SZ.v i) (SZ.v dd)) qv);
+    FStar.Math.Lemmas.lemma_mod_plus (SZ.v flat) 1 (SZ.v nthr);
+    q_cell_intro_done shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v next)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_map
+      #(ij : stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid) {
+          ij =!= (((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)))
+                   <: stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid)) })
+      (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v flat) ij)
+      (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v next) ij)
+      fn ij {
+        stride_next (SZ.v nthr) (SZ.v tid) (SZ.v bm) (SZ.v d)
+          (SZ.v i) (SZ.v dd) ij;
+        q_cell_bump shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v flat) (SZ.v next) ij;
+      };
+    forevery_insert
+      #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
+      (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v next) ij)
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    forevery_unrefine
+      #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
+      (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v next) ij);
     assert pure (SZ.v !idx < SZ.v next);
     idx := next;
     iter := !iter +^ 1sz;
   };
+
+  let fin = !idx;
+  forevery_map #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))
+    (fun ij -> q_cell shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v fin) ij)
+    (fun ij -> tensor_pts_to_cell shQ (idx2 ij._1 ij._2)
+                 (acc2 (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) ij._1 ij._2))
+    fn ij {
+      flat_lt (SZ.v bm) (SZ.v d) ij._1 ij._2;
+      q_cell_elim_done shQ (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v fin) ij;
+    };
+  fold strided_cells2_v shQ (SZ.v nthr) (SZ.v tid) (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0));
 
   sdpa_flash_ml_init_maybe bm b hq sq d shm shl gQ lane;
 
@@ -207,9 +257,10 @@ fn sdpa_flash_q_load
     invariant
       live idx ** live iter **
       (gQ |-> Frac fQ eQ) **
-      strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
+      strided_cells2_v shQ (SZ.v nthr) (SZ.v tid) (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
       strided_cells2 shO BW.warp_size (SZ.v lane) **
-      if_ (lane_active bm lane) (ml_cells bm shm shl lane) **
+      if_ (lane_active bm lane)
+        (ml_cells_v bm shm shl lane (neg infinity) zero) **
       pure (SZ.v !idx % BW.warp_size == SZ.v lane) **
       pure (SZ.v !idx < SZ.v bm * SZ.v d + BW.warp_size) **
       pure (SZ.v !iter <= SZ.v !idx)

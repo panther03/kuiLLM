@@ -105,11 +105,15 @@ let sdpa_flash_kd
   shmems_desc = flash_shmems et_ab et_acc nw d;
   barrier_contract = (fun _bid sh ->
     let v = flash_views_of nw d sh in
-    barrier_contract nw d v.shQv v.shMv v.shLv v.shscalev v.shOv v.shglv);
+    barrier_contract nw d v.shQv
+      (flash_eQsh d b hq hkv group sq rows tiles eQ _bid)
+      v.shMv v.shLv v.shscalev v.shOv v.shglv);
   barrier_count = (fun _ -> 3);
   barrier_ok = (fun _bid sh ->
     let v = flash_views_of nw d sh in
-    FB.barrier_ok nw d v.shQv v.shMv v.shLv v.shscalev v.shOv v.shglv);
+    FB.barrier_ok nw d v.shQv
+      (flash_eQsh d b hq hkv group sq rows tiles eQ _bid)
+      v.shMv v.shLv v.shscalev v.shOv v.shglv);
   frame = emp;
   block_pre = (fun bid ->
     flash_block_state nblk

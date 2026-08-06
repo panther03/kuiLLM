@@ -187,3 +187,21 @@ let kv_tile
   (e : chest2 et sk d) (k0 : nat)
   : chest2 et bn d
   = mk2 fun r c -> acc2 e (clamp_nat sk (k0 + r)) c
+
+(* The [bm x d] block of Q the block loads into shared memory, exactly as
+   [Kuiops.Sdpa.Flash.KfBlock.sdpa_flash_q_load] writes it: row [i] is query
+   [r0 + i] of the flattened (head, position) axis, and rows past the end of
+   the sequence are zeroed. *)
+let q_tile
+  (#et : Type0) {| scalar et |}
+  (#b : nat) (#hq #sq : pos) (#d : nat)
+  (bm : nat) (rows : pos) (group : nat)
+  (eQ : chest (b @| hq @| sq @| d @| INil) et)
+  (bi : natlt b) (kvh : nat) (r0 : nat)
+  : GTot (chest2 et bm d)
+  = mk2 fun i dd ->
+      let r = r0 + i in
+      let rr = clamp_nat rows r in
+      let qh = clamp_nat hq (kvh * group + rr / sq) in
+      let qpos : natlt sq = rr % sq in
+      if r < rows then acc4 eQ bi qh qpos dd else zero

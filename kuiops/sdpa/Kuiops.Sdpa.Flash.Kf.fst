@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module Trade = Pulse.Lib.Trade
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 inline_for_extraction noextract
@@ -130,10 +131,6 @@ fn sdpa_flash_kf
   with eQsh. assert (
     shQ |-> Frac (1.0R /. (SZ.v nthr)) eQsh);
 
-  let vm0 = when__pin_cell16 (row shM (SZ.v (tid /^ 32sz)))
-              (SZ.v (tid %^ 32sz)) (zero #et_acc);
-  let vl0 = when__pin_cell16 (row shL (SZ.v (tid /^ 32sz)))
-              (SZ.v (tid %^ 32sz)) (zero #et_acc);
   assert (jt_rest_v #et_ab #et_acc d sk b hq sq
     shK shV shS shP
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v (tid /^ 32sz)) 0)
@@ -141,7 +138,7 @@ fn sdpa_flash_kf
     (row shM (SZ.v (tid /^ 32sz))) (row shL (SZ.v (tid /^ 32sz)))
     gK gV gmask
     #(1.0R /. (SZ.v nthr)) #fKg #fVg #fmask #eQsh #eKg #eVg #emask
-    (reveal vm0) (reveal vl0)
+    (neg infinity) (zero #et_acc)
     (SZ.v (tid %^ 32sz)));
 
   let w = sdpa_flash_w nw nthr tid;
@@ -165,7 +162,8 @@ fn sdpa_flash_kf
         pure (SZ.v !iter <= SZ.v vjt) **
         gpu **
         thread_id (block_threads nw) tid **
-        B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+        B.barrier_tok (barrier_contract nw d shQ
+          (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl) **
         B.barrier_state 1 **
         (gQ |-> Frac fQ eQ) **
         (exists* (vm vl : et_acc).

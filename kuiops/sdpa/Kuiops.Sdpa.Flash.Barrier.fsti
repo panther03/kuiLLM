@@ -190,6 +190,7 @@ fn barrier_ok
   (#_ : squash (SZ.fits (SZ.v nw * 16)))
   (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
@@ -197,10 +198,10 @@ fn barrier_ok
   (it : nat)
   requires
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rin nw d shQ shM shL shscale shO shgl it tid
+      barrier_rin nw d shQ eQsh shM shL shscale shO shgl it tid
   ensures
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rout nw d shQ shM shL shscale shO shgl it tid
+      barrier_rout nw d shQ eQsh shM shL shscale shO shgl it tid
 
 ghost
 fn flash_ml_to_pre

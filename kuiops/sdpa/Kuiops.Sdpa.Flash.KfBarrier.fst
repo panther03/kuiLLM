@@ -30,6 +30,7 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 module FT = Kuiops.Sdpa.Flash.Types
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
@@ -49,40 +50,36 @@ fn raw_cell_to_cell
 }
 
 ghost
-fn ml_if_to_when
+fn ml_if_to_when_v
   (#et : Type0)
   (#lm #ll : layout1 16)
   (shm : array1 et lm) (shl : array1 et ll)
-  (lane : szlt warp_size)
+  (lane : szlt warp_size) (vm vl : et)
   requires
-    if_ (lane_active 16sz lane) (ml_cells 16sz shm shl lane)
+    if_ (lane_active 16sz lane) (ml_cells_v 16sz shm shl lane vm vl)
   ensures
-    when__ (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane)) **
-    when__ (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane))
+    when__ (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm) **
+    when__ (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl)
 {
   let active = lane <^ 16sz;
   if active {
-    if_elim_true (ml_cells 16sz shm shl lane);
-    unfold (ml_cells 16sz shm shl lane);
-    unfold (cell_full_n shm (SZ.v (clamp_lt 16sz lane)));
-    unfold (cell_full_n shl (SZ.v (clamp_lt 16sz lane)));
+    if_elim_true (ml_cells_v 16sz shm shl lane vm vl);
+    unfold (ml_cells_v 16sz shm shl lane vm vl);
+    unfold (cell_full_n_v shm (SZ.v (clamp_lt 16sz lane)) vm);
+    unfold (cell_full_n_v shl (SZ.v (clamp_lt 16sz lane)) vl);
     assert pure (SZ.v (clamp_lt 16sz lane) == SZ.v lane);
     rewrite each (SZ.v (clamp_lt 16sz lane)) as (SZ.v lane);
-    with vm. assert (
-      tensor_pts_to_cell shm (idx1 (SZ.v lane)) vm);
-    raw_cell_to_cell shm (SZ.v lane);
-    with vl. assert (
-      tensor_pts_to_cell shl (idx1 (SZ.v lane)) vl);
-    raw_cell_to_cell shl (SZ.v lane);
-    fold (cell_full shm (SZ.v lane));
-    fold (cell_full shl (SZ.v lane));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
-    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+    raw_cell_to_cell shm (SZ.v lane) #vm;
+    raw_cell_to_cell shl (SZ.v lane) #vl;
+    fold (cell_full_v shm (SZ.v lane) vm);
+    fold (cell_full_v shl (SZ.v lane) vl);
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm);
+    when__intro_true (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl);
   } else {
-    if_elim_false (ml_cells 16sz shm shl lane);
+    if_elim_false (ml_cells_v 16sz shm shl lane vm vl);
     assert pure ((SZ.v lane < 16) == false);
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shm (SZ.v lane));
-    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full shl (SZ.v lane));
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shm (SZ.v lane) vm);
+    when__intro_false (SZ.v lane < 16) (fun _ -> cell_full_v shl (SZ.v lane) vl);
   }
 }
 
@@ -116,10 +113,10 @@ fn sdpa_flash_block_prologue
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl) **
     B.barrier_state 0 **
     (gQ |-> Frac fQ eQ) **
-    b0_pre nw d shQ shO (SZ.v tid) **
+    b0_raw nw d shQ shO (SZ.v tid) **
     if_ (lane_active 16sz (tid %^ 32sz))
       (ml_cells 16sz
         (row shM (SZ.v (tid /^ 32sz)))
@@ -128,14 +125,15 @@ fn sdpa_flash_block_prologue
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl) **
     B.barrier_state 1 **
     (gQ |-> Frac fQ eQ) **
-    b0_post nw d shQ shO (SZ.v tid) **
+    b0_post nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid) **
     when__ (SZ.v (tid %^ 32sz) < 16) (fun _ ->
-      cell_full (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)))
+      cell_full_v (row shM (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz))
+        (neg infinity))
     ** when__ (SZ.v (tid %^ 32sz) < 16) (fun _ ->
-      cell_full (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)))
+      cell_full_v (row shL (SZ.v (tid /^ 32sz))) (SZ.v (tid %^ 32sz)) zero)
 {
   let w : szlt nw = tid /^ 32sz;
   let lane : szlt warp_size = tid %^ 32sz;
@@ -143,7 +141,7 @@ fn sdpa_flash_block_prologue
   assert pure (SZ.v w == thread_w nw (SZ.v tid));
   assert pure (SZ.v lane == thread_lane nw (SZ.v tid));
 
-  unfold b0_pre nw d shQ shO (SZ.v tid);
+  unfold b0_raw nw d shQ shO (SZ.v tid);
   unfold FT.strided_cells2 shQ (block_threads nw) (SZ.v tid);
   unfold FT.strided_cells2
     (array2_subtile shO 16 (SZ.v d <: pos) (thread_w nw (SZ.v tid)) 0)
@@ -187,14 +185,15 @@ fn sdpa_flash_block_prologue
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
     tid lane bi r0 rows group kvh;
 
-  unfold strided_cells2 shQ (SZ.v nthr) (SZ.v tid);
+  unfold strided_cells2_v shQ (SZ.v nthr) (SZ.v tid) (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0));
   unfold strided_cells2
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
     BW.warp_size (SZ.v lane);
   forevery_rw_type
     (stride_index2 16 (SZ.v d) (SZ.v nthr) (SZ.v tid))
     (FT.stride_index2 16 (SZ.v d) (block_threads nw) (SZ.v tid))
-    (fun ij -> exists* (v : et_ab). tensor_pts_to_cell shQ (idx2 ij._1 ij._2) v);
+    (fun ij -> tensor_pts_to_cell shQ (idx2 ij._1 ij._2)
+                 (acc2 (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) ij._1 ij._2));
   forevery_rw_type
     (stride_index2 16 (SZ.v d) BW.warp_size (SZ.v lane))
     (FT.stride_index2 16 (SZ.v d) BW.warp_size (SZ.v lane))
@@ -202,24 +201,24 @@ fn sdpa_flash_block_prologue
       tensor_pts_to_cell
         (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
         (idx2 ij._1 ij._2) v);
-  fold FT.strided_cells2 shQ (block_threads nw) (SZ.v tid);
+  fold FT.strided_cells2_v shQ (block_threads nw) (SZ.v tid) (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0));
   fold FT.strided_cells2
     (array2_subtile shO 16 (SZ.v d <: pos) (SZ.v w) 0)
     BW.warp_size (SZ.v lane);
   rewrite each (SZ.v w) as (thread_w nw (SZ.v tid));
   rewrite each (SZ.v lane) as (thread_lane nw (SZ.v tid));
-  fold b0_pre nw d shQ shO (SZ.v tid);
+  fold b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid);
 
-  rewrite (b0_pre nw d shQ shO (SZ.v tid))
-       as ((barrier_contract nw d shQ shM shL shscale shO shgl).rin 0 (SZ.v tid));
+  rewrite (b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid))
+       as ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl).rin 0 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ shM shL shscale shO shgl).rout 0 (SZ.v tid))
-       as (b0_post nw d shQ shO (SZ.v tid));
+  rewrite ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL shscale shO shgl).rout 0 (SZ.v tid))
+       as (b0_post nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid));
 
-  ml_if_to_when
+  ml_if_to_when_v
     (row shM (SZ.v (tid /^ 32sz)))
     (row shL (SZ.v (tid /^ 32sz)))
-    (tid %^ 32sz);
+    (tid %^ 32sz) (neg infinity) zero;
 }
 
 inline_for_extraction noextract
@@ -232,24 +231,25 @@ fn sdpa_flash_block_barrier1
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   (tid : szlt nthr)
+  (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 1 **
     b1_pre nw shM shL (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 2 **
     b1_post nw shM shL (SZ.v tid)
 {
   rewrite (b1_pre nw shM shL (SZ.v tid))
-       as ((barrier_contract nw d shQ shM shL shscale shO shgl).rin 1 (SZ.v tid));
+       as ((barrier_contract nw d shQ eQsh shM shL shscale shO shgl).rin 1 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ shM shL shscale shO shgl).rout 1 (SZ.v tid))
+  rewrite ((barrier_contract nw d shQ eQsh shM shL shscale shO shgl).rout 1 (SZ.v tid))
        as (b1_post nw shM shL (SZ.v tid));
 }
 
@@ -263,24 +263,25 @@ fn sdpa_flash_block_barrier2
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
   (tid : szlt nthr)
+  (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 2 **
     b2_pre nw d shscale shO shgl (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL shscale shO shgl) **
     B.barrier_state 3 **
     b2_post nw d shscale shO shgl (SZ.v tid)
 {
   rewrite (b2_pre nw d shscale shO shgl (SZ.v tid))
-       as ((barrier_contract nw d shQ shM shL shscale shO shgl).rin 2 (SZ.v tid));
+       as ((barrier_contract nw d shQ eQsh shM shL shscale shO shgl).rin 2 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ shM shL shscale shO shgl).rout 2 (SZ.v tid))
+  rewrite ((barrier_contract nw d shQ eQsh shM shL shscale shO shgl).rout 2 (SZ.v tid))
        as (b2_post nw d shscale shO shgl (SZ.v tid));
 }
 

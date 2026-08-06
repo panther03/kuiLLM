@@ -103,6 +103,8 @@ fn sdpa_flash_thread
     B.barrier_tok
       (barrier_contract nw d
         (flash_views_of nw d sh).shQv
+        (flash_eQsh d b hq hkv group sq rows tiles eQ
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shMv
         (flash_views_of nw d sh).shLv
         (flash_views_of nw d sh).shscalev
@@ -128,6 +130,8 @@ fn sdpa_flash_thread
     B.barrier_tok
       (barrier_contract nw d
         (flash_views_of nw d sh).shQv
+        (flash_eQsh d b hq hkv group sq rows tiles eQ
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shMv
         (flash_views_of nw d sh).shLv
         (flash_views_of nw d sh).shscalev
