@@ -39,17 +39,17 @@
         "acc_dtype": "float32",
         "backend": "tc2d_tn",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn4",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 32,
-          "bm": 128,
+          "bm": 64,
           "bn": 64,
           "tk": 16,
           "tm": 16,
           "tn": 16,
           "wm": 2,
-          "wn": 2
+          "wn": 4
         }
       }
     },
@@ -92,17 +92,17 @@
         "acc_dtype": "float32",
         "backend": "tc2d_tn",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn128_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn128_bk64_tm16_tn16_tk16_wm4_wn4",
         "out_dtype": "bfloat16",
         "tile": {
-          "bk": 32,
+          "bk": 64,
           "bm": 128,
           "bn": 128,
           "tk": 16,
           "tm": 16,
           "tn": 16,
-          "wm": 2,
-          "wn": 2
+          "wm": 4,
+          "wn": 4
         }
       }
     },
@@ -143,12 +143,12 @@
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_to",
+        "backend": "tc2d_tn",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk64_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
-          "bk": 32,
+          "bk": 64,
           "bm": 64,
           "bn": 64,
           "tk": 16,
@@ -207,11 +207,11 @@
         "acc_dtype": "float32",
         "backend": "tc2d_tn_bcast",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Addmm.Tc2DTnBcast.Bf16.F32.Bf16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Addmm.Tc2DTnBcast.Bf16.F32.Bf16.P_bm64_bn64_bk16_tm16_tn16_tk16_wm2_wn2",
         "out_dtype": "bfloat16",
         "tile": {
-          "bk": 32,
-          "bm": 128,
+          "bk": 16,
+          "bm": 64,
           "bn": 64,
           "tk": 16,
           "tm": 16,
