@@ -12,6 +12,7 @@ open Kuiper.Seq.Common
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Bijection { ( =~ ) }
 open Kuiops.HReducePoly.Spec
+open Kuiops.Maps { approx1 }
 
 module SZ = Kuiper.SizeT
 module RPM = Kuiper.Barrier.RPM

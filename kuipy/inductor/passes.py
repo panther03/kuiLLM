@@ -4,14 +4,15 @@ Registered as ``torch._inductor.config.post_grad_custom_post_pass``. Inductor
 calls it once per graph (after decompositions / functionalization) with the
 post-grad ``torch.fx.Graph``; we mutate it in place, replacing every node a
 Kuiper kernel can serve (see ``custom_ops.claim``) with the matching
-``kuiperjit::*`` custom op. User-registered fusion rules run first, so they can
-rewrite patterns (e.g. fold an elementwise map into a reduction's ``pre`` arg)
-before the built-in one-to-one GEMM replacement.
+``kuiperjit::*`` custom op. User-registered fusion rules run first, then the
+built-in map fusion (``fusion.apply``), so both can rewrite patterns before the
+one-to-one replacement sees them.
 """
 import torch
 from torch._inductor.custom_graph_pass import CustomGraphPass, get_hash_for_files
 
 from . import custom_ops
+from . import fusion
 from . import tracing
 
 # User-registered fusion rules: fn(graph) -> bool (True if it changed anything).
@@ -21,10 +22,9 @@ _fusion_rules = []
 def register_fusion_rule(fn):
     """Register a custom fusion rule ``fn(graph: torch.fx.Graph) -> bool``.
 
-    Called on every post-grad graph before the built-in GEMM replacement. The
-    rule mutates the graph in place and returns whether it changed anything.
-    This is the hook for pattern fusions such as folding elementwise ops into a
-    reduction's ``pre`` argument."""
+    Called on every post-grad graph before the built-in map fusion and the
+    one-to-one replacement. The rule mutates the graph in place and returns
+    whether it changed anything."""
     _fusion_rules.append(fn)
     return fn
 
@@ -56,11 +56,13 @@ class KuiperPostGradPass(CustomGraphPass):
         if self.replace:
             for rule in _fusion_rules:
                 changed = bool(rule(graph)) or changed
+            changed = fusion.apply(graph) or changed
 
         graph_trace = tracing.begin_graph(graph)
         for node in list(graph.nodes):
             claimed = custom_ops.claim(node)
-            tracing.record_node(node, claimed is not None, graph_trace)
+            fused = str(node.target).startswith("kuiperjit.")
+            tracing.record_node(node, claimed is not None or fused, graph_trace)
             if not self.replace or claimed is None:
                 continue
             new_target, new_args = claimed
@@ -81,6 +83,6 @@ class KuiperPostGradPass(CustomGraphPass):
         from .. import config as _config
         from .. import kuiops as _kuiops
         from .. import registry as _registry
-        files = (custom_ops.__file__, tracing.__file__, __file__,
+        files = (custom_ops.__file__, fusion.__file__, tracing.__file__, __file__,
                  _kuiops.__file__, _registry.__file__, _config.__file__)
         return get_hash_for_files(files) + (b":trace" if not self.replace else b"")

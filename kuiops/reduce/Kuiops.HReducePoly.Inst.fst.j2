@@ -55,6 +55,8 @@ open Pulse.Lib.Pledge
 open Kuiops.HReducePoly.Spec
 open Kuiops.HReducePoly.Exact
 open Kuiops.HReducePoly.Ops
+open Kuiper.Float.Casts
+open Kuiops.ElementwiseOps
 
 module SZ = Kuiper.SizeT
 
@@ -99,13 +101,12 @@ fn {{ name }}
         (output |-> mk #{{ r - 1 }} ({{ shp(r - 1) }}) #({{ out_et }}) (fun i ->
           reduced #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
             #{{ r - 1 }} #({{ shp(r - 1) }}) #(SZ.v d{{ r - 1 }})
-            {{ reduce_op }} ({{ pre_map }}) (fun (x : {{ out_et }}) -> x) vin i))))
+            {{ reduce_op }} ({{ pre_map }}) ({{ post_map }}) vin i))))
 {
   with vout. assert on gpu_loc (output |-> vout);
   FStar.Classical.forall_intro_3 {{ reduce_op }}_assoc;
   reduce_indexed #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
-    ({{ cs(r - 1) }}) {{ reduce_op }} ({{ pre_map }})
-    (fun (x : {{ out_et }}) -> x)
+    ({{ cs(r - 1) }}) {{ reduce_op }} ({{ pre_map }}) ({{ post_map }})
     rows d{{ r - 1 }} nth
     (append_index {% for k in range(r) %}d{{ k }} {% endfor %})
     (append_index_up {% for k in range(r) %}d{{ k }} {% endfor %})

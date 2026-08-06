@@ -15,14 +15,9 @@ open Kuiper.Functions
 open Kuiper.Tensor
 open Kuiper.Seq.Common
 open Kuiops.HReducePoly.Spec
+open Kuiops.Maps { approx1 }
 
 module SZ = Kuiper.SizeT
-
-(* Unary analogue of [approx2]. *)
-let approx1
-  (#a #b : Type0) {| scalar a, real_like a, scalar b, real_like b |}
-  (f : a -> b) (g : real -> real) : prop
-  = forall (x:a) (r:real). x %~ r ==> f x %~ g r
 
 (* The output chest approximates the real reduction of [vr]. *)
 let out_approx

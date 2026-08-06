@@ -67,6 +67,8 @@ def _key_part(v):
         return ("t", tuple(v.shape), tuple(v.stride()), v.dtype, str(v.device))
     if isinstance(v, (bool, int, float, str, torch.dtype, torch.device)) or v is None:
         return v
+    if isinstance(v, torch._ops.OpOverload):
+        return str(v)
     if isinstance(v, (list, tuple)):
         return tuple(_key_part(x) for x in v)
     raise TypeError(v)

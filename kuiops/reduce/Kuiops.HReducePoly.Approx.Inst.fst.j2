@@ -55,8 +55,16 @@ open Pulse.Lib.Pledge
 open Kuiops.HReducePoly.Spec
 open Kuiops.HReducePoly.Approx
 open Kuiops.HReducePoly.Ops
+open Kuiper.Float.Casts
+open Kuiops.Maps
 
 module SZ = Kuiper.SizeT
+
+inline_for_extraction noextract
+let pre_map_m : amap ({{ in_et }}) = {{ pre_map }}
+
+inline_for_extraction noextract
+let post_map_m : amap ({{ out_et }}) = {{ post_map }}
 
 inline_for_extraction noextract
 let append_index
@@ -99,7 +107,7 @@ fn {{ name }}
         (exists* (vout' : chest ({{ shp(r - 1) }}) ({{ out_et }})).
           (output |-> vout') **
           pure (out_approx {{ reduce_op }}_r
-            (fun (x : real) -> x) (fun (x : real) -> x)
+            pre_map_m.mr post_map_m.mr
             (to_real_chest vin) vout'))))
 {
   with vout. assert on gpu_loc (output |-> vout);
@@ -107,8 +115,8 @@ fn {{ name }}
   {{ reduce_op }}_ok ({{ out_et }}) #_ #_;
   reduce_indexed
     ({{ cs(r - 1) }}) {{ reduce_op }} {{ reduce_op }}_r
-    (fun (x : {{ in_et }}) -> x) (fun (x : real) -> x)
-    (fun (x : {{ out_et }}) -> x) (fun (x : real) -> x)
+    (amap_f pre_map_m) pre_map_m.mr
+    (amap_f post_map_m) post_map_m.mr
     rows d{{ r - 1 }} nth
     (append_index {% for k in range(r) %}d{{ k }} {% endfor %})
     (append_index_up {% for k in range(r) %}d{{ k }} {% endfor %})

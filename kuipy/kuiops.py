@@ -148,7 +148,7 @@ def cast_constarg(c,dt):
             torch.uint32: "uint32",
             torch.uint64: "uint64"
         }[dt]
-        return f"(uint64_to_{cast_typename} (FStar.UInt64.uint_to_t {c:d}))"
+        return f"(FStar.Int.Cast.uint64_to_{cast_typename} (FStar.UInt64.uint_to_t {c:d}))"
     else:
         raise ValueError(c)
 
@@ -340,6 +340,130 @@ class ElementwiseImpl(_Family):
             wrapper_ctx["cpp_et"] = torch_dtype_to_ctype(in_dtypes[1])
 
         return self._mod(module, fst_ctx, wrapper_ctx).run(*args[:len(in_dtypes)])
+
+
+# ---------------------------------------------------------------------------
+# Fusable unary maps (the pre_map / post_map slots of a Kuiper kernel)
+# ---------------------------------------------------------------------------
+#
+# A map list entry is either an aten op (unary) or an ``(op, const)`` pair for a
+# binary op whose second operand is resolved at JIT time. Entries apply left to
+# right: ``[relu, (mul, 5.0)]`` is ``fun x -> mul (relu x) 5.0``. The op ->
+# method table is ``ElementwiseImpl._IMPL``, so a map means exactly what the
+# standalone elementwise kernel for that op means.
+
+_MAP_NEEDS_CONST = ("add", "sub", "mul", "div")
+
+# Concrete F* map, as a function of the body it wraps and the rendered constant.
+_MAP_CONCRETE = {
+    "relu":   lambda b, c: f"(relu {b})",
+    "silu":   lambda b, c: f"(silu {b})",
+    "neg":    lambda b, c: f"(neg {b})",
+    "square": lambda b, c: f"(square {b})",
+    "rsqrt":  lambda b, c: f"(rsqrt {b})",
+    "sin":    lambda b, c: f"(sin {b})",
+    "cos":    lambda b, c: f"(cos {b})",
+    "add":    lambda b, c: f"(add {b} {c})",
+    "sub":    lambda b, c: f"(sub {b} {c})",
+    "mul":    lambda b, c: f"(mul {b} {c})",
+    "div":    lambda b, c: f"(div {b} {c})",
+}
+
+# Maps that also have a model over the reals (Kuiops.Maps), i.e. that can be
+# fused into a kernel whose specification is approximate. rsqrt / sin / cos are
+# absent: Kuiper has no real-valued counterpart for them.
+_MAP_APPROX = {
+    "relu":   lambda et, c: f"(amap_relu ({et}))",
+    "silu":   lambda et, c: f"(amap_silu ({et}))",
+    "neg":    lambda et, c: f"(amap_neg ({et}))",
+    "square": lambda et, c: f"(amap_square ({et}))",
+    "add":    lambda et, c: f"(amap_add #({et}) {c})",
+    "sub":    lambda et, c: f"(amap_sub #({et}) {c})",
+    "mul":    lambda et, c: f"(amap_mul #({et}) {c})",
+    "div":    lambda et, c: f"(amap_div #({et}) {c})",
+}
+
+
+def _map_entry(item):
+    """Split a map list entry into ``(aten op, constant or None)``."""
+    if isinstance(item, (tuple, list)):
+        if len(item) != 2:
+            return None
+        c = _scalar(item[1])
+        return None if c is None else (item[0], c)
+    return (item, None)
+
+
+def resolve_maps(entries, dtype, approx):
+    """Resolve a pre/post-map list to ``[(method, const), ...]``, applied left to
+    right, or ``None`` if any entry is outside what a fused map at ``dtype`` can
+    express. ``approx`` restricts to the ops that also have a real model."""
+    if entries is None:
+        return []
+    if isinstance(entries, (tuple, list)):
+        entries = list(entries)
+    else:
+        return None
+    if entries and dtype not in _SCALAR_DTYPES:
+        return None
+    out = []
+    for item in entries:
+        parsed = _map_entry(item)
+        if parsed is None:
+            return None
+        op, c = parsed
+        method = ElementwiseImpl._IMPL.get(op)
+        if method is None:
+            return None
+        if op in ElementwiseImpl._FLOATING_ONLY and dtype not in _FLOAT_DTYPES:
+            return None
+        if method == "pow":
+            # Squaring is the only exponent a map can express.
+            if c is None or c != 2:
+                return None
+            method, c = "square", None
+        if (c is not None) != (method in _MAP_NEEDS_CONST):
+            return None
+        if approx:
+            if method not in _MAP_APPROX:
+                return None
+            # The real model divides by the divisor's real value, which is only
+            # known -- and only provably non-zero -- for an integral constant.
+            if method == "div" and (c != int(c) or int(c) == 0):
+                return None
+        out.append((method, c))
+    return out
+
+
+def _concrete_map_body(entries, dtype, var="x"):
+    """F* term applying ``entries`` to ``var``, both at element type ``dtype``."""
+    body = var
+    for method, c in entries:
+        body = _MAP_CONCRETE[method](
+            body, cast_constarg(c, dtype) if c is not None else "")
+    return body
+
+
+def _approx_map_expr(entries, dtype):
+    """``Kuiops.Maps.amap`` term for ``entries`` at element type ``dtype``."""
+    et = torch_dtype_to_fstar(dtype)
+    expr = None
+    for method, c in entries:
+        if method == "div":
+            rendered = f"(FStar.Int64.int_to_t {int(c)})"
+        elif c is not None:
+            rendered = cast_constarg(c, dtype)
+        else:
+            rendered = ""
+        term = _MAP_APPROX[method](et, rendered)
+        expr = term if expr is None else f"(amap_comp {term} {expr})"
+    return expr or f"(amap_id ({et}))"
+
+
+def _map_tag(entries):
+    """Filename-safe fragment keying the kernel cache on a resolved map list."""
+    return "".join(m.title() + (_const_tag([c]) if c is not None else "")
+                   for m, c in entries)
 
 
 # ---------------------------------------------------------------------------
@@ -1253,23 +1377,37 @@ class HReducePolyImpl(_Family):
         else:
             out_dtype = torch.uint8 if Inp.dtype is torch.uint8 else torch.bool
 
+        # Elementwise maps folded into the kernel. Pre-maps run on the input in
+        # its own element type (before any widening cast), post-maps on the
+        # reduced value in the output element type -- matching the aten ops they
+        # replace.
+        pre_map = resolve_maps(kwargs.get("pre_map"), Inp.dtype, approx)
+        post_map = resolve_maps(kwargs.get("post_map"), out_dtype, approx)
+        if pre_map is None or post_map is None:
+            return None
+
         return dict(op=op, in_dtype=Inp.dtype, out_dtype=out_dtype, rank=rank,
-                    approx=approx)
+                    approx=approx, pre_map=pre_map, post_map=post_map)
 
     def run(self, spec, args, kwargs):
         op = spec["op"]
         in_dtype = spec["in_dtype"]
         out_dtype = spec["out_dtype"]
         rank = spec["rank"]
+        pre_map, post_map = spec["pre_map"], spec["post_map"]
+        map_tag = _map_tag(pre_map) + "To" + _map_tag(post_map)
+        map_tag = "" if map_tag == "To" else f".{map_tag}"
         if spec["approx"]:
             et = torch_dtype_to_fstar(in_dtype)
             module = (
                 f"Kuiops.HReducePoly.{op.title()}Approx."
-                f"R{rank}.{et.title()}")
+                f"R{rank}.{et.title()}{map_tag}")
             name = "hreduce_poly_jit"
             fst_ctx = dict(
                 module=module, name=name, r=rank, in_et=et, out_et=et,
-                reduce_op=f"{op}_a")
+                reduce_op=f"{op}_a",
+                pre_map=_approx_map_expr(pre_map, in_dtype),
+                post_map=_approx_map_expr(post_map, out_dtype))
             wrapper_ctx = dict(
                 module=module.replace(".", "_"), name=name, r=rank,
                 cpp_in=torch_dtype_to_ctype(in_dtype),
@@ -1288,7 +1426,8 @@ class HReducePolyImpl(_Family):
                 torch.uint8: "0uy", torch.uint16: "0us",
                 torch.uint32: "0ul", torch.uint64: "0UL",
             }[in_dtype]
-            pre_map = f"fun x -> if x = {zero} then 0uy else 1uy"
+            def widen(b):
+                return f"(if {b} = {zero} then 0uy else 1uy)"
         else:
             out_bits = (_SIGNED_INTEGER_DTYPES | _UNSIGNED_INTEGER_DTYPES)[out_dtype]
             reduce_op = f"{op}_u{out_bits}"
@@ -1298,23 +1437,26 @@ class HReducePolyImpl(_Family):
             else:
                 in_bits = _UNSIGNED_INTEGER_DTYPES[in_dtype]
                 cast = f"uint{in_bits}_to_uint{out_bits}"
-            pre_map = (
-                "fun x -> x" if in_bits == out_bits
-                and in_dtype not in _SIGNED_INTEGER_DTYPES
-                else f"FStar.Int.Cast.{cast}"
-            )
+            identity = (in_bits == out_bits
+                        and in_dtype not in _SIGNED_INTEGER_DTYPES)
+            def widen(b, cast=cast, identity=identity):
+                return b if identity else f"(FStar.Int.Cast.{cast} {b})"
 
         in_et = torch_dtype_to_fstar(in_dtype)
         out_et = f"u{out_bits}"
+        pre_expr = (f"fun (x : {in_et}) -> "
+                    f"{widen(_concrete_map_body(pre_map, in_dtype))}")
+        post_expr = (f"fun (x : {out_et}) -> "
+                     f"{_concrete_map_body(post_map, out_dtype)}")
         module = (
             f"Kuiops.HReducePoly.{op.title()}."
             f"R{rank}.{in_et.title()}To{out_et.title()}As"
-            f"{str(out_dtype).rsplit('.', 1)[-1].title()}"
+            f"{str(out_dtype).rsplit('.', 1)[-1].title()}{map_tag}"
         )
         name = "hreduce_poly_jit"
         fst_ctx = dict(
             module=module, name=name, r=rank, in_et=in_et, out_et=out_et,
-            reduce_op=reduce_op, pre_map=pre_map)
+            reduce_op=reduce_op, pre_map=pre_expr, post_map=post_expr)
         wrapper_ctx = dict(
             module=module.replace(".", "_"), name=name, r=rank,
             cpp_in=torch_dtype_to_ctype(in_dtype),

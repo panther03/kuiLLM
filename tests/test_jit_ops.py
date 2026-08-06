@@ -361,6 +361,69 @@ def test_hreduce_poly_support_constraints():
 
 
 # ---------------------------------------------------------------------------
+# fused pre_map / post_map
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("pre,post,ref_fn", [
+    ([aten.relu.default], [], lambda x: torch.relu(x)),
+    ([], [(aten.mul.Scalar, 0.5)], lambda x: x),
+    ([(aten.pow.Tensor_Scalar, 2)], [(aten.div.Tensor, 64)], lambda x: x * x),
+    ([aten.relu.default, (aten.mul.Scalar, 2.0), aten.silu.default], [],
+     lambda x: torch.nn.functional.silu(torch.relu(x) * 2.0)),
+])
+def test_hreduce_poly_maps_approx(pre, post, ref_fn):
+    """Maps fold into the reduction over the reals: pre-maps run per element,
+    post-maps on the reduced value."""
+    _need_cuda()
+    X = torch.randn(3, 64, device="cuda", dtype=torch.float32)
+    out = kuipy.run(aten.sum.dim_IntList, pre_map=pre, post_map=post)(X, [-1])
+    ref = ref_fn(X).sum(dim=-1)
+    for method, c in kuiops.resolve_maps(post, torch.float32, True):
+        ref = {"mul": lambda a, b: a * b, "div": lambda a, b: a / b}[method](ref, c)
+    _assert_close(out, ref, torch.float32)
+
+
+def test_hreduce_poly_maps_exact():
+    _need_cuda()
+    X = torch.randint(0, 5, (3, 16), device="cuda", dtype=torch.uint16)
+    out = kuipy.run(aten.sum.dim_IntList,
+                    pre_map=[(aten.mul.Scalar, 3)],
+                    post_map=[(aten.add.Scalar, 7)])(X, [-1],
+                                                     dtype=torch.uint32)
+    ref = (X.to(torch.int64) * 3).sum(dim=-1) + 7
+    assert out.dtype == torch.uint32
+    assert torch.equal(out.to(torch.int64), ref)
+
+
+def test_hreduce_poly_maps_support_constraints():
+    _need_cuda()
+    impl = kuiops.HReducePolyImpl()
+    floats = torch.ones(2, 4, device="cuda", dtype=torch.float32)
+    ints = torch.ones(2, 4, device="cuda", dtype=torch.int32)
+
+    def sup(**kw):
+        return impl.supported(aten.sum.dim_IntList, (floats, [-1]), kw)
+
+    assert sup(pre_map=[aten.relu.default]) is not None
+    # No real-valued model for these, so they cannot be fused into a kernel
+    # specified over the reals.
+    assert sup(pre_map=[aten.rsqrt.default]) is None
+    assert sup(post_map=[aten.sin.default]) is None
+    # A binary op with no constant, and a unary op given one.
+    assert sup(pre_map=[aten.mul.Tensor]) is None
+    assert sup(pre_map=[(aten.relu.default, 1.0)]) is None
+    # Only x ** 2 is expressible.
+    assert sup(pre_map=[(aten.pow.Tensor_Scalar, 3)]) is None
+    # The divisor's real value must be known non-zero.
+    assert sup(post_map=[(aten.div.Tensor, 2)]) is not None
+    assert sup(post_map=[(aten.div.Tensor, 0.5)]) is None
+    assert sup(post_map=[(aten.div.Tensor, 0)]) is None
+    # Signed integers have no `scalar` instance, so no map applies to them.
+    assert impl.supported(aten.sum.dim_IntList, (ints, [-1]),
+                          {"pre_map": [aten.relu.default]}) is None
+
+
+# ---------------------------------------------------------------------------
 # sdpa (efficient attention)
 # ---------------------------------------------------------------------------
 
