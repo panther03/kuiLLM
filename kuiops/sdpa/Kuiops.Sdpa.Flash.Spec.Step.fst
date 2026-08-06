@@ -976,6 +976,29 @@ let run_lv_t
 
 #push-options "--fuel 1 --ifuel 2"
 
+(* Row [i] of the lane-uniform vectors is that row's whole-tile register. *)
+let run_mlv_t_acc
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask causal : bool)
+  (bi : natlt b) (kvh group rows r0 : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat)
+  : Lemma
+      (acc1 (run_mv_t emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw w t) i
+       == fst (run_ml_t emask has_mask causal bi kvh group rows r0 scale
+                 eQ eKg i nw w t) /\
+       acc1 (run_lv_t emask has_mask causal bi kvh group rows r0 scale
+               eQ eKg nw w t) i
+       == snd (run_ml_t emask has_mask causal bi kvh group rows r0 scale
+                 eQ eKg i nw w t))
+  = ()
+
 (* At row [i] the lane-uniform vectors are that row's own. *)
 let run_mlv_t_eq
   (#et_ab #et_acc : Type0)
@@ -1624,5 +1647,83 @@ let warp_ml_state
               #b #hq #sq #sk #d #sq16
               emask has_mask row_active causal bi qh qpos cbound scale
               eQ eKg i nw w t))
+
+#pop-options
+
+(* ------------------------------------------------------------------ *)
+(* The block's published (m, l) vectors as real online-softmax states.  *)
+(* ------------------------------------------------------------------ *)
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+
+let block_ml_state
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _fr : floating_real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |} {| _c2 : FC.float_cast et_acc et_ab |}
+  (#b : nat) (#hq #sq #sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (kvh group rows r0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw : pos) (w : natlt nw) (nkt : nat)
+  : Lemma
+      (requires
+        sq <= sk /\
+        SF.lane_params_ok hq sq sk kvh group rows r0 i
+          row_active qh qpos cbound /\
+        nkt == SF.key_tiles 16 16 sq sk rows r0 causal /\
+        all_finite #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i /\
+        cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+          emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i nw w (SF.warp_iters nw nkt w))
+      (ensures
+        SB.ml_state (lane_real emask has_mask bi qh qpos scale eQ eKg i)
+          (warp_keys row_active causal sk cbound nw w)
+          (acc2 (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                   #b #hq #sq #sk #d #sq16
+                   emask has_mask causal bi kvh group rows r0 scale
+                   eQ eKg nw nkt) w i)
+          (acc2 (block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                   #b #hq #sq #sk #d #sq16
+                   emask has_mask causal bi kvh group rows r0 scale
+                   eQ eKg nw nkt) w i))
+  = let t = SF.warp_iters nw nkt w in
+    block_ml_acc #et_ab #et_acc #_f #_r #_s #_rb #_c1 #b #hq #sq #sk #d #sq16
+      emask has_mask causal bi kvh group rows r0 scale eQ eKg nw nkt w i;
+    run_mlv_t_acc #et_ab #et_acc #_f #_r #_s #_rb #_c1
+      #b #hq #sq #sk #d #sq16
+      emask has_mask causal bi kvh group rows r0 scale eQ eKg i nw w t;
+    assert (run_ml_t #et_ab #et_acc #_f #_r #_s #_rb #_c1
+              #b #hq #sq #sk #d #sq16
+              emask has_mask causal bi kvh group rows r0 scale eQ eKg i nw w t
+            == run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                 #b #hq #sq #sk #d #sq16
+                 emask has_mask row_active causal bi qh qpos cbound scale
+                 eQ eKg i nw w t);
+    assert (acc2 (block_m #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask causal bi kvh group rows r0 scale
+                    eQ eKg nw nkt) w i
+            == fst (run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask row_active causal bi qh qpos cbound scale
+                      eQ eKg i nw w t));
+    assert (acc2 (block_l #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                    #b #hq #sq #sk #d #sq16
+                    emask has_mask causal bi kvh group rows r0 scale
+                    eQ eKg nw nkt) w i
+            == snd (run_ml #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                      #b #hq #sq #sk #d #sq16
+                      emask has_mask row_active causal bi qh qpos cbound scale
+                      eQ eKg i nw w t));
+    warp_ml_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
+      #b #hq #sq #sk #d #sq16
+      emask has_mask row_active causal bi qh qpos kvh group rows r0 cbound
+      scale eQ eKg i nw w nkt
 
 #pop-options
