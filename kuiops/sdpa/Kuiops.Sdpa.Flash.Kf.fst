@@ -206,7 +206,14 @@ fn sdpa_flash_kf
          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
       (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
-      shscale shO shgm shgl tid bi r0 group kvh
+      shscale shO shgm shgl
+      (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask
   ensures
     sdpa_flash_post #et_ab #et_acc nw nthr d sk b hq sq rows
@@ -217,7 +224,14 @@ fn sdpa_flash_kf
          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
       (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
-      shscale shO shgl tid bi r0 group kvh
+      shscale shO shgl
+      (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask **
     if_ (combine_active 16sz
       (sdpa_flash_w nw nthr tid) (sdpa_flash_lane nw nthr tid))
@@ -232,7 +246,14 @@ fn sdpa_flash_kf
        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
     (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
-    shscale shO shgm shgl tid bi r0 group kvh
+    shscale shO shgm shgl
+    (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    tid bi r0 group kvh
     #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask;
   rewrite each (sdpa_flash_w nw nthr tid) as (tid /^ 32sz);
   rewrite each (sdpa_flash_lane nw nthr tid) as (tid %^ 32sz);
@@ -302,7 +323,13 @@ fn sdpa_flash_kf
              (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
           (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
              (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
-          shscale shO shgl) **
+          shscale shO shgl
+          (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+             (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+          (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+             (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+          (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+             (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))) **
         B.barrier_state 1 **
         (gQ |-> Frac fQ eQ) **
         (exists* (vm vl : et_acc).
@@ -473,24 +500,37 @@ fn sdpa_flash_kf
 
   sdpa_flash_combine_partials nw 16sz
     shM shL shscale shgm shgl (tid /^ 32sz) (tid %^ 32sz);
-  flash_combine_forget_v nw shscale shgm shgl
+  flash_combine_to_b2_keep_gm_v nw shscale shgm shgl
     (tid /^ 32sz) (tid %^ 32sz) _ _ _;
-
-  flash_combine_to_b2_keep_gm nw shscale shgm shgl
-    (tid /^ 32sz) (tid %^ 32sz);
-  flash_combine_split_gm nw shscale shgm shgl
-    (tid /^ 32sz) (tid %^ 32sz);
+  flash_combine_split_gm_v nw shscale shgm shgl
+    (tid /^ 32sz) (tid %^ 32sz) _ _;
   assert pure (thread_w nw (SZ.v tid) == SZ.v (tid /^ 32sz));
   assert pure (thread_lane nw (SZ.v tid) == SZ.v (tid %^ 32sz));
-  flash_b2_scale_to_descriptor nw shscale shgl
+  flash_escale_egl_at_def nw d b hq sq rows sk eQ eKg emask
+    has_mask causal scale
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0)
+    (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)));
+  flash_b2_scale_to_descriptor_v nw shscale shgl
     (tid /^ 32sz) (tid %^ 32sz)
-    (tid <: szlt (block_threads nw));
-  block_o_tile_reindex nw d shO
-    (SZ.v (tid /^ 32sz) <: natlt (SZ.v nw))
-    (thread_w nw (SZ.v tid))
-    (SZ.v (tid %^ 32sz) <: natlt BW.warp_size)
-    (thread_lane nw (SZ.v tid));
-  fold b2_pre nw d shscale shO shgl (SZ.v tid);
+    (tid <: szlt (block_threads nw))
+    (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    _ _;
+  flash_pin_o nw d b hq sq rows sk shO eQsh eKg eVg eQ emask
+    has_mask causal scale
+    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0)
+    (SZ.v nkt) (SZ.v !iter)
+    (SZ.v (tid /^ 32sz)) (SZ.v (tid %^ 32sz)) (SZ.v tid);
+  fold b2_pre_v nw d shscale shO shgl
+    (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (SZ.v tid);
   sdpa_flash_block_barrier2 nw nthr d
     shQ shM shL shscale shO shgl tid;
 
@@ -529,7 +569,14 @@ fn sdpa_flash_kf
        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
     (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
-    shscale shO shgl tid bi r0 group kvh
+    shscale shO shgl
+    (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    tid bi r0 group kvh
     #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask;
 }
 

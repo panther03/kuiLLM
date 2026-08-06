@@ -110,7 +110,10 @@ let sdpa_flash_kd
       v.shMv v.shLv
       (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
       (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
-      v.shscalev v.shOv v.shglv);
+      v.shscalev v.shOv v.shglv
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid));
   barrier_count = (fun _ -> 3);
   barrier_ok = (fun _bid sh ->
     let v = flash_views_of nw d sh in
@@ -119,7 +122,10 @@ let sdpa_flash_kd
       v.shMv v.shLv
       (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
       (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
-      v.shscalev v.shOv v.shglv);
+      v.shscalev v.shOv v.shglv
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid));
   frame = emp;
   block_pre = (fun bid ->
     flash_block_state nblk

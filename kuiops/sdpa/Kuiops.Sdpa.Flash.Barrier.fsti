@@ -164,6 +164,15 @@ let scale_tile
 = exists* (e : chest2 et (SZ.v nw) 1).
     tensor_pts_to (array2_stride_subtile shscale 1 16 0 lane) e
 
+unfold
+let scale_tile_v
+  (#et : Type0) (nw : szp)
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (escale : chest2 et (SZ.v nw) 16)
+  (lane : natlt 16) : slprop
+= tensor_pts_to (array2_stride_subtile shscale 1 16 0 lane)
+    (ematrix_stride_subtile escale 1 16 0 lane)
+
 ghost
 fn b2_scale_transform
   (#et : Type0) (nw : szp)
@@ -182,6 +191,45 @@ fn b2_scale_transform
         shgl |-> Frac (1.0R /. (block_threads nw)) e)
 
 ghost
+fn cells1_gather_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (e : chest1 et len)
+  requires
+    pure (SZ.fits (tlayout_ulen l)) **
+    (forall+ (i : natlt len). Cell a (idx1 i) |-> Frac 1.0R (acc1 e i))
+  ensures a |-> Frac 1.0R e
+
+ghost
+fn b2_o_transform_v
+  (#et : Type0) (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
+  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (eO : chest2 et (SZ.v nw * 16) (SZ.v d))
+  requires
+    forall+ (tid : natlt (block_threads nw)).
+      b2_o_pre_v nw d shO eO tid
+  ensures
+    forall+ (_tid : natlt (block_threads nw)).
+      shO |-> Frac (1.0R /. (block_threads nw)) eO
+
+ghost
+fn b2_scale_transform_v
+  (#et : Type0) (nw : szp)
+  (#_ : squash (SZ.fits (SZ.v nw * 16)))
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shgl : array1 et (l1_forward 16))
+  (escale : chest2 et (SZ.v nw) 16) (egl : chest1 et 16)
+  requires
+    forall+ (tid : natlt (block_threads nw)).
+      b2_scale_pre_v nw shscale shgl escale egl tid
+  ensures
+    (forall+ (_tid : natlt (block_threads nw)).
+      shscale |-> Frac (1.0R /. (block_threads nw)) escale) **
+    (forall+ (_tid : natlt (block_threads nw)).
+      shgl |-> Frac (1.0R /. (block_threads nw)) egl)
+
+ghost
 fn barrier_ok
   (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
@@ -196,13 +244,16 @@ fn barrier_ok
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (it : nat)
   requires
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rin nw d shQ eQsh shM shL eM eL shscale shO shgl it tid
+      barrier_rin nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl it tid
   ensures
     forall+ (tid : natlt (block_threads nw)).
-      barrier_rout nw d shQ eQsh shM shL eM eL shscale shO shgl it tid
+      barrier_rout nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl it tid
 
 ghost
 fn flash_ml_to_pre

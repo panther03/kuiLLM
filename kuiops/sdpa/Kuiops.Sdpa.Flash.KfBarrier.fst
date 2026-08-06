@@ -31,6 +31,7 @@ module BW = Kuiper.Barrier.Warp
 module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
+module SS = Kuiops.Sdpa.Flash.Spec.Step
 module FT = Kuiops.Sdpa.Flash.Types
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
@@ -110,11 +111,14 @@ fn sdpa_flash_block_prologue
   (#_ : squash (SZ.fits (SZ.v kvh * SZ.v group + SZ.v rows)))
   (#fQ : perm)
   (#eM #eL : chest2 et_acc (SZ.v nw) 16)
+  (#escale : chest2 et_acc (SZ.v nw) 16)
+  (#eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (#egl : chest1 et_acc 16)
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 0 **
     (gQ |-> Frac fQ eQ) **
     b0_raw nw d shQ shO (SZ.v tid) **
@@ -126,7 +130,7 @@ fn sdpa_flash_block_prologue
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 1 **
     (gQ |-> Frac fQ eQ) **
     b0_post nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid) **
@@ -211,9 +215,9 @@ fn sdpa_flash_block_prologue
   fold b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid);
 
   rewrite (b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid))
-       as ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl).rin 0 (SZ.v tid));
+       as ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl escale eO egl).rin 0 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl).rout 0 (SZ.v tid))
+  rewrite ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl escale eO egl).rout 0 (SZ.v tid))
        as (b0_post nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid));
 
   ml_if_to_when_v
@@ -235,24 +239,27 @@ fn sdpa_flash_block_barrier1
   (tid : szlt nthr)
   (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#eM #eL : chest2 et_acc (SZ.v nw) 16)
+  (#escale : chest2 et_acc (SZ.v nw) 16)
+  (#eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (#egl : chest1 et_acc 16)
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 1 **
     b1_pre_v nw shM shL eM eL (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 2 **
     b1_post_v nw shM shL eM eL (SZ.v tid)
 {
   rewrite (b1_pre_v nw shM shL eM eL (SZ.v tid))
-       as ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl).rin 1 (SZ.v tid));
+       as ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl).rin 1 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl).rout 1 (SZ.v tid))
+  rewrite ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl).rout 1 (SZ.v tid))
        as (b1_post_v nw shM shL eM eL (SZ.v tid));
 }
 
@@ -269,25 +276,28 @@ fn sdpa_flash_block_barrier2
   (tid : szlt nthr)
   (#eQsh : chest2 et_ab 16 (SZ.v d))
   (#eM #eL : chest2 et_acc (SZ.v nw) 16)
+  (#escale : chest2 et_acc (SZ.v nw) 16)
+  (#eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (#egl : chest1 et_acc 16)
   (#_ : squash (16 /?+ SZ.v d))
   requires
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 2 **
-    b2_pre nw d shscale shO shgl (SZ.v tid)
+    b2_pre_v nw d shscale shO shgl escale eO egl (SZ.v tid)
   ensures
     gpu **
     thread_id (block_threads nw) tid **
-    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl) **
+    B.barrier_tok (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl) **
     B.barrier_state 3 **
-    b2_post nw d shscale shO shgl (SZ.v tid)
+    b2_post_v nw d shscale shO shgl escale eO egl (SZ.v tid)
 {
-  rewrite (b2_pre nw d shscale shO shgl (SZ.v tid))
-       as ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl).rin 2 (SZ.v tid));
+  rewrite (b2_pre_v nw d shscale shO shgl escale eO egl (SZ.v tid))
+       as ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl).rin 2 (SZ.v tid));
   B.barrier_wait ();
-  rewrite ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl).rout 2 (SZ.v tid))
-       as (b2_post nw d shscale shO shgl (SZ.v tid));
+  rewrite ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl).rout 2 (SZ.v tid))
+       as (b2_post_v nw d shscale shO shgl escale eO egl (SZ.v tid));
 }
 
 unfold
@@ -481,50 +491,7 @@ fn b2_scale_to_descriptor
 }
 
 ghost
-fn block_o_tile_reindex
-  (#et : Type0) (nw d : szp)
-  (#_ : squash (16 /?+ SZ.v d))
-  (#_ : squash (warp_row_span /?+ 16))
-  (#_ : squash (SZ.fits (SZ.v nw * 16)))
-  (#_ : squash (SZ.fits (SZ.v nw * 16 * SZ.v d)))
-  (#_ : squash (16 /?+ (SZ.v nw * 16)))
-  (a : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
-  (w1 w2 : natlt (SZ.v nw))
-  (lane1 lane2 : natlt BW.warp_size)
-  requires
-    pure (w1 == w2 /\ lane1 == lane2) **
-    (exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-      tensor_pts_to
-        (array2_stride_subtile
-          (array2_subtile a 16 (SZ.v d <: pos) w1 0)
-          warp_row_span 16 (lane1 / 16) (lane1 % 16))
-        e)
-  ensures
-    (exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-      tensor_pts_to
-        (array2_stride_subtile
-          (array2_subtile a 16 (SZ.v d <: pos) w2 0)
-          warp_row_span 16 (lane2 / 16) (lane2 % 16))
-        e)
-{
-  rewrite
-    (exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-      tensor_pts_to
-        (array2_stride_subtile
-          (array2_subtile a 16 (SZ.v d <: pos) w1 0)
-          warp_row_span 16 (lane1 / 16) (lane1 % 16))
-        e)
-  as
-    (exists* (e : chest2 et (16 / warp_row_span) (SZ.v d / 16)).
-      tensor_pts_to
-        (array2_stride_subtile
-          (array2_subtile a 16 (SZ.v d <: pos) w2 0)
-          warp_row_span 16 (lane2 / 16) (lane2 % 16))
-        e);
-}
-
-ghost
-fn flash_combine_forget_v
+fn flash_combine_to_b2_keep_gm_v
   (#et : Type0)
   (nw : szp)
   (shscale : array2 et (l2_row_major (SZ.v nw) 16))
@@ -536,133 +503,105 @@ fn flash_combine_forget_v
       (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl)
   ensures
     if_ (combine_active 16sz w lane)
-      (combine_cells nw 16sz shscale shgm shgl lane)
-
-{
-  let active = combine_active 16sz w lane;
-  if active {
-    if_elim_true (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
-    unfold (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
-    fold (combine_cells nw 16sz shscale shgm shgl lane);
-    assert pure (combine_active 16sz w lane);
-    if_intro_true' (combine_active 16sz w lane)
-      (combine_cells nw 16sz shscale shgm shgl lane);
-  } else {
-    if_elim_false (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
-    assert pure (combine_active 16sz w lane == false);
-    if_intro_false' (combine_active 16sz w lane)
-      (combine_cells nw 16sz shscale shgm shgl lane);
-  }
-}
-
-ghost
-fn flash_combine_to_b2_keep_gm
-  (#et : Type0)
-  (nw : szp)
-  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
-  (shgm shgl : array1 et (l1_forward 16))
-  (w : szlt nw) (lane : szlt warp_size)
-  requires
-    if_ (combine_active 16sz w lane)
-      (combine_cells nw 16sz shscale shgm shgl lane)
-  ensures
-    if_ (combine_active 16sz w lane)
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)) **
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl **
        cell_full shgm (SZ.v (clamp_lt 16sz lane)))
 {
   let active = combine_active 16sz w lane;
   if active {
-    if_elim_true (combine_cells nw 16sz shscale shgm shgl lane);
-    unfold (combine_cells nw 16sz shscale shgm shgl lane);
-    unfold (cell_full_n shgm (SZ.v (clamp_lt 16sz lane)));
-    unfold (cell_full_n shgl (SZ.v (clamp_lt 16sz lane)));
-    with vgm. assert (
-      tensor_pts_to_cell shgm
-        (idx1 (SZ.v (clamp_lt 16sz lane))) vgm);
-    with vgl. assert (
-      tensor_pts_to_cell shgl
-        (idx1 (SZ.v (clamp_lt 16sz lane))) vgl);
+    if_elim_true (combine_cells_v nw 16sz shscale shgm shgl lane
+                    escale vgm vgl);
+    unfold (combine_cells_v nw 16sz shscale shgm shgl lane escale vgm vgl);
+    unfold (cell_full_n_v shgm (SZ.v (clamp_lt 16sz lane)) vgm);
+    unfold (cell_full_n_v shgl (SZ.v (clamp_lt 16sz lane)) vgl);
     fold (cell_full shgm (SZ.v (clamp_lt 16sz lane)));
-    fold (cell_full shgl (SZ.v (clamp_lt 16sz lane)));
-    fold (flash_scale_tile nw shscale
-      (SZ.v (clamp_lt 16sz lane)));
+    fold (cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl);
+    fold (flash_scale_tile_v nw shscale escale
+           (SZ.v (clamp_lt 16sz lane)));
     assert pure (combine_active 16sz w lane);
     if_intro_true' (combine_active 16sz w lane) (
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)) **
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl **
        cell_full shgm (SZ.v (clamp_lt 16sz lane))));
   } else {
-    if_elim_false (combine_cells nw 16sz shscale shgm shgl lane);
+    if_elim_false (combine_cells_v nw 16sz shscale shgm shgl lane
+                     escale vgm vgl);
     assert pure (combine_active 16sz w lane == false);
     if_intro_false' (combine_active 16sz w lane) (
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)) **
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl **
        cell_full shgm (SZ.v (clamp_lt 16sz lane))));
   }
 }
 
 ghost
-fn flash_combine_split_gm
+fn flash_combine_split_gm_v
   (#et : Type0)
   (nw : szp)
   (shscale : array2 et (l2_row_major (SZ.v nw) 16))
   (shgm shgl : array1 et (l1_forward 16))
   (w : szlt nw) (lane : szlt warp_size)
+  (escale : chest2 et (SZ.v nw) 1) (vgl : et)
   requires
     if_ (combine_active 16sz w lane)
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)) **
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl **
        cell_full shgm (SZ.v (clamp_lt 16sz lane)))
   ensures
     if_ (combine_active 16sz w lane)
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)))
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl)
     ** if_ (combine_active 16sz w lane)
       (cell_full shgm (SZ.v (clamp_lt 16sz lane)))
 {
   split (combine_active 16sz w lane)
-    (flash_scale_tile nw shscale (SZ.v (clamp_lt 16sz lane)))
-    (cell_full shgl (SZ.v (clamp_lt 16sz lane)) **
+    (flash_scale_tile_v nw shscale escale (SZ.v (clamp_lt 16sz lane)))
+    (cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl **
      cell_full shgm (SZ.v (clamp_lt 16sz lane)));
   split (combine_active 16sz w lane)
-    (cell_full shgl (SZ.v (clamp_lt 16sz lane)))
+    (cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl)
     (cell_full shgm (SZ.v (clamp_lt 16sz lane)));
   combine (combine_active 16sz w lane)
-    (flash_scale_tile nw shscale (SZ.v (clamp_lt 16sz lane)))
-    (cell_full shgl (SZ.v (clamp_lt 16sz lane)));
+    (flash_scale_tile_v nw shscale escale (SZ.v (clamp_lt 16sz lane)))
+    (cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl);
 }
 
 ghost
-fn flash_b2_scale_to_descriptor
+fn flash_b2_scale_to_descriptor_v
   (#et : Type0)
   (nw : szp)
   (shscale : array2 et (l2_row_major (SZ.v nw) 16))
   (shgl : array1 et (l1_forward 16))
   (w : szlt nw) (lane : szlt warp_size)
   (tid : szlt (block_threads nw))
+  (escale : chest2 et (SZ.v nw) 16) (egl : chest1 et 16)
+  (escale_t : chest2 et (SZ.v nw) 1) (vgl : et)
   requires
     pure (SZ.v w == thread_w nw (SZ.v tid) /\
-          SZ.v lane == thread_lane nw (SZ.v tid)) **
+          SZ.v lane == thread_lane nw (SZ.v tid) /\
+          escale_t == ematrix_stride_subtile escale 1 16 0
+                        (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))) /\
+          vgl == acc1 egl
+                   (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)))) **
     if_ (combine_active 16sz w lane)
-      (flash_scale_tile nw shscale
+      (flash_scale_tile_v nw shscale escale_t
         (SZ.v (clamp_lt 16sz lane)) **
-       cell_full shgl (SZ.v (clamp_lt 16sz lane)))
+       cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl)
   ensures
-    b2_scale_pre nw shscale shgl (SZ.v tid)
+    b2_scale_pre_v nw shscale shgl escale egl (SZ.v tid)
 {
   let active = combine_active 16sz w lane;
   if active {
     if_elim_true' active (
-      flash_scale_tile nw shscale
+      flash_scale_tile_v nw shscale escale_t
         (SZ.v (clamp_lt 16sz lane)) **
-      cell_full shgl (SZ.v (clamp_lt 16sz lane)));
-    unfold flash_scale_tile nw shscale
+      cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl);
+    unfold flash_scale_tile_v nw shscale escale_t
       (SZ.v (clamp_lt 16sz lane));
     let old_lane : natlt 16 = SZ.v (clamp_lt 16sz lane);
     let new_lane : natlt 16 =
@@ -670,49 +609,101 @@ fn flash_b2_scale_to_descriptor
     assert pure (old_lane == new_lane);
     rewrite each (SZ.v (clamp_lt 16sz lane)) as old_lane;
     rewrite
-      (exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to
-          (array2_stride_subtile shscale 1 16 0 old_lane) e)
+      (tensor_pts_to
+        (array2_stride_subtile shscale 1 16 0 old_lane) escale_t)
       as
-      (exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to
-          (array2_stride_subtile shscale 1 16 0 new_lane) e);
+      (tensor_pts_to
+        (array2_stride_subtile shscale 1 16 0 new_lane)
+        (ematrix_stride_subtile escale 1 16 0 new_lane));
     rewrite
-      (cell_full shgl old_lane)
+      (cell_full_v shgl old_lane vgl)
       as
-      (cell_full shgl new_lane);
+      (cell_full_v shgl new_lane (acc1 egl new_lane));
     rewrite each new_lane
       as (clamp_nat_lt 16
         (thread_lane nw (SZ.v tid)));
     assert pure (b2_active nw (SZ.v tid) == true);
     if_intro_true' (b2_active nw (SZ.v tid)) (
-      (exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to
-          (array2_stride_subtile shscale 1 16 0
-            (clamp_nat_lt 16
-              (thread_lane nw (SZ.v tid)))) e)
-      ** cell_full shgl
-        (clamp_nat_lt 16
-          (thread_lane nw (SZ.v tid))));
+      tensor_pts_to
+        (array2_stride_subtile shscale 1 16 0
+          (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))))
+        (ematrix_stride_subtile escale 1 16 0
+          (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))))
+      ** cell_full_v shgl
+        (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)))
+        (acc1 egl (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)))));
   } else {
     if_elim_false' active (
-      flash_scale_tile nw shscale
+      flash_scale_tile_v nw shscale escale_t
         (SZ.v (clamp_lt 16sz lane)) **
-      cell_full shgl (SZ.v (clamp_lt 16sz lane)));
+      cell_full_v shgl (SZ.v (clamp_lt 16sz lane)) vgl);
     assert pure (b2_active nw (SZ.v tid) == false);
     if_intro_false' (b2_active nw (SZ.v tid)) (
-      (exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to
-          (array2_stride_subtile shscale 1 16 0
-            (SZ.v (clamp_lt 16sz lane))) e
-        ** cell_full shgl (SZ.v (clamp_lt 16sz lane))));
-    if_rewrite_bool false (b2_active nw (SZ.v tid)) (
-      (exists* (e : chest2 et (SZ.v nw) 1).
-        tensor_pts_to
-          (array2_stride_subtile shscale 1 16 0
-            (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))))
-          e)
-      ** cell_full shgl
-        (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))));
+      tensor_pts_to
+        (array2_stride_subtile shscale 1 16 0
+          (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))))
+        (ematrix_stride_subtile escale 1 16 0
+          (clamp_nat_lt 16 (thread_lane nw (SZ.v tid))))
+      ** cell_full_v shgl
+        (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)))
+        (acc1 egl (clamp_nat_lt 16 (thread_lane nw (SZ.v tid)))));
   }
 }
+
+ghost
+fn flash_pin_o
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq sq rows sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
+  (eKg eVg : chest2 et_ab (SZ.v sk) (SZ.v d))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bi : natlt (SZ.v b)) (kvh group r0 : nat)
+  (nkt iters : nat)
+  (w1 : natlt (SZ.v nw)) (lane1 : natlt BW.warp_size)
+  (tid : natlt (block_threads nw))
+  requires
+    (array2_stride_subtile
+      (array2_subtile shO 16 (SZ.v d <: pos) w1 0)
+      warp_row_span 16 (lane1 / 16) (lane1 % 16)
+      |-> Frac 1.0R
+            (ematrix_stride_subtile
+              (SS.run_O emask has_mask causal bi kvh group (SZ.v rows) r0
+                 scale eQsh eKg eVg (SZ.v nw) w1 iters)
+              warp_row_span 16 (lane1 / 16) (lane1 % 16)))
+    ** pure (
+      w1 == thread_w nw tid /\ lane1 == thread_lane nw tid /\
+      eQsh == SF.q_tile 16 (SZ.v rows) group eQ bi kvh r0 /\
+      nkt == SF.key_tiles 16 16 (SZ.v sq) (SZ.v sk) (SZ.v rows) r0 causal /\
+      iters == SF.warp_iters (SZ.v nw) nkt w1)
+  ensures
+    b2_o_pre_v nw d shO
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal
+         scale bi kvh group r0)
+      tid
+{
+  flash_eO_at_def nw d b hq sq rows sk eQ eKg eVg emask has_mask causal
+    scale bi kvh group r0 w1;
+  rewrite
+    (array2_stride_subtile
+      (array2_subtile shO 16 (SZ.v d <: pos) w1 0)
+      warp_row_span 16 (lane1 / 16) (lane1 % 16)
+      |-> Frac 1.0R
+            (ematrix_stride_subtile
+              (SS.run_O emask has_mask causal bi kvh group (SZ.v rows) r0
+                 scale eQsh eKg eVg (SZ.v nw) w1 iters)
+              warp_row_span 16 (lane1 / 16) (lane1 % 16)))
+    as
+    (b2_o_pre_v nw d shO
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal
+         scale bi kvh group r0)
+      tid);
+}
+
