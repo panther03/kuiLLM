@@ -1303,10 +1303,16 @@ let cw_at
           fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
                  eQ eKg i nw w (t + 1)))
 
-(* Every correction weight of the first [t] steps is finite.  Like [all_finite]
-   this is an overflow hypothesis and is not derivable from the [floating]
-   laws; the kernel exports it (see the [kind cw' == Finite] conjunct of
-   [Kuiops.Sdpa.Flash.KfSub.sdpa_flash_softmax_upd]'s postcondition). *)
+(* Every correction weight of the first [t] steps is finite.  This mirrors
+   the reference kernel's [if (!isfinite(corr)) corr = 0.0f;]
+   (flash_attn_fa1.cu l.173), which this port cannot express because
+   [is_finite] and [kind] are erasable; the kernel exports it instead (see
+   the [kind cw' == Finite] conjunct of
+   [Kuiops.Sdpa.Flash.KfSub.sdpa_flash_softmax_upd]'s postcondition).
+
+   It is consumed only by [Spec.Bridge.step_fresh], for [mul_zero]'s
+   [Finite?] side condition on the first absorbed key.  See the discussion
+   in [Kuiops.Sdpa.Flash.Spec.Top.row_no_overflow]. *)
 let cw_upto
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}

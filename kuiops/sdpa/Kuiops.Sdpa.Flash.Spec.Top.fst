@@ -129,7 +129,9 @@ let eO_at_cell
 (* ------------------------------------------------------------------ *)
 
 (* What the float computation of one query row must avoid for the kernel to
-   track the real spec.  The three conjuncts do NOT have equal status:
+   track the real spec.  The three conjuncts do NOT have equal status, and
+   each corresponds to a specific line of the reference kernel
+   [kuipy/unverified/flash_attn_fa1.cu].
 
    1. [all_finite] is a genuine precondition on the inputs.  It depends only
       on Q, K, the mask, the scale and the masking predicate, and it really
@@ -137,26 +139,50 @@ let eO_at_cell
       online softmax evaluates [exp (inf - inf)] and NaN reaches the output.
       No kernel can be correct without it, and a caller can check it.
 
-   2. [cw_upto] and
+   2. [cw_upto] is an artifact of a missing Kuiper primitive, not a real
+      obligation.  The reference kernel clamps the correction weight,
 
-   3. positivity of the epilogue denominator
+        float corr = __expf(Msh[w][i] - mnew);
+        if (!isfinite(corr)) corr = 0.0f;              // l.173, and l.222
 
-   are NOT preconditions on the inputs -- they are consequences of (1).  Every
-   tile a warp actually visits contains at least one admitted key (the tile
-   count [SF.key_tiles] is cut off at the causal bound, and warps past the
-   count run zero iterations), so each running maximum after the first step is
-   finite and the sequence is non-decreasing; the correction weight is then
-   [exp] of a non-positive quantity, which lies in [0, 1], and the denominator
-   is a sum containing the term [exp 0 * l] for the argmax warp.
+      so finiteness holds by construction with no reasoning at all.  This
+      port cannot express that clamp: [is_finite] and [kind] return the
+      erasable [fkind], so finiteness cannot drive concrete control flow.
+      [Kuiops.Sdpa.Flash.KfSub] therefore assumes it and it surfaces here.
 
-   They are stated as hypotheses only because [fexp] is an unaxiomatized
-   primitive of [Kuiper.Floating.Base]: the class provides no law relating
-   [kind (fexp x)] or the sign of [fexp x] to [x], and [floating_real_like]
-   offers only [exp_approx], whose [v_approximates] is abstract.  Discharging
-   (2) needs "exp of a non-positive argument is finite"; discharging (3)
-   additionally needs [fexp zero == one] together with monotonicity of [add]
-   and [mul], which the class also lacks.  Once those laws exist upstream both
-   should be provable from [all_finite] and dropped from this predicate. *)
+      It is consumed at exactly one place, [Spec.Bridge.step_fresh] -- the
+      step where a lane absorbs its FIRST key.  There the old denominator is
+      the literal [zero], and the proof needs [mul zero cw == zero], which is
+      [floating.mul_zero] and carries a [Finite?] side condition.  In other
+      words [mul_zero]'s side condition is exactly CUDA line 173: a NaN
+      correction would poison the accumulator here just as it would in C.
+
+      The fix is an extractable [is_finite] on [floating], after which the
+      clamp becomes code, the assume in [KfSub] disappears, and this conjunct
+      can be dropped.  Adding [fexp] laws instead would prove by SMT what the
+      reference obtains with a branch.
+
+   3. Positivity of the epilogue denominator is a genuinely float-level fact,
+      because the kernel BRANCHES on it:
+
+        float inv = (gl_sh[i] > 0.0f) ? (1.0f / gl_sh[i]) : 0.0f;   // l.241
+
+      Nothing about approximation can decide that branch: [v_approximates]
+      carries no error bound, so [gl %~ 0.7R] does not entail [gt gl zero].
+
+      It is deliberately left as a hypothesis, which matches the contract the
+      reference kernel's own header states for the other branch -- a fully
+      masked row yields "a defined finite 0 output for which we simply claim
+      no real-softmax approximation".  The theorem is therefore conditional
+      by design rather than by omission.
+
+      Note it is NOT a consequence of (1): a caller-supplied mask may reject
+      every key of a row, and then the denominator really is zero.  Under
+      [causal] with no mask tensor the diagonal key is always admitted, so it
+      holds automatically.  Discharging it in that case, rather than carrying
+      it, would need sign and monotonicity laws for [add]/[mul] plus
+      [fexp zero == one]; see [etc/Kuiops.Floating.Axioms.fsti] for the exact
+      set and why adopting them is not currently recommended. *)
 let row_no_overflow
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}

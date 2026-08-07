@@ -332,7 +332,9 @@ let step_absorbed
 (* Denominator step, in the case where this tile absorbs the lane's first key.
    The old accumulator is the literal zero, so the (meaningless) correction
    factor is annihilated -- this is the only place the correction's finiteness
-   is used. *)
+   is used, via [mul_zero]'s [Finite?] side condition.  That side condition is
+   what the reference kernel's [if (!isfinite(corr)) corr = 0.0f;]
+   (flash_attn_fa1.cu l.173) discharges by construction. *)
 let step_fresh
   (#et : Type0) {| floating et |} {| real_like et |}
   {| floating_real_like et |}
