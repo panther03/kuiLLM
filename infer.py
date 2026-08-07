@@ -13,7 +13,12 @@ Flags of note:
                         relative-Frobenius divergence (forces an eager, non-CUDA-
                         graph compile so the host-side compare can sync).
   * ``--batch-compile`` extract every matched kernel during warm-up and build
-                        them in one combined compilation.
+                        them in one combined compilation. BROKEN FOR TIMING: the
+                        CUDA graph is recorded during that warm-up, while the
+                        matched ops are still deferred to stock PyTorch, so the
+                        measured decode replays a graph with no Kuiper kernels
+                        in it and reports stock performance. See the comment at
+                        the ``batch_capture()`` call in ``generate``.
   * ``--batch N``       inference batch size.
   * ``--nsys``          bracket only the measured decode in the CUDA profiler API
                         (for ``nsys --capture-range=cudaProfilerApi``).
@@ -114,6 +119,29 @@ def generate(m, ids, n, warmup=3, temperature=0.0, profile=False,
     else:
         compiled = torch.compile(decode_step, mode="reduce-overhead", fullgraph=True)
 
+    # BUG: the measured decode below does NOT run Kuiper kernels when
+    # batch_compile is set, so any timing taken with --batch-compile is really a
+    # stock-PyTorch timing wearing a Kuiper label.
+    #
+    # Under batch_capture() matched ops are only *extracted*; their execution is
+    # deferred to stock PyTorch until finalize_capture() (see
+    # kuipy/compile.py:start_capture). But this warm-up is also where
+    # mode="reduce-overhead" records the CUDA graph, so the graph is recorded
+    # against the stock fallbacks -- and finalize_capture() only compiles and
+    # rewires the modules, it never invalidates the graph or forces a re-record.
+    # The measured loop then replays a graph containing no Kuiper kernels.
+    #
+    # Measured on an A6000 (Qwen2.5-0.5B, bf16, batch 256, 256 decode steps):
+    #     python3 infer.py --no-kuiper                  157.2 tok/s/seq
+    #     python3 infer.py --no-kuiper --batch-compile  157.2
+    #     python3 infer.py --batch-compile              155.5   <- not Kuiper
+    #     python3 infer.py                               65.2   <- actually Kuiper
+    #
+    # A fix has to make the graph be recorded after finalization: either warm up
+    # once inside the capture purely to discover kernels and then re-run the
+    # warm-up (and re-record) outside it, or drop the compiled function's
+    # cudagraph state on exit from batch_capture(). Until then, use plain
+    # `python3 infer.py` for any measurement.
     cap = kuipy.batch_capture() if batch_compile else contextlib.nullcontext()
     with cap:
         for _ in range(warmup):

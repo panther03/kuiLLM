@@ -82,7 +82,17 @@ def is_capturing() -> bool:
 
 def start_capture():
     """Begin a batch capture: matched kernels are extracted but not compiled,
-    and their execution is deferred to stock PyTorch until ``finalize_capture``."""
+    and their execution is deferred to stock PyTorch until ``finalize_capture``.
+
+    CALLER BEWARE: because execution falls back to stock PyTorch for the
+    duration of the capture, a CUDA graph recorded inside it captures the
+    *fallbacks*. ``finalize_capture`` compiles and rewires the modules but has
+    no way to invalidate a graph that was already recorded, so such a graph
+    keeps replaying stock kernels forever. Anything under
+    ``torch.compile(mode="reduce-overhead")`` must therefore be re-warmed after
+    the capture exits, or it will silently run with no Kuiper kernels at all.
+    See the comment at the ``batch_capture()`` call in ``infer.py``.
+    """
     global _capture, _capture_artifact_lock
     if C.AUTOTUNE:
         raise RuntimeError("KUIPY_AUTOTUNE cannot be combined with batch capture")

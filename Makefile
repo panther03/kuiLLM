@@ -12,6 +12,12 @@ infer-kuiper:
 	python3 infer.py
 
 # Build every matched kernel in one combined compilation (batch compile).
+# WARNING: do not use this target to measure performance. The CUDA graph is
+# recorded during the warm-up that runs inside the batch capture, at which point
+# every matched op is still deferred to stock PyTorch, so the timed decode
+# replays a graph containing no Kuiper kernels and reports the stock number
+# (155.5 vs 65.2 tok/s/seq on an A6000). Use `make infer-kuiper`. See the
+# comment at the batch_capture() call in infer.py.
 infer-batched:
 	python3 infer.py --batch-compile
 
