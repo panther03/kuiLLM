@@ -319,40 +319,45 @@ constexpr int B_ELEMS = BN * LDT;  // one B buffer, in elements
 constexpr int STAGES = 2;
 constexpr int PIPE_BYTES = STAGES * (A_ELEMS + B_ELEMS) * (int)sizeof(elem_t);
 
-// Epilogue scratch, which ALIASES the pipeline allocation: the two uses are
-// disjoint in time (all of the k-loop, then all of the epilogue, separated by a
-// barrier), so they share storage rather than adding to it. See SMEM_BYTES
-// below for why that is worth up to 29%. One FRAG-row band of every warp's
-// tile, in fp32, padded for the same bank-conflict reason as LDT.
+// Epilogue scratch, in its own storage rather than aliased on top of the
+// pipeline buffers -- see SMEM_BYTES below, this is a deliberate choice and a
+// measurable cost. One FRAG-row band of every warp's tile, in fp32, padded for
+// the same bank-conflict reason as LDT.
 constexpr int ESKEW = 4;
 constexpr int LDE = WN + ESKEW;
 constexpr int EPI_BYTES = WARPS * FRAG * LDE * (int)sizeof(float);
 
-// >>> THE TWO USES ALIAS. This is `max`, not `+`: the epilogue scratch is laid
-// >>> on top of the pipeline buffers at offset 0, and the single dynamic
-// >>> allocation is reinterpreted from elem_t to float partway through the
-// >>> kernel. See the epilogue for the safety argument (one __syncthreads()
-// >>> after the k-loop, at which point sA/sB are dead).
+// >>> THE TWO USES DO NOT ALIAS, ON PURPOSE. This is `+`, not `max`.
 // >>>
-// >>> A Kuiper port has to make a decision here, so do not treat it as an
-// >>> incidental detail. Shared memory is the occupancy currency on sm_86 (100
-// >>> KB per SM), and for the default tiling `max` is 40960 bytes while `+` is
-// >>> 58368 -- which is the difference between 2 blocks resident per SM and 1.
-// >>> Measured cost of NOT aliasing, bf16, same tiling:
+// >>> The pipeline buffers are dead by the time the epilogue runs (one
+// >>> __syncthreads() after the k-loop, see the epilogue), so the epilogue
+// >>> scratch *could* be laid on top of them at offset 0, reinterpreting one
+// >>> allocation from elem_t to float partway through the kernel. gemm_tc.cuh
+// >>> does exactly that. This file does not, because Kuiper is not expected to
+// >>> be able to express a lifetime-based reuse of a single shared allocation
+// >>> at two different element types, and the point of this file is to be
+// >>> faithful to what a port can actually do.
+// >>>
+// >>> Do not "optimize" this back to `max` unless the port really can express
+// >>> the aliasing -- but do know what it costs, because it is not nothing.
+// >>> Shared memory is the occupancy currency on sm_86 (100 KB per SM): for the
+// >>> default tiling `max` is 40960 bytes and `+` is 58368, which is the
+// >>> difference between 2 resident blocks per SM and 1. Measured cost of NOT
+// >>> aliasing (bf16, same tiling, aliased -> un-aliased):
 // >>>     4096^3, 128x128x32 : 94.6 -> 73.1 TF/s   (-29%)
 // >>>     4096^3,  32x128x64 : 41.9 -> 39.2 TF/s   (-7%)
 // >>>     256x4864x896       : no change
 // >>>     256x896x4864, sp4  : no change
-// >>> The small decode shapes are indifferent because they do not launch enough
-// >>> blocks to fill the machine in the first place; every large shape is not.
+// >>>   Qwen2.5-0.5B decode, whole pipeline : 143.4 -> 141.6 tok/s/seq (-1.3%)
+// >>> Large shapes pay heavily; the skinny decode shapes do not notice, because
+// >>> they never launch enough blocks to fill the machine in the first place.
+// >>> So the tax is workload-dependent: ~1% for LLM decode, ~30% for anything
+// >>> big and square.
 // >>>
-// >>> If Kuiper cannot express a lifetime-based reuse of one shared allocation
-// >>> at two different types, the fallback that costs the least is to keep the
-// >>> allocation a single fp32-aligned byte buffer and carve both views out of
-// >>> it manually, with the disjointness in time discharged by the barrier --
-// >>> i.e. exactly what happens here, but with the aliasing made explicit in
-// >>> the type rather than implicit in a reinterpret_cast.
-constexpr int SMEM_BYTES = PIPE_BYTES > EPI_BYTES ? PIPE_BYTES : EPI_BYTES;
+// >>> Note the tuner partly compensates: when the scratch stops being free, two
+// >>> of the 29 tuned pipeline entries move to a smaller footprint (a shallower
+// >>> BK, or a larger warp tile needing fewer warps) to buy the occupancy back.
+constexpr int SMEM_BYTES = PIPE_BYTES + EPI_BYTES;
 
 // 128-bit access granule, in elements: 8 for both fp16 and bf16. This is the
 // widest load/store the ISA has and the required granule for cp.async's
@@ -478,10 +483,11 @@ extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
     float* __restrict__ ws,         // null | (splits, M, N) fp32
     int M, int N, int K, float alpha, float beta, int splits, int epi) {
     extern __shared__ __align__(16) char smem_raw[];
-    // Layout of the dynamic allocation during the k-loop:
-    //   [ A buf0 | A buf1 | B buf0 | B buf1 ]
-    // and, after the k-loop, reinterpreted wholesale as the fp32 epilogue
-    // scratch. The two uses are disjoint in time, separated by a barrier.
+    // Layout of the dynamic allocation:
+    //   [ A buf0 | A buf1 | B buf0 | B buf1 | fp32 epilogue scratch ]
+    //     \------------- PIPE_BYTES -------------/\-- EPI_BYTES --/
+    // The epilogue scratch gets its own storage rather than being laid over the
+    // (by then dead) pipeline buffers; see SMEM_BYTES for why.
     elem_t* sA = reinterpret_cast<elem_t*>(smem_raw);
     elem_t* sB = sA + STAGES * A_ELEMS;
 
@@ -654,14 +660,15 @@ extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
     // Going through memory also costs nothing: this happens once per block, not
     // once per k-step.
     //
-    // This barrier is what makes the aliasing of `smem_raw` sound. Up to here
-    // the allocation held the elem_t pipeline buffers; from here it holds the
-    // fp32 epilogue scratch, at the SAME addresses (offset 0, reinterpreted).
-    // The barrier establishes that every warp has issued its last fragment
-    // load out of sA/sB before any thread writes the scratch on top of them,
-    // which is the whole liveness argument -- sA and sB are dead after it.
+    // The scratch lives past the pipeline buffers, so this barrier is not
+    // needed for storage safety the way it would be if the two aliased (see
+    // SMEM_BYTES). It is still needed: the block is about to leave the k-loop,
+    // and every warp must have issued its last fragment load before any thread
+    // proceeds, so that no warp races ahead into the epilogue while another is
+    // still reading a buffer that a straggler could otherwise refill.
     __syncthreads();
-    float* scratch = reinterpret_cast<float*>(smem_raw) + warp * FRAG * LDE;
+    float* scratch =
+        reinterpret_cast<float*>(smem_raw + PIPE_BYTES) + warp * FRAG * LDE;
 
     // Top-left corner of this warp's tile in D.
     const int row_base = block_row * BM + warp_m * WM;
