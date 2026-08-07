@@ -17,7 +17,6 @@ module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module FSp = Kuiops.Sdpa.Flash.Split
 module FSpec = Kuiops.Sdpa.Flash.Spec
-module FTop = Kuiops.Sdpa.Flash.Spec.Top
 
 inline_for_extraction noextract
 fn sdpa_flash_async
@@ -80,7 +79,7 @@ fn sdpa_flash_async
       (gV |-> Frac fV eV) **
       (gmask |-> Frac fmask emask) **
       live gout) **
-    pure (FTop.flash_no_overflow nw d b hq hkv group sq rows sk
+    pure (FSpec.sdpa_flash_finite (SZ.v group) (SZ.v rows)
             eQ eK emask has_mask causal scale)
   ensures
     pledge0 (epoch_done s e)

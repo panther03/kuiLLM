@@ -18,6 +18,7 @@ open Kuiper.Chest
 open Kuiper.Floating
 open Kuiper.Approximates
 
+module FA = Kuiops.FloatAxioms
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SO = Kuiops.Sdpa.Flash.Spec.Online
 
@@ -125,6 +126,82 @@ let rec row_max_where_not_nan
     else begin
       row_max_where_not_nan s q (k - 1);
       fmax_not_nan (row_max_where s q (k - 1)) (acc1 s (k - 1))
+    end
+
+let rec row_max_not_nan
+  (#et : Type0) {| floating et |} (#bn : nat)
+  (s : chest1 et bn) (k : nat { k <= bn })
+  : Lemma (requires forall (t : natlt bn). not_nan (acc1 s t))
+          (ensures not_nan (SF.row_max s k))
+          (decreases k)
+  = if k = 0 then ninf_not_nan #et ()
+    else begin
+      row_max_not_nan s (k - 1);
+      fmax_not_nan (SF.row_max s (k - 1)) (acc1 s (k - 1))
+    end
+
+(* Away from the sentinel the correction weight never overflows, so the clamp
+   is transparent: [vm <= m'] and [exp] of a nonpositive number is finite. *)
+let corr_weight_exp
+  (#et : Type0) {| floating et |} (vm m' : et)
+  : Lemma (requires Finite? (kind vm) /\ ~(NaN? (kind m')) /\ lte vm m')
+          (ensures SF.corr_weight vm m' == fexp (vm `sub` m'))
+  = FA.sub_not_nan vm m';
+    FA.sub_nonpos vm m';
+    FA.exp_nonpos (vm `sub` m')
+
+(* Everything the softmax step needs to know about the clamped correction
+   weight: it is always finite, and away from the sentinel it is the
+   unclamped [exp] the real-level proof expects. *)
+let corr_weight_step
+  (#et : Type0) {| floating et |} (#bn : nat)
+  (s : chest1 et bn) (vm m' cw' : et)
+  : Lemma (requires (forall (t : natlt bn). not_nan (acc1 s t)) /\ not_nan vm /\
+                    m' == fmax vm (SF.row_max s bn) /\
+                    cw' == SF.corr_weight vm m')
+          (ensures Finite? (kind cw') /\
+                   (Finite? (kind vm) ==> cw' == fexp (vm `sub` m')))
+  = SF.corr_weight_finite vm m';
+    row_max_not_nan s bn;
+    fmax_not_nan vm (SF.row_max s bn);
+    introduce Finite? (kind vm) ==> cw' == fexp (vm `sub` m')
+    with _. corr_weight_exp vm m'
+
+(* The fold returns the sentinel or one of the entries it folded, so with
+   every admitted entry finite it never manufactures an infinity. *)
+let rec row_max_where_cases
+  (#et : Type0) {| floating et |} (#bn : nat)
+  (s : chest1 et bn) (q : SO.pred bn) (k : nat { k <= bn })
+  : Lemma (requires forall (t : natlt bn). q t ==> Finite? (kind (acc1 s t)))
+          (ensures row_max_where s q k == neg #et infinity \/
+                   Finite? (kind (row_max_where s q k)))
+          (decreases k)
+  = if k = 0 then ()
+    else begin
+      row_max_where_cases s q (k - 1);
+      if q (k - 1)
+      then introduce row_max_where s q (k - 1) == neg #et infinity ==>
+                     (row_max_where s q k == neg #et infinity \/
+                      Finite? (kind (row_max_where s q k)))
+           with _. fmax_ninf_l (acc1 s (k - 1))
+      else ()
+    end
+
+let rec row_max_where_finite
+  (#et : Type0) {| floating et |} (#bn : nat)
+  (s : chest1 et bn) (q : SO.pred bn) (k : nat { k <= bn })
+  : Lemma (requires (forall (t : natlt bn). q t ==> Finite? (kind (acc1 s t))) /\
+                    ~(pnone q k))
+          (ensures Finite? (kind (row_max_where s q k)))
+          (decreases k)
+  = if k = 0 then ()
+    else begin
+      row_max_where_cases s q (k - 1);
+      if q (k - 1)
+      then introduce row_max_where s q (k - 1) == neg #et infinity ==>
+                     Finite? (kind (row_max_where s q k))
+           with _. fmax_ninf_l (acc1 s (k - 1))
+      else row_max_where_finite s q (k - 1)
     end
 
 let rec row_max_where_none
@@ -261,7 +338,8 @@ let ml_state
   = not_nan m /\
     (if pnone p n
      then (m == neg infinity /\ l == zero)
-     else (exists (mr : real). m %~ mr /\ l %~ (SO.dsum x p /. exp mr)))
+     else (Finite? (kind m) /\
+           (exists (mr : real). m %~ mr /\ l %~ (SO.dsum x p /. exp mr))))
 
 (* [ml_state] only depends on the extension of the key set. *)
 let ml_state_ext
@@ -292,8 +370,8 @@ let step_pre
     (forall (i : natlt bn). q i ==>
        (Finite? (kind (acc1 es i)) /\ acc1 es i %~ xt i)) /\
     not_nan vm /\ Finite? (kind cw') /\
+    (Finite? (kind vm) ==> cw' == fexp (vm `sub` m')) /\
     m' == fmax vm (SF.row_max es bn) /\
-    cw' == fexp (vm `sub` m') /\
     l' == (vl `mul` cw') `add` (SF.row_sum es m' bn)
 
 (* The tile predicate is empty exactly when the tile absorbs nothing. *)
@@ -316,6 +394,7 @@ let step_absorbed
   (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (mr mr' : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
+                    Finite? (kind vm) /\
                     vm %~ mr /\ m' %~ mr' /\ vl %~ (SO.dsum x p /. exp mr))
           (ensures l' %~ (SO.dsum x p' /. exp mr'))
   = sub_approx vm m' mr mr';
@@ -396,6 +475,8 @@ let step_ab
   = row_max_masked es q bn;
     row_max_where_not_nan es q bn;
     fmax_ninf_l (row_max_where es q bn);
+    pnone_witness q i;
+    row_max_where_finite es q bn;
     pnone_witness p' (k0 + i);
     step_fresh x p t p' q xt k0 es vm vl m' l' cw' rR
 
@@ -407,7 +488,7 @@ let step_ba
   (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (mr : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
-                    pnone q bn /\ ~(pnone p n) /\
+                    pnone q bn /\ ~(pnone p n) /\ Finite? (kind vm) /\
                     vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr))
           (ensures ml_state x p' m' l')
   = tile_empty t q k0;
@@ -425,10 +506,12 @@ let step_bb
   (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
   (es : chest1 et bn) (vm vl m' l' cw' : et) (i : natlt bn) (mr rR : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
-                    ~(pnone p n) /\ vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
+                    ~(pnone p n) /\ Finite? (kind vm) /\
+                    vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
                     q i /\ row_max_where es q bn %~ rR)
           (ensures ml_state x p' m' l')
-  = row_max_masked es q bn;
+  = row_max_where_cases es q bn;
+    row_max_masked es q bn;
     row_max_where_not_nan es q bn;
     fmax_not_nan vm (row_max_where es q bn);
     fmax_approx vm (row_max_where es q bn) mr rR;
@@ -536,9 +619,10 @@ let mlo_state
   = not_nan m /\
     (if pnone p n
      then (m == neg infinity /\ l == zero /\ o %~ 0.0R)
-     else (exists (mr : real).
-             m %~ mr /\ l %~ (SO.dsum x p /. exp mr) /\
-             o %~ (SO.nsum x y p /. exp mr)))
+     else (Finite? (kind m) /\
+           (exists (mr : real).
+              m %~ mr /\ l %~ (SO.dsum x p /. exp mr) /\
+              o %~ (SO.nsum x y p /. exp mr))))
 
 let mlo_state_ml
   (#et : Type0) {| floating et |} {| real_like et |}
@@ -671,7 +755,7 @@ let mlo_ba
   (es : chest1 et bn) (vm vl m' l' cw' vo pv o' : et) (mr : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
-                    pnone q bn /\ ~(pnone p n) /\
+                    pnone q bn /\ ~(pnone p n) /\ Finite? (kind vm) /\
                     vm %~ mr /\ vl %~ (SO.dsum x p /. exp mr) /\
                     vo %~ (SO.nsum x y p /. exp mr))
           (ensures mlo_state x y p' m' l' o')
@@ -701,6 +785,8 @@ let mlo_ab
     row_max_masked es q bn;
     row_max_where_not_nan es q bn;
     fmax_ninf_l (row_max_where es q bn);
+    pnone_witness q i;
+    row_max_where_finite es q bn;
     pnone_witness p' (k0 + i);
     step_fresh x p t p' q xt k0 es vm vl m' l' cw' rR;
     o_step_fresh x y p t p' vo pv o' cw' rR
@@ -715,12 +801,13 @@ let mlo_bb
   (i : natlt bn) (mr rR : real)
   : Lemma (requires step_pre x p t p' q xt k0 es vm vl m' l' cw' /\
                     o_step_pre vo pv o' cw' /\ pv_ok x y t m' pv /\
-                    ~(pnone p n) /\ vm %~ mr /\
+                    ~(pnone p n) /\ Finite? (kind vm) /\ vm %~ mr /\
                     vl %~ (SO.dsum x p /. exp mr) /\
                     vo %~ (SO.nsum x y p /. exp mr) /\
                     q i /\ row_max_where es q bn %~ rR)
           (ensures mlo_state x y p' m' l' o')
   = step_bb x p t p' q xt k0 es vm vl m' l' cw' i mr rR;
+    row_max_where_cases es q bn;
     row_max_masked es q bn;
     row_max_where_not_nan es q bn;
     fmax_not_nan vm (row_max_where es q bn);

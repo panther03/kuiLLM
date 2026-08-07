@@ -31,6 +31,19 @@ inline_for_extraction noextract
 let sel_prob (#et : Type0) {| floating et |} (sv mnew : et) : et =
   if eq sv (neg infinity) then zero else fexp (sv `sub` mnew)
 
+(* Online-softmax correction weight, clamped to zero when it is not finite --
+   [if (!isfinite(corr)) corr = 0.0f;] of flash_attn_fa1.cu l.173 and l.222.
+   The shift [vm - m'] is [-inf - -inf] exactly when the running maximum is
+   still the initial sentinel and the tile is entirely masked. *)
+inline_for_extraction noextract
+let corr_weight (#et : Type0) {| floating et |} (vm mnew : et) : et =
+  let c = fexp (vm `sub` mnew) in
+  if fisfinite c then c else zero
+
+let corr_weight_finite (#et : Type0) {| floating et |} (vm mnew : et)
+  : Lemma (Finite? (kind (corr_weight vm mnew)))
+  = ()
+
 (* Whether key [kj] contributes to query row [qpos]: the row must exist, the
    key must be in range, and under [causal] it must not lie past [cbound]. *)
 let key_ok (row_active causal : bool) (sk cbound kj : nat) : bool =
@@ -159,7 +172,7 @@ let softmax_upd_post
   : prop
   = scores_post emask has_mask row_active causal bi qh qpos k0 cbound scale es es' /\
     m' == fmax vm (row_max es' bn) /\
-    cw' == fexp (vm `sub` m') /\
+    cw' == corr_weight vm m' /\
     (forall (j : natlt bn). acc1 ep' j == FC.fcast (sel_prob (acc1 es' j) m')) /\
     l' == (vl `mul` cw') `add` (row_sum es' m' bn)
 
@@ -273,8 +286,8 @@ let cw_vec
   (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16)
   : GTot (chest1 et_acc 16)
   = mk1 (fun i ->
-      fexp (acc1 evm i `sub`
-            acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
+      corr_weight (acc1 evm i)
+           (acc1 (m_vec emask has_mask row_active causal bi qh qpos k0 cbound
                     scale eS evm) i))
 
 let l_vec

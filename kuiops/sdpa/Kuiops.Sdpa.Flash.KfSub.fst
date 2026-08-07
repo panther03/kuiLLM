@@ -467,13 +467,7 @@ fn sdpa_flash_softmax_upd
   // Online-softmax max/correction update (uses the OLD m still in shm).
   let m_old = !shm;
   let mnew = fmax m_old !rowmax;
-  let corr0 = fexp (m_old `sub` mnew);
-  // TODO(line 173): clamp [corr] to 0 when it is not finite.  Kuiper only has a
-  // GHOST finiteness test ([is_finite]/[kind] returns the erasable [fkind]), so
-  // this guard cannot drive concrete control flow.  Needs an extractable
-  // [isfinite] on the [floating] typeclass; assumed for now.
-  let corr : et_acc = corr0;
-  assume pure (kind corr == Finite);
+  let corr : et_acc = SF.corr_weight m_old mnew;
 
   // Probability loop: select-to-zero probabilities + row sum.
   let mut rowsum : et_acc = zero;
