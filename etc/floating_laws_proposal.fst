@@ -566,3 +566,190 @@ let denominator_pos
     with introduce _ ==> _
     with _. gmax_ub em n w;
     gsum_pos em el (gmax em n) n
+
+(* ================================================================== *)
+(* Part 3: the precondition, reduced to a statement about INPUTS.      *)
+(*                                                                     *)
+(* Everything above still takes the block maximum, and the fact that it *)
+(* is attained, as hypotheses -- which are statements about the         *)
+(* kernel's internal state, and so are not acceptable as a              *)
+(* precondition.  This part discharges them.                            *)
+(*                                                                      *)
+(* THE RESULT ([flash_denominator_pos] at the bottom).  For each query   *)
+(* row, write                                                           *)
+(*                                                                      *)
+(*     score(k) = dot(Q[bi,qh,qpos,:], K[bi,kvh,k,:]) * scale           *)
+(*                  + mask[bi,qh,qpos,k]                                *)
+(*                                                                      *)
+(* for the keys [k] the row actually attends to (i.e. [SF.key_ok]:       *)
+(* [k < sk], and under [causal] also [k <= cbound]).  Then the entire    *)
+(* precondition is:                                                     *)
+(*                                                                      *)
+(*   1. every such [score(k)] is a number or [-inf], and                 *)
+(*   2. at least one of them is a number.                                *)
+(*                                                                      *)
+(* Nothing else.  No correction weights, no running maxima, no warps,    *)
+(* no tiles -- [score] is a function of the kernel's arguments alone.    *)
+(*                                                                      *)
+(* Note (1) is WEAKER than the current [Spec.Step.all_finite], which     *)
+(* demands [Finite] outright.  Permitting [-inf] matters in practice:    *)
+(* an additive attention mask of [-inf] is the standard PyTorch idiom    *)
+(* for masking, and the kernel handles it correctly by select-to-zero    *)
+(* ([Spec.Float.sel_prob], CUDA l.181).  So this is both auditable and   *)
+(* more permissive than what is in the tree today.                       *)
+(* ================================================================== *)
+
+(* The running row maximum, [Spec.Float.row_max]: a warp folds [fmax] over
+   its keys starting from [-inf]. *)
+let rec row_max (#t : Type) {| flt t |} (s : nat -> t) (k : nat)
+  : Tot t (decreases k)
+  = if k = 0 then ninf else fmax (row_max s (k - 1)) (s (k - 1))
+
+let rec row_max_ok (#t : Type) {| flt t |} (s : nat -> t) (k : nat)
+  : Lemma (requires forall (j : nat). j < k ==> ok (s j))
+          (ensures ok (row_max s k)) (decreases k)
+  = ninf_kind #t ();
+    if k = 0 then ()
+    else begin
+      row_max_ok s (k - 1);
+      ok_not_nan (row_max s (k - 1));
+      ok_not_nan (s (k - 1));
+      fmax_spec (row_max s (k - 1)) (s (k - 1))
+    end
+
+let rec row_max_ub (#t : Type) {| flt t |} (s : nat -> t) (k : nat) (j : nat)
+  : Lemma (requires j < k /\ (forall (u : nat). u < k ==> ok (s u)))
+          (ensures lte (s j) (row_max s k)) (decreases k)
+  = ninf_kind #t ();
+    row_max_ok s (k - 1);
+    ok_not_nan (row_max s (k - 1));
+    ok_not_nan (s (k - 1));
+    fmax_spec (row_max s (k - 1)) (s (k - 1));
+    if j = k - 1 then lte_refl (s (k - 1))
+    else begin
+      row_max_ub s (k - 1) j;
+      ok_not_nan (s j);
+      if lt (row_max s (k - 1)) (s (k - 1)) then begin
+        lt_imp_lte (row_max s (k - 1)) (s (k - 1));
+        lte_trans (s j) (row_max s (k - 1)) (s (k - 1))
+      end
+    end
+
+(* A max fold returns one of the things it folded, or the [-inf] it started
+   from.  [fmax] is a selector, so this needs no new law. *)
+let rec row_max_cases (#t : Type) {| flt t |} (s : nat -> t) (k : nat)
+  : Lemma (requires forall (j : nat). j < k ==> ok (s j))
+          (ensures row_max s k == ninf \/
+                   (exists (j : nat). j < k /\ row_max s k == s j))
+          (decreases k)
+  = ninf_kind #t ();
+    if k = 0 then ()
+    else begin
+      row_max_cases s (k - 1);
+      row_max_ok s (k - 1);
+      ok_not_nan (row_max s (k - 1));
+      ok_not_nan (s (k - 1));
+      fmax_spec (row_max s (k - 1)) (s (k - 1))
+    end
+
+(* Hence: as soon as ONE key of the warp has a finite score, the warp's
+   maximum is finite AND is attained by one of its keys.  Both of the
+   "internal state" hypotheses of [row_sum_pos] fall out. *)
+let row_max_attained (#t : Type) {| flt t |} (s : nat -> t) (k : nat) (j0 : nat)
+  : Lemma (requires j0 < k /\ (forall (j : nat). j < k ==> ok (s j)) /\
+                    Finite? (kind (s j0)))
+          (ensures Finite? (kind (row_max s k)) /\
+                   (exists (j : nat). j < k /\ row_max s k == s j))
+  = ninf_kind #t ();
+    row_max_ok s k;
+    row_max_ub s k j0;
+    row_max_cases s k;
+    introduce row_max s k == ninf ==> False
+    with _. ok_lte_ninf (s j0)
+
+(* Same argument one level up, for the cross-warp fold. *)
+let rec gmax_cases (#t : Type) {| flt t |} (em : nat -> t) (n : nat)
+  : Lemma (requires forall (w : nat). w < n ==> ok (em w))
+          (ensures gmax em n == ninf \/
+                   (exists (w : nat). w < n /\ gmax em n == em w))
+          (decreases n)
+  = ninf_kind #t ();
+    if n = 0 then ()
+    else begin
+      gmax_cases em (n - 1);
+      gmax_ok em (n - 1);
+      ok_not_nan (gmax em (n - 1));
+      ok_not_nan (em (n - 1));
+      fmax_spec (gmax em (n - 1)) (em (n - 1))
+    end
+
+let gmax_attained (#t : Type) {| flt t |} (em : nat -> t) (n : nat) (w0 : nat)
+  : Lemma (requires w0 < n /\ (forall (w : nat). w < n ==> ok (em w)) /\
+                    Finite? (kind (em w0)))
+          (ensures Finite? (kind (gmax em n)) /\
+                   (exists (w : nat). w < n /\ gmax em n == em w))
+  = ninf_kind #t ();
+    gmax_ok em n;
+    gmax_ub em n w0;
+    gmax_cases em n;
+    introduce gmax em n == ninf ==> False
+    with _. ok_lte_ninf (em w0)
+
+(* ------------------------------------------------------------------ *)
+(* THE THEOREM.  The kernel splits a query row's keys across warps:     *)
+(* warp [w] owns [nk w] keys with scores [sw w 0 .. sw w (nk w - 1)],   *)
+(* publishes [row_max] of them and the matching [row_sum].  This is     *)
+(* the shape of [Spec.Float.gmax] / [.gsum] over [flash_eM_at] /        *)
+(* [flash_eL_at].                                                       *)
+(*                                                                      *)
+(* The ONLY hypotheses are about the scores.                            *)
+(* ------------------------------------------------------------------ *)
+(* Warp [w]'s published maximum and denominator, as top-level definitions
+   so the SMT solver sees them applied rather than as lambdas. *)
+let warp_max (#t : Type) {| flt t |} (sw : nat -> nat -> t) (nk : nat -> nat)
+  (w : nat) : t
+  = row_max (sw w) (nk w)
+
+let warp_den (#t : Type) {| flt t |} (sw : nat -> nat -> t) (nk : nat -> nat)
+  (w : nat) : t
+  = row_sum (sw w) (warp_max sw nk w) (nk w)
+
+let flash_denominator_pos
+  (#t : Type) {| flt t |}
+  (sw : nat -> nat -> t) (nk : nat -> nat) (n : nat)
+  (w1 j1 : nat)
+  : Lemma
+      (requires
+        (* every score is a number or the [-inf] that masking produces *)
+        (forall (w j : nat). w < n /\ j < nk w ==> ok (sw w j)) /\
+        (* and at least one admitted key has a finite score *)
+        w1 < n /\ j1 < nk w1 /\ Finite? (kind (sw w1 j1)))
+      (ensures
+        lt zero (gsum (warp_max sw nk) (warp_den sw nk)
+                   (gmax (warp_max sw nk) n) n))
+  = let em : nat -> t = warp_max sw nk in
+    let el : nat -> t = warp_den sw nk in
+    ninf_kind #t ();
+    introduce forall (w : nat). w < n ==> ok (em w)
+    with introduce _ ==> _
+    with _. row_max_ok (sw w) (nk w);
+    introduce forall (w : nat) (j : nat). w < n /\ j < nk w ==>
+                lte (sw w j) (em w)
+    with introduce _ ==> _
+    with _. row_max_ub (sw w) (nk w) j;
+    introduce forall (w : nat). w < n ==> lte zero (el w)
+    with introduce _ ==> _
+    with _. row_sum_nonneg (sw w) (em w) (nk w);
+    row_max_attained (sw w1) (nk w1) j1;
+    gmax_attained em n w1;
+    eliminate exists (w0 : nat). w0 < n /\ gmax em n == em w0
+    returns lt zero (gsum em el (gmax em n) n)
+    with _. begin
+      row_max_cases (sw w0) (nk w0);
+      eliminate exists (j : nat). j < nk w0 /\ em w0 == sw w0 j
+      returns lt zero (gsum em el (gmax em n) n)
+      with _. begin
+        row_max_attained (sw w0) (nk w0) j;
+        denominator_pos em el n w0 (sw w0) (nk w0)
+      end
+    end

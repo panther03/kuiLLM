@@ -184,16 +184,29 @@ let eO_at_cell
       [causal] with no mask tensor the diagonal key is always admitted, so it
       holds automatically.
 
-      This conjunct is the one that is fairly charged with being an
-      "assume dressed up as a precondition": it is an internal value, and a
-      caller cannot audit it.  Replacing it with the input-level condition
-      "row [i] admits at least one key" is possible, but needs sign and
+      This conjunct is an internal value, so it is not acceptable as a
+      precondition and must be discharged.  Doing so needs sign and
       monotonicity laws for [add]/[mul] plus [fexp zero == one]; see
-      [etc/Kuiops.Floating.Axioms.fsti] for the exact set and
-      [etc/floating_laws_proposal.fst] ([denominator_pos]) for a
-      machine-checked proof that they suffice.  There is no route around
-      them: the kernel branches on this float, and [%~] carries no error
-      bound, so no real-level fact can decide the branch. *)
+      [etc/Kuiops.Floating.Axioms.fsti] for the exact set.  There is no
+      route around them: the kernel branches on this float, and [%~]
+      carries no error bound, so no real-level fact can decide the branch.
+
+   TARGET.  With those laws, an extractable [isfinite] (see note (2)) and
+   the [lt_neg_flip] correction, all three conjuncts collapse to a
+   statement about this function's own arguments.  For each query row, over
+   the keys it attends to ([SF.key_ok]), with
+
+     score(k) = dot(eQ[bi,qh,qpos,:], eK[bi,kvh,k,:]) * scale
+                  + mask[bi,qh,qpos,k]
+
+     1. every score(k) is Finite or [-inf], and
+     2. at least one score(k) is Finite.
+
+   [etc/floating_laws_proposal.fst] ([flash_denominator_pos]) machine-checks
+   that these two imply (3), via attainment of the row and block maxima.
+   Note (1) is WEAKER than [all_finite] above: permitting [-inf] admits the
+   standard PyTorch [-inf] additive mask, which the kernel already handles
+   by select-to-zero (CUDA l.181). *)
 let row_no_overflow
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}

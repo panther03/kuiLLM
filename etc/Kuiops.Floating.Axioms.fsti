@@ -93,48 +93,47 @@ module Kuiops.Floating.Axioms
    (automatic when [has_mask = false]) instead of being carried as is.
 
    ------------------------------------------------------------------------
-   RECOMMENDATION, REVISED AGAIN after the review objection that
-   [flash_no_overflow] "is basically saying: my inputs are such that I have
-   some invariant on an internal state in my implementation", and that a
-   precondition must be auditable for non-vacuity.
+   FINAL RECOMMENDATION.
 
-   That objection retires the "so it is only cosmetics" argument above.
-   Restating conjunct (3) as an input-level condition is not cosmetics if
-   the alternative is a precondition nobody can audit -- it is the whole
-   point.  So:
+   Adopt all eleven, AND add an extractable [isfinite], AND correct
+   [lt_neg_flip].  Together these reduce the whole precondition of
+   [sdpa_flash_async] to two statements about the kernel's arguments:
 
-     - Site 3 (axioms 1-4): adopt NONE.  Add an extractable [isfinite] to
-       [floating] and clamp, exactly as the CUDA does.  Strictly better than
-       the axioms: unconditional, whereas [exp_nonpos] discharges the
-       obligation only under [~(m == -inf /\ s == -inf)], whose proof is an
-       argument about [SF.key_tiles] -- more internal reasoning, which is
-       what we are trying to eliminate.  It also removes the one [assume] in
-       the port, and the identical one upstream in
-       [Kuiper.Kernel.OnlineSoftmax].  Spec and machine-checked
-       demonstration: [etc/isfinite_proposal.fst].
+     for each query row, over the keys it attends to
+     ([SF.key_ok]: k < sk, and under [causal] also k <= cbound),
+     with  score(k) = dot(Q[bi,qh,qpos,:], K[bi,kvh,k,:]) * scale
+                        + mask[bi,qh,qpos,k]
 
-     - Site 4 (axioms 5-11): ADOPT.  [isfinite] does not touch conjunct (3),
-       which is then the only non-auditable conjunct left.  These seven
-       replace it with "query row [r] admits at least one key", a statement
-       about [emask]/[has_mask]/[causal]/[r] only.  [denominator_pos] in
-       [etc/floating_laws_proposal.fst] machine-checks the reduction; its
-       surviving hypotheses are all consequences of [all_finite] plus that
-       one non-emptiness condition, and none of them mention kernel state.
+       1. every score(k) is a number or -inf, and
+       2. at least one score(k) is a number.
 
-   Conjunct (1), [all_finite], stays: unfolded it says "for every admitted
-   key [k], [scale * <q,k> + bias] is finite", which mentions only inputs.
+   [etc/floating_laws_proposal.fst] machine-checks that reduction
+   ([flash_denominator_pos]); [etc/isfinite_proposal.fst] does the same for
+   [isfinite].  Roles:
 
-   Independently of all the above, the correction to [lt_neg_flip] in
-   [Kuiper.Floating.Base] and its four backing [val]s in
-   [Kuiper.{Float16,BFloat16,Float32,Float64}.Base]:
+     - [isfinite] retires conjunct (2), [cw_upto].  Strictly better than
+       axioms 1-4 for that job: the clamp is unconditional, whereas
+       [exp_nonpos] discharges it only under [~(m == -inf /\ s == -inf)],
+       whose proof is an argument about [SF.key_tiles] -- internal
+       reasoning again.  It also removes the one [assume] in the port and
+       the identical one in [Kuiper.Kernel.OnlineSoftmax].
+     - Axioms 5-11 retire conjunct (3), the denominator.  There is no
+       alternative: the kernel branches on that float and [%~] carries no
+       error bound, so no real-level fact can decide the branch.
+     - Axioms 1-4 remain needed after all, but for a different reason than
+       originally given: [cmp_nan], [sub_not_nan], [sub_nonpos] and
+       [exp_nonpos] are what make [sel_prob] provably non-negative and the
+       row maximum provably attained, which is how condition (2) above
+       replaces the internal hypothesis.
+     - [lt_neg_flip] must be corrected regardless: as it stands the class
+       proves [False] (see [etc/floating_ord_unsound.fst]), so any proof
+       against it -- including everything in this repo -- is vacuous.
 
-     ensures lt x y <==> lte (zero `sub` y) (zero `sub` x)   (* current *)
-     ensures lt x y <==> lt  (zero `sub` y) (zero `sub` x)   (* correct *)
-
-   As it stands the class proves [False]; see [etc/floating_ord_unsound.fst].
-
-   [etc/floating_laws_proposal.fst] machine-checks that the eleven suffice;
-   each one's site is recorded below.
+   Condition (1) is WEAKER than the [all_finite] in the tree today, which
+   demands [Finite] outright.  Allowing [-inf] matters: an additive mask of
+   [-inf] is the standard PyTorch masking idiom and the kernel already
+   handles it by select-to-zero (CUDA l.181).  So the new precondition is
+   both auditable and more permissive than the current one.
 
    Check this file with:  ./fstar.sh etc/Kuiops.Floating.Axioms.fsti        *)
 
