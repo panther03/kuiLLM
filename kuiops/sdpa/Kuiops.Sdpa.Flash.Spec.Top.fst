@@ -3,9 +3,10 @@ module Kuiops.Sdpa.Flash.Spec.Top
 (* The top of the functional-correctness tower: the chest the kernel leaves in
    the output tensor approximates [Kuiops.Sdpa.Flash.Spec.sdpa_flash_real].
 
-   The overflow side conditions the float computation cannot itself rule out
-   are collected in [flash_no_overflow] and carried as a hypothesis, in the
-   same spirit as [Kuiops.Sdpa.Flash.Spec.Step.all_finite]. *)
+   The side conditions the float level cannot discharge are collected in
+   [flash_no_overflow]; see the comment there for which of them are real
+   preconditions on the inputs and which are artifacts of [fexp] being
+   unaxiomatized. *)
 
 open Kuiper
 open Kuiper.Common
@@ -128,10 +129,34 @@ let eO_at_cell
 (* ------------------------------------------------------------------ *)
 
 (* What the float computation of one query row must avoid for the kernel to
-   track the real spec: every admitted score and every online-softmax
-   correction weight stays finite, and the block-wide denominator the epilogue
-   divides by is strictly positive.  Compare
-   [Kuiops.Sdpa.Flash.Spec.Step.all_finite]. *)
+   track the real spec.  The three conjuncts do NOT have equal status:
+
+   1. [all_finite] is a genuine precondition on the inputs.  It depends only
+      on Q, K, the mask, the scale and the masking predicate, and it really
+      can fail: if a scaled, biased score overflows to an infinity then the
+      online softmax evaluates [exp (inf - inf)] and NaN reaches the output.
+      No kernel can be correct without it, and a caller can check it.
+
+   2. [cw_upto] and
+
+   3. positivity of the epilogue denominator
+
+   are NOT preconditions on the inputs -- they are consequences of (1).  Every
+   tile a warp actually visits contains at least one admitted key (the tile
+   count [SF.key_tiles] is cut off at the causal bound, and warps past the
+   count run zero iterations), so each running maximum after the first step is
+   finite and the sequence is non-decreasing; the correction weight is then
+   [exp] of a non-positive quantity, which lies in [0, 1], and the denominator
+   is a sum containing the term [exp 0 * l] for the argmax warp.
+
+   They are stated as hypotheses only because [fexp] is an unaxiomatized
+   primitive of [Kuiper.Floating.Base]: the class provides no law relating
+   [kind (fexp x)] or the sign of [fexp x] to [x], and [floating_real_like]
+   offers only [exp_approx], whose [v_approximates] is abstract.  Discharging
+   (2) needs "exp of a non-positive argument is finite"; discharging (3)
+   additionally needs [fexp zero == one] together with monotonicity of [add]
+   and [mul], which the class also lacks.  Once those laws exist upstream both
+   should be provable from [all_finite] and dropped from this predicate. *)
 let row_no_overflow
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
