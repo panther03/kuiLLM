@@ -30,6 +30,9 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module FD = Kuiops.Sdpa.Flash.KernelDesc
+module FSp = Kuiops.Sdpa.Flash.Split
+module FSpec = Kuiops.Sdpa.Flash.Spec
+module FTop = Kuiops.Sdpa.Flash.Spec.Top
 module FB = Kuiops.Sdpa.Flash.Barrier
 module Trade = Pulse.Lib.Trade
 
@@ -40,7 +43,7 @@ module Trade = Pulse.Lib.Trade
 inline_for_extraction noextract
 let sdpa_flash_kd
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |} {| floating_real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -98,18 +101,36 @@ let sdpa_flash_kd
        (gK |-> Frac fK eK) **
        (gV |-> Frac fV eV) **
        (gmask |-> Frac fmask emask) **
-       live gout)
+       (gout |-> Frac 1.0R
+          (FSp.flash_out_chest b hq hkv group sq rows d
+             (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale))))
 = {
   nblk;
   nthr;
   shmems_desc = flash_shmems et_ab et_acc nw d;
   barrier_contract = (fun _bid sh ->
     let v = flash_views_of nw d sh in
-    barrier_contract nw d v.shQv v.shMv v.shLv v.shscalev v.shOv v.shglv);
+    barrier_contract nw d v.shQv
+      (flash_eQsh d b hq hkv group sq rows tiles eQ _bid)
+      v.shMv v.shLv
+      (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      v.shscalev v.shOv v.shglv
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid));
   barrier_count = (fun _ -> 3);
   barrier_ok = (fun _bid sh ->
     let v = flash_views_of nw d sh in
-    FB.barrier_ok nw d v.shQv v.shMv v.shLv v.shscalev v.shOv v.shglv);
+    FB.barrier_ok nw d v.shQv
+      (flash_eQsh d b hq hkv group sq rows tiles eQ _bid)
+      v.shMv v.shLv
+      (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      v.shscalev v.shOv v.shglv
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid));
   frame = emp;
   block_pre = (fun bid ->
     flash_block_state nblk
@@ -117,17 +138,24 @@ let sdpa_flash_kd
       gQ gK gV gmask gout #fQ #fK #fV #fmask
       #eQ #eK #eV #emask bid);
   block_post = (fun bid ->
-    flash_block_state nblk
+    flash_block_state_v nw nblk
       b hq hkv group sq rows tiles sk d
       gQ gK gV gmask gout #fQ #fK #fV #fmask
-      #eQ #eK #eV #emask bid);
+      #eQ #eK #eV #emask
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+        (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      bid);
   setup = FD.flash_setup nblk
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout
     #fQ #fK #fV #fmask #eQ #eK #eV #emask;
-  teardown = FD.flash_teardown nblk
+  teardown = FD.flash_teardown_v nblk nw
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout
+    gQ gK gV gmask gout has_mask causal scale
     #fQ #fK #fV #fmask #eQ #eK #eV #emask;
   block_frame = (fun _sh _bid -> emp);
   block_setup = FD.flash_block_setup nblk nw nthr
@@ -137,7 +165,10 @@ let sdpa_flash_kd
   block_teardown = FD.flash_block_teardown nblk nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout
-    #fQ #fK #fV #fmask #eQ #eK #eV #emask;
+    #fQ #fK #fV #fmask #eQ #eK #eV #emask
+    (fun _bid -> flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid)
+    (fun _bid -> flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale _bid)
+    (fun _bid -> flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale _bid);
   kpre = (fun sh bid tid ->
     flash_thread_pre nw nthr
       b hq hkv group sq rows tiles sk d
@@ -159,6 +190,9 @@ let sdpa_flash_kd
       #(fV /. (SZ.v nblk) /. (SZ.v nthr))
       #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
       #eQ #eK #eV #emask
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale bid)
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale bid)
       (bid <: natlt
         (SZ.v b * SZ.v hkv * SZ.v tiles))
       (tid / BW.warp_size) (tid % BW.warp_size));
@@ -176,7 +210,7 @@ let sdpa_flash_kd
 inline_for_extraction noextract
 fn sdpa_flash_async
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |} {| floating_real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -235,7 +269,9 @@ fn sdpa_flash_async
       (gK |-> Frac fK eK) **
       (gV |-> Frac fV eV) **
       (gmask |-> Frac fmask emask) **
-      live gout)
+      live gout) **
+    pure (FTop.flash_no_overflow nw d b hq hkv group sq rows sk
+            eQ eK emask has_mask causal scale)
   ensures
     pledge0 (epoch_done s e)
       (on gpu_loc (
@@ -243,8 +279,17 @@ fn sdpa_flash_async
         (gK |-> Frac fK eK) **
         (gV |-> Frac fV eV) **
         (gmask |-> Frac fmask emask) **
-        live gout))
+        (gout |-> Frac 1.0R
+           (FSp.flash_out_chest b hq hkv group sq rows d
+              (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale))))) **
+    pure (FSp.flash_out_chest b hq hkv group sq rows d
+            (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV emask has_mask causal scale)
+          %~ FSpec.sdpa_flash_real (SZ.v group)
+               (to_real_chest eQ) (to_real_chest eK) (to_real_chest eV)
+               (to_real_chest emask) (to_real scale) causal has_mask)
 {
+  FTop.flash_out_approx nw d b hq hkv group sq rows sk
+    eQ eK eV emask has_mask causal scale;
   launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout causal has_mask scale) s;

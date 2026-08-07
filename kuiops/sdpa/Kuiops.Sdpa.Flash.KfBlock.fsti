@@ -18,6 +18,7 @@ module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 
 inline_for_extraction noextract
 let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
@@ -30,11 +31,18 @@ let strided_cells2
 = forall+ (ij : stride_index2 rows cols nthr tid).
     exists* (v : et). tensor_pts_to_cell shA (idx2 ij._1 ij._2) v
 
+let strided_cells2_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (shA : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (e : chest2 et rows cols) : slprop
+= forall+ (ij : stride_index2 rows cols nthr tid).
+    tensor_pts_to_cell shA (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2)
+
 inline_for_extraction noextract
 fn sdpa_flash_q_load
   (#et_ab #et_acc : Type0)
   {| scalar et_ab |}
-  {| scalar et_acc |} {| floating et_acc |}
+  {| floating et_acc |}
   (bm d nthr : szp)
   (b hq sq : szp)
   (#lgQ : layout4 b hq sq d) {| ctlayout lgQ |}
@@ -60,9 +68,12 @@ fn sdpa_flash_q_load
     if_ (lane_active bm lane) (ml_cells bm shm shl lane)
   ensures
     (gQ |-> Frac fQ eQ) **
-    strided_cells2 shQ (SZ.v nthr) (SZ.v tid) **
-    strided_cells2 shO BW.warp_size (SZ.v lane) **
-    if_ (lane_active bm lane) (ml_cells bm shm shl lane)
+    strided_cells2_v shQ (SZ.v nthr) (SZ.v tid)
+      (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group)
+         eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) **
+    strided_cells2_v shO BW.warp_size (SZ.v lane) (ozero (SZ.v bm) (SZ.v d)) **
+    if_ (lane_active bm lane)
+      (ml_cells_v bm shm shl lane (neg infinity) zero)
 
 inline_for_extraction noextract
 fn sdpa_flash_causal_mask
@@ -72,11 +83,13 @@ fn sdpa_flash_causal_mask
   (#_ : squash (SZ.fits (SZ.v sk + SZ.v bm + 1)))
   (#_ : squash (SZ.v sq <= SZ.v sk))
   returns nkt : sz
-  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1)
+  ensures pure (SZ.v nkt <= SZ.v sk / SZ.v bn + 1 /\
+                SZ.v nkt == SF.key_tiles (SZ.v bn) (SZ.v bm) (SZ.v sq) (SZ.v sk)
+                              (SZ.v rows) (SZ.v r0) causal)
 
 inline_for_extraction noextract
 fn sdpa_flash_combine_partials
-  (#et : Type0) {| scalar et |} {| floating et |}
+  (#et : Type0) {| floating et |}
   (nw bm : szp)
   (#lgm #lgl : layout1 bm) {| ctlayout lgm |} {| ctlayout lgl |}
   (shM shL shscale : array2 et (l2_row_major nw bm))
@@ -92,12 +105,16 @@ fn sdpa_flash_combine_partials
       (combine_cells nw bm shscale shgm shgl lane)
   ensures
     if_ (combine_active bm w lane)
-      (combine_cells nw bm shscale shgm shgl lane)
+      (combine_cells_v nw bm shscale shgm shgl lane
+        (SF.gscale_col eM (SZ.v (clamp_lt bm lane)))
+        (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+        (SF.gsum eM eL (SF.gmax eM (SZ.v (clamp_lt bm lane)) (SZ.v nw))
+           (SZ.v (clamp_lt bm lane)) (SZ.v nw)))
 
 inline_for_extraction noextract
 fn sdpa_flash_o_store
   (#et_acc #et_ab : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_acc et_ab |}
   (nw bm d rows b hq sq : szp)
@@ -128,5 +145,5 @@ fn sdpa_flash_o_store
     (out_store_cells b hq sq bm d rows gout
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))
   ensures if_ (w = 0sz)
-    (out_store_cells b hq sq bm d rows gout
+    (out_store_cells_v nw b hq sq bm d rows gout escale eO egl
       (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) (SZ.v lane))

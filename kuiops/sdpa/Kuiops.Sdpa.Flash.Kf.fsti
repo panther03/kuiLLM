@@ -20,6 +20,7 @@ open Kuiper.EMatrix
 open Kuiper.ForEvery
 open Kuiper.Shape
 open Pulse.Lib.Pledge
+open Kuiops.Sdpa.Flash.Vals
 open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
@@ -33,7 +34,7 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 inline_for_extraction noextract
 fn sdpa_flash_kf
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |} {| floating_real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -100,13 +101,37 @@ fn sdpa_flash_kf
     sdpa_flash_pre #et_ab #et_acc nw nthr d sk b hq sq rows
       #lgQ #lgK #lgV #lgmask #lout #lcw
       gQ gK gV gmask gout shQ shK shV shS shP shPVc shcw
-      shM shL shscale shO shgm shgl tid bi r0 group kvh
+      shM shL
+      (flash_eM_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      shscale shO shgm shgl
+      (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask
   ensures
     sdpa_flash_post #et_ab #et_acc nw nthr d sk b hq sq rows
       #lgQ #lgK #lgV #lgmask #lout #lcw
       gQ gK gV gmask gout shQ shK shV shS shP shPVc shcw
-      shM shL shscale shO shgl tid bi r0 group kvh
+      shM shL
+      (flash_eM_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eL_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      shscale shO shgl
+      (flash_escale_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_eO_at nw d b hq sq rows sk eQ eKg eVg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      (flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal scale
+         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+      tid bi r0 group kvh
       #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask **
     if_ (combine_active 16sz
       (sdpa_flash_w nw nthr tid) (sdpa_flash_lane nw nthr tid))

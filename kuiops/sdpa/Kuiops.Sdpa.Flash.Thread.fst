@@ -30,12 +30,13 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module FD = Kuiops.Sdpa.Flash.KernelDesc
+module Vals = Kuiops.Sdpa.Flash.Vals
 module Trade = Pulse.Lib.Trade
 
 inline_for_extraction noextract
 fn sdpa_flash_thread
   (#et_ab #et_acc : Type0)
-  {| scalar et_acc |} {| floating et_acc |} {| real_like et_acc |}
+  {| floating et_acc |} {| real_like et_acc |} {| floating_real_like et_acc |}
   {| scalar et_ab |} {| real_like et_ab |}
   {| FC.float_cast et_ab et_acc |}
   {| FC.float_cast et_acc et_ab |}
@@ -103,11 +104,20 @@ fn sdpa_flash_thread
     B.barrier_tok
       (barrier_contract nw d
         (flash_views_of nw d sh).shQv
+        (flash_eQsh d b hq hkv group sq rows tiles eQ
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shMv
         (flash_views_of nw d sh).shLv
+        (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shscalev
         (flash_views_of nw d sh).shOv
-        (flash_views_of nw d sh).shglv) **
+        (flash_views_of nw d sh).shglv
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))) **
     B.barrier_state 0
   ensures
     gpu **
@@ -119,6 +129,9 @@ fn sdpa_flash_thread
       #(fV /. (SZ.v nblk) /. (SZ.v nthr))
       #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
       #eQ #eK #eV #emask
+      (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+      (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
       (SZ.v bid <: natlt
         (SZ.v b * SZ.v hkv * SZ.v tiles))
       (SZ.v tid / BW.warp_size)
@@ -128,11 +141,20 @@ fn sdpa_flash_thread
     B.barrier_tok
       (barrier_contract nw d
         (flash_views_of nw d sh).shQv
+        (flash_eQsh d b hq hkv group sq rows tiles eQ
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shMv
         (flash_views_of nw d sh).shLv
+        (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+          (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_views_of nw d sh).shscalev
         (flash_views_of nw d sh).shOv
-        (flash_views_of nw d sh).shglv) **
+        (flash_views_of nw d sh).shglv
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))) **
     B.barrier_state 3
 {
   let w = sdpa_flash_w nw nthr tid;
@@ -274,7 +296,15 @@ fn sdpa_flash_thread
     (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
+    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv
+    (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+      (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+      (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shgmv (flash_views_of nw d sh).shglv
+    (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
     tid bi r0 group kvh
     #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
@@ -330,7 +360,15 @@ fn sdpa_flash_thread
     (flash_warp_p (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
-    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shglv
+    (flash_views_of nw d sh).shMv (flash_views_of nw d sh).shLv
+    (flash_eM nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+      (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_eL nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale
+      (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_views_of nw d sh).shscalev (flash_views_of nw d sh).shOv (flash_views_of nw d sh).shglv
+    (Vals.flash_escale_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (Vals.flash_eO_at nw d b hq sq rows sk eQ eKkv eVkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+    (Vals.flash_egl_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
     tid bi r0 group kvh
     #(fQ /. (SZ.v nblk) /. (SZ.v nthr))
     #(fK /. (SZ.v nblk) /. (SZ.v nthr))
@@ -358,8 +396,13 @@ fn sdpa_flash_thread
     (flash_warp_pv (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (flash_warp_cw (flash_views_of nw d sh) (SZ.v (sdpa_flash_w nw nthr tid)))
     (SZ.v (sdpa_flash_lane nw nthr tid));
-  flash_output_from_post b hq sq rows d gout
-    (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0)
+  flash_if_when_reindex
+    (fun (l : natlt BW.warp_size) ->
+      out_store_cells_v nw b hq sq 16sz d rows gout
+        (Vals.flash_escale_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+        (Vals.flash_eO_at nw d b hq sq rows sk eQ eKkv eVkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+        (Vals.flash_egl_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+        (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0) l)
     (SZ.v (sdpa_flash_w nw nthr tid))
     (SZ.v (sdpa_flash_lane nw nthr tid))
     (sdpa_flash_w nw nthr tid)
@@ -397,12 +440,18 @@ fn sdpa_flash_thread
 
   rewrite
     (when_ (SZ.v (sdpa_flash_w nw nthr tid) = 0)
-      (out_store_cells b hq sq 16sz d rows gout
+      (out_store_cells_v nw b hq sq 16sz d rows gout
+        (Vals.flash_escale_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+        (Vals.flash_eO_at nw d b hq sq rows sk eQ eKkv eVkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
+        (Vals.flash_egl_at nw d b hq sq rows sk eQ eKkv emask has_mask causal scale (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0))
         (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0)
         (SZ.v (sdpa_flash_lane nw nthr tid))))
     as
     (when_ (SZ.v (sdpa_flash_w nw nthr tid) = 0)
-      (out_store_cells b hq sq 16sz d rows gout
+      (out_store_cells_v nw b hq sq 16sz d rows gout
+        (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+        (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
         (flash_bid_bi
           (SZ.v b) (SZ.v hkv) (SZ.v tiles)
           (SZ.v bid <: natlt
@@ -429,6 +478,9 @@ fn sdpa_flash_thread
     #(fV /. (SZ.v nblk) /. (SZ.v nthr))
     #(fmask /. (SZ.v nblk) /. (SZ.v nthr))
     #eQ #eK #eV #emask
+    (flash_escale nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_eO nw d b hq hkv group sq rows tiles sk eQ eK eV emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
+    (flash_egl nw d b hq hkv group sq rows tiles sk eQ eK emask has_mask causal scale (SZ.v bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles)))
     (SZ.v bid <: natlt
       (SZ.v b * SZ.v hkv * SZ.v tiles))
     (SZ.v tid / BW.warp_size)
