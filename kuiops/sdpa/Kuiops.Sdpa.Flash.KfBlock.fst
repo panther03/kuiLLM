@@ -620,7 +620,7 @@ fn sdpa_flash_o_store_cell_active
     SF.ocomb_step escale eO (SZ.v i) (SZ.v dd) (SZ.v iw);
     rewrite (acc |-> (a0 `add` (sv `mul` ov)))
       as (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) (SZ.v vww + 1));
-    ww := vww +^ 1sz;
+    ww := !ww +^ 1sz;
   };
   with nend. assert (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) nend);
   rewrite (acc |-> SF.ocomb escale eO (SZ.v i) (SZ.v dd) nend)
