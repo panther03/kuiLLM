@@ -7,7 +7,8 @@ module Kuiops.Floating.Axioms
    eleven.  Nothing else in the SDPA flash-attention correctness development
    is trusted -- everything else is derived from these plus the existing
    [floating] laws.  See [etc/floating_laws_proposal.fst] for the
-   machine-checked argument that these are sufficient.
+   machine-checked argument that these are sufficient; the mock class there
+   states all eleven verbatim, so the argument transfers unchanged.
 
    They are stated as free-standing lemmas over the EXISTING
    [Kuiper.Floating.Base.floating] class, so adopting them requires no change
