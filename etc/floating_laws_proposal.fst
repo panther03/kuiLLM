@@ -49,7 +49,7 @@ module Floating_laws_proposal
    The rest are the [fexp] and sign/monotonicity laws the online-softmax
    argument needs:
 
-     2. [sub_nan_spec]  when a difference is NaN
+     2. [sub_not_nan]   a difference of numbers is not NaN
      3. [sub_self]      [x - x == 0] for finite [x]
      4. [sub_nonpos]    [x <= y ==> x - y <= 0]
      5. [exp_nonpos]    [exp] maps [[-inf, 0]] into [[0, 1]]   <- the key one
@@ -170,18 +170,19 @@ class flt (t : Type) = {
   lte_trans : (x : t) -> (y : t) -> (z : t) ->
     Lemma (requires lte x y /\ lte y z) (ensures lte x z);
 
-  (* ---- [NEW] 2. when subtraction is NaN --------------------------- *)
+  (* ---- [NEW] 2. when subtraction is NOT NaN ----------------------- *)
 
-  (* IEEE: the only way a difference of numbers is NaN is a NaN operand or
-     [inf - inf] with equal signs.  Needed to know that the online-softmax
-     shift [m_t - m_{t+1}] is a real number and not NaN.  The class today
-     says nothing at all about [kind (sub x y)] except through [neg_kind].
-     Stated as an iff because both directions are used: the [<==] direction
-     rules NaN out, the [==>] direction is what makes it checkable. *)
-  sub_nan_spec : (x : t) -> (y : t) ->
-    Lemma (ensures NaN? (kind (x `sub` y)) <==>
-                   (NaN? (kind x) \/ NaN? (kind y) \/
-                    (Infinite? (kind x) /\ Infinite? (kind y) /\ x == y)));
+  (* IEEE: the only way a difference is NaN is a NaN operand or [inf - inf]
+     with equal signs.  Needed to know the online-softmax shift
+     [m_t - m_{t+1}] is a number and not NaN.  The class today says nothing
+     at all about [kind (sub x y)] except through [neg_kind].
+
+     Stated as the single implication that is actually consumed -- NaN is
+     ruled OUT -- rather than as a characterisation of when it appears. *)
+  sub_not_nan : (x : t) -> (y : t) ->
+    Lemma (requires ~(NaN? (kind x)) /\ ~(NaN? (kind y)) /\
+                    ~(Infinite? (kind x) /\ Infinite? (kind y) /\ x == y))
+          (ensures ~(NaN? (kind (x `sub` y))));
 
   (* ---- [NEW] 3. self-subtraction ---------------------------------- *)
 
@@ -222,7 +223,16 @@ class flt (t : Type) = {
   (* ---- [NEW] 6. exp at zero --------------------------------------- *)
 
   (* [exp 0 == 1], exactly.  Gives the denominator its one strictly
-     positive summand: the key that attains the row maximum. *)
+     positive summand: the key that attains the row maximum.
+
+     Note this CANNOT be weakened to "[fexp zero] is positive", nor
+     generalised to "[fexp x] is positive for finite [x]".  The equality is
+     needed because [gsum_pos] rewrites [1 * l] to [l] via [mul_one]; with
+     only positivity it would need [0 < x /\ 0 < y ==> 0 < x * y], which is
+     FALSE for floats (the product can underflow to zero).  And [fexp]
+     itself underflows to zero for sufficiently negative arguments
+     (e.g. [exp (-745.0)] in binary64), so positivity does not hold in
+     general.  Zero specifically is exact. *)
   exp_zero : squash (fexp zero == one);
 
   (* ---- [NEW] 7. zero is below one --------------------------------- *)
@@ -330,7 +340,7 @@ let cw_finite (#t : Type) {| flt t |} (m s : t)
     fmax_lte_left m s;
     introduce lte s (ninf #t) ==> s == ninf #t
     with _. ok_lte_ninf s;
-    sub_nan_spec m (fmax m s);
+    sub_not_nan m (fmax m s);
     sub_nonpos m (fmax m s);
     exp_nonpos (m `sub` fmax m s)
 
@@ -345,7 +355,7 @@ let cw_bounded (#t : Type) {| flt t |} (m s : t)
     fmax_lte_left m s;
     introduce lte s (ninf #t) ==> s == ninf #t
     with _. ok_lte_ninf s;
-    sub_nan_spec m (fmax m s);
+    sub_not_nan m (fmax m s);
     sub_nonpos m (fmax m s);
     exp_nonpos (m `sub` fmax m s)
 
@@ -373,7 +383,7 @@ let sel_prob_nonneg (#t : Type) {| flt t |} (sv mnew : t)
     if eq sv ninf then ()
     else begin
       eq_spec sv ninf;
-      sub_nan_spec sv mnew;
+      sub_not_nan sv mnew;
       sub_nonpos sv mnew;
       exp_nonpos (sv `sub` mnew)
     end
@@ -475,7 +485,7 @@ let gscale_nonneg (#t : Type) {| flt t |} (em : nat -> t) (gm : t) (w : nat)
   : Lemma (requires ok (em w) /\ Finite? (kind gm) /\ lte (em w) gm)
           (ensures lte zero (gscale em gm w))
   = ok_not_nan (em w); ninf_kind #t ();
-    sub_nan_spec (em w) gm;
+    sub_not_nan (em w) gm;
     sub_nonpos (em w) gm;
     exp_nonpos (em w `sub` gm)
 
