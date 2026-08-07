@@ -370,13 +370,16 @@ _MAP_CONCRETE = {
 }
 
 # Maps that also have a model over the reals (Kuiops.Maps), i.e. that can be
-# fused into a kernel whose specification is approximate. rsqrt / sin / cos are
-# absent: Kuiper has no real-valued counterpart for them.
+# fused into a kernel whose specification is approximate. sin / cos are absent:
+# Kuiper has no real-valued counterpart for them. `div_cols` is not reachable
+# from an aten op: it is what `mean` adds on top of `sum`.
 _MAP_APPROX = {
     "relu":   lambda et, c: f"(amap_relu ({et}))",
     "silu":   lambda et, c: f"(amap_silu ({et}))",
     "neg":    lambda et, c: f"(amap_neg ({et}))",
     "square": lambda et, c: f"(amap_square ({et}))",
+    "rsqrt":  lambda et, c: f"(amap_rsqrt ({et}))",
+    "div_cols": lambda et, c: f"(amap_div_sz #({et}) cols)",
     "add":    lambda et, c: f"(amap_add #({et}) {c})",
     "sub":    lambda et, c: f"(amap_sub #({et}) {c})",
     "mul":    lambda et, c: f"(amap_mul #({et}) {c})",
@@ -1305,10 +1308,18 @@ class HReducePolyImpl(_Family):
 
     _OPS = {
         aten.sum.dim_IntList: "add",
+        aten.mean.dim: "add",
         aten.prod.dim_int: "mul",
         aten.all.dim: "and",
         aten.any.dim: "or",
     }
+
+    # Ops whose combiner is a sum but whose result is scaled by the reduced
+    # length: a `div_cols` post-map on top of the plain reduction.
+    _MEAN_OPS = (aten.mean.dim,)
+
+    # Ops taking `dim` as a list rather than a bare int.
+    _DIM_LIST_OPS = (aten.sum.dim_IntList, aten.mean.dim)
 
     def supported(self, func, args, kwargs):
         if func not in self._OPS or len(args) < 1:
@@ -1322,11 +1333,16 @@ class HReducePolyImpl(_Family):
                 and Inp.dtype in _INTEGER_DTYPES + _FLOAT_DTYPES):
             return None
         approx = Inp.dtype in _FLOAT_DTYPES
-        if approx and func not in (aten.sum.dim_IntList, aten.prod.dim_int):
+        if approx and func not in (aten.sum.dim_IntList, aten.mean.dim,
+                                   aten.prod.dim_int):
+            return None
+        # `mean` divides by the reduced length, which only the real-specified
+        # kernel can express.
+        if func in self._MEAN_OPS and not approx:
             return None
 
         rank = Inp.dim()
-        if func is aten.sum.dim_IntList:
+        if func in self._DIM_LIST_OPS:
             if dim is None or (
                     isinstance(dim, (list, tuple)) and len(dim) == 0):
                 dims = list(range(rank))
@@ -1344,8 +1360,9 @@ class HReducePolyImpl(_Family):
                 or any(d < 0 or d >= rank for d in dims)):
             return None
         dims = sorted(dims)
-        keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
-        if not (1 <= rank <= 4) or dims != [rank - 1] or keepdim:
+        keepdim = bool(args[2] if len(args) > 2
+                       else kwargs.get("keepdim", False))
+        if not (1 <= rank <= 4) or dims != [rank - 1]:
             return None
 
         shape = [int(d) for d in Inp.shape]
@@ -1385,9 +1402,12 @@ class HReducePolyImpl(_Family):
         post_map = resolve_maps(kwargs.get("post_map"), out_dtype, approx)
         if pre_map is None or post_map is None:
             return None
+        if func in self._MEAN_OPS:
+            post_map = [("div_cols", None)] + post_map
 
         return dict(op=op, in_dtype=Inp.dtype, out_dtype=out_dtype, rank=rank,
-                    approx=approx, pre_map=pre_map, post_map=post_map)
+                    approx=approx, keepdim=keepdim,
+                    pre_map=pre_map, post_map=post_map)
 
     def run(self, spec, args, kwargs):
         op = spec["op"]
@@ -1397,6 +1417,7 @@ class HReducePolyImpl(_Family):
         pre_map, post_map = spec["pre_map"], spec["post_map"]
         map_tag = _map_tag(pre_map) + "To" + _map_tag(post_map)
         map_tag = "" if map_tag == "To" else f".{map_tag}"
+        map_tag += ".Keepdim" if spec["keepdim"] else ""
         if spec["approx"]:
             et = torch_dtype_to_fstar(in_dtype)
             module = (
@@ -1410,6 +1431,7 @@ class HReducePolyImpl(_Family):
                 post_map=_approx_map_expr(post_map, out_dtype))
             wrapper_ctx = dict(
                 module=module.replace(".", "_"), name=name, r=rank,
+                keepdim=spec["keepdim"],
                 cpp_in=torch_dtype_to_ctype(in_dtype),
                 cpp_kernel_out=torch_dtype_to_ctype(out_dtype),
                 out_scalar=torch_dtype_to_aten_scalar(out_dtype))
@@ -1459,70 +1481,9 @@ class HReducePolyImpl(_Family):
             reduce_op=reduce_op, pre_map=pre_expr, post_map=post_expr)
         wrapper_ctx = dict(
             module=module.replace(".", "_"), name=name, r=rank,
+            keepdim=spec["keepdim"],
             cpp_in=torch_dtype_to_ctype(in_dtype),
             cpp_kernel_out=torch_dtype_to_ctype(
                 getattr(torch, f"uint{out_bits}")),
             out_scalar=torch_dtype_to_aten_scalar(out_dtype))
-        return self._mod(module, fst_ctx, wrapper_ctx).run(args[0])
-
-
-class MeanImpl(_Family):
-    fst_template = "mean/Kuiops.Mean.Inst.fst.j2"
-    wrapper_template = "mean/wrapper_mean.cu.j2"
-
-    def supported(self, func, args, kwargs):
-        # aten.mean.dim(self, dim, keepdim=False, *, dtype=None). The parallel
-        # tree reduction (Kuiper.Kernel.HReduce.Block, one block per output row)
-        # works on an [m, n] row-major matrix, so we only reduce the *last* axis
-        # of a contiguous tensor (rank-N -> [prod(leading), last] reshape) and
-        # require keepdim=True. Only the 1-dim case is supported, so an int[1]
-        # tuple is unpacked as a singleton here.
-        if len(args) < 2:
-            return None
-        Inp = args[0]
-        dim = args[1]
-        keepdim = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
-        if kwargs.get("dtype", None) is not None:
-            return None
-        if not (isinstance(Inp, torch.Tensor) and Inp.is_cuda):
-            return None
-        if Inp.dtype not in _FLOAT_DTYPES or not keepdim:
-            return None
-        if isinstance(dim, (list, tuple)):
-            if len(dim) != 1:
-                return None
-            dim = dim[0]
-        if dim is None:
-            return None
-        rank = Inp.dim()
-        if rank < 1:
-            return None
-        dim = _norm_dim(int(dim), rank)
-        # Only the last axis: reducing a middle axis would need a strided view.
-        if dim != rank - 1:
-            return None
-        length = int(Inp.shape[dim])
-        if length < 1:
-            return None
-        # m = number of output rows (one GPU block each). Gate the kernel's
-        # refinements: m <= max_blocks and m * n <= max_blocks * max_threads.
-        m = Inp.numel() // length
-        if not (0 < m <= _MAX_BLOCKS):
-            return None
-        if m * length > _MAX_NUMEL:
-            return None
-        return dict(dtype=Inp.dtype, length=length)
-
-    def run(self, spec, args, kwargs):
-        dtype, length = spec["dtype"], spec["length"]
-        et = torch_dtype_to_fstar(dtype)
-        # Keyed only by (element type, reduced length): m is a runtime arg, so
-        # one module serves every rank/batch size with this last-dim length.
-        module = f"Kuiops.Mean.{et.title()}.Len{length}"
-        name = "mean_jit"
-        fst_ctx = dict(module=module, name=name, et=et, length=length)
-        wrapper_ctx = dict(
-            module=module.replace(".", "_"), name=name,
-            cpp_et=torch_dtype_to_ctype(dtype))
-        # wrapper: op(Input)
         return self._mod(module, fst_ctx, wrapper_ctx).run(args[0])

@@ -119,7 +119,7 @@ def register_anchor(anchor):
     return anchor
 
 
-_REDUCE_OPS = (aten.sum.dim_IntList, aten.prod.dim_int,
+_REDUCE_OPS = (aten.sum.dim_IntList, aten.mean.dim, aten.prod.dim_int,
                aten.all.dim, aten.any.dim)
 REDUCE_BY_NAME = {str(op): op for op in _REDUCE_OPS}
 
@@ -154,7 +154,8 @@ class _ReduceAnchor:
         keepdim = (node.args[2] if len(node.args) > 2
                    else node.kwargs.get("keepdim", False))
         dtype = node.kwargs.get("dtype")
-        dim_arg = [dim] if node.target is aten.sum.dim_IntList else dim
+        dim_arg = ([dim] if node.target in kuiops.HReducePolyImpl._DIM_LIST_OPS
+                   else dim)
         kwargs = {"pre_map": pre, "post_map": post}
         if dtype is not None:
             kwargs["dtype"] = dtype

@@ -40,7 +40,7 @@ REGISTRY = {
     aten.prod.dim_int:          kuiops.HReducePolyImpl,
     aten.all.dim:               kuiops.HReducePolyImpl,
     aten.any.dim:               kuiops.HReducePolyImpl,
-    aten.mean.dim:              kuiops.MeanImpl,
+    aten.mean.dim:              kuiops.HReducePolyImpl,
     aten._scaled_dot_product_efficient_attention.default: kuiops.SdpaImpl,
     aten._scaled_dot_product_cudnn_attention.default:     kuiops.SdpaImpl,
 }

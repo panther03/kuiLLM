@@ -23,9 +23,6 @@ SZ.fits ((SZ.v d0) * ((SZ.v d1) * ((SZ.v d2) * (SZ.v d3))))
 {%- macro cs(n) -%}
 {% for k in range(n) %}CCons d{{ k }} ({% endfor %}CNil{% for k in range(n) %}){% endfor %}
 {%- endmacro -%}
-{%- macro idx(n, tail) -%}
-{% for k in range(n) %}(i{{ k }}, {% endfor %}{{ tail }}{% for k in range(n) %}){% endfor %}
-{%- endmacro -%}
 {%- macro rm(n) -%}
 {%- if n == 0 -%}pack lunit
 {%- elif n == 1 -%}l1_forward (SZ.v d0)
@@ -55,41 +52,24 @@ open Pulse.Lib.Pledge
 open Kuiops.HReducePoly.Spec
 open Kuiops.HReducePoly.Approx
 open Kuiops.HReducePoly.Ops
+open Kuiops.HReducePoly.Index
 open Kuiper.Float.Casts
 open Kuiops.Maps
 
 module SZ = Kuiper.SizeT
 
+(* Both maps may mention [cols] (that is how [mean] divides by the reduced
+   length), so they are parameterised by it rather than closed over. *)
 inline_for_extraction noextract
-let pre_map_m : amap ({{ in_et }}) = {{ pre_map }}
+let pre_map_m (cols : szp) : amap ({{ in_et }}) = {{ pre_map }}
 
 inline_for_extraction noextract
-let post_map_m : amap ({{ out_et }}) = {{ post_map }}
-
-inline_for_extraction noextract
-let append_index
-  {% for k in range(r) %}(d{{ k }} : szp)
-  {% endfor %}(i : conc ({{ shp(r - 1) }}))
-  (j : szlt (SZ.v d{{ r - 1 }}))
-  : conc ({{ shp(r) }}) =
-  {% if r > 1 %}let {{ idx(r - 1, '()') }} = i in{% endif %}
-  {{ idx(r - 1, '(j, ())') }}
-
-let append_index_up
-  {% for k in range(r) %}(d{{ k }} : szp)
-  {% endfor %}(i : conc ({{ shp(r - 1) }}))
-  (j : szlt (SZ.v d{{ r - 1 }}))
-  : Lemma (
-      up (append_index {% for k in range(r) %}d{{ k }} {% endfor %}i j) ==
-      abs_snoc #{{ r - 1 }} #({{ shp(r - 1) }})
-        #(SZ.v d{{ r - 1 }}) (up i) (SZ.v j))
-= ()
+let post_map_m (cols : szp) : amap ({{ out_et }}) = {{ post_map }}
 
 fn {{ name }}
-  {% for k in range(r) %}(d{{ k }} : szp{% if loop.last %} { {{ fits(r) }} }{% endif %})
-  {% endfor %}(rows : szp {
-    SZ.v rows == sizeof ({{ shp(r - 1) }}) /\ rows <= max_blocks })
-  (nth : szp {
+  {% for k in range(r) %}(d{{ k }} : szp{% if loop.last %} {
+    {{ fits(r) }} /\ batches_ok ({{ shp(r - 1) }}) }{% endif %})
+  {% endfor %}(nth : szp {
     nth <= max_threads /\ nth <= d{{ r - 1 }} /\
     SZ.fits (d{{ r - 1 }} + nth) })
   (input : tensor ({{ in_et }}) ({{ rm(r) }}) { is_global input })
@@ -107,19 +87,19 @@ fn {{ name }}
         (exists* (vout' : chest ({{ shp(r - 1) }}) ({{ out_et }})).
           (output |-> vout') **
           pure (out_approx {{ reduce_op }}_r
-            pre_map_m.mr post_map_m.mr
+            (pre_map_m d{{ r - 1 }}).mr (post_map_m d{{ r - 1 }}).mr
             (to_real_chest vin) vout'))))
 {
   with vout. assert on gpu_loc (output |-> vout);
   FStar.Classical.forall_intro_3 {{ reduce_op }}_r_assoc;
   {{ reduce_op }}_ok ({{ out_et }}) #_ #_;
-  reduce_indexed
+  reduce
     ({{ cs(r - 1) }}) {{ reduce_op }} {{ reduce_op }}_r
-    (amap_f pre_map_m) pre_map_m.mr
-    (amap_f post_map_m) post_map_m.mr
-    rows d{{ r - 1 }} nth
-    (append_index {% for k in range(r) %}d{{ k }} {% endfor %})
-    (append_index_up {% for k in range(r) %}d{{ k }} {% endfor %})
+    (amap_f (pre_map_m d{{ r - 1 }})) (pre_map_m d{{ r - 1 }}).mr
+    (amap_f (post_map_m d{{ r - 1 }})) (post_map_m d{{ r - 1 }}).mr
+    d{{ r - 1 }} nth
+    (index{{ r }} {% for k in range(r) %}d{{ k }} {% endfor %})
+    (index{{ r }}_up {% for k in range(r) %}d{{ k }} {% endfor %})
     #({{ rm(r) }}) #({{ crm(r) }})
     #({{ rm(r - 1) }}) #({{ crm(r - 1) }})
     input output s #vin #(to_real_chest vin);

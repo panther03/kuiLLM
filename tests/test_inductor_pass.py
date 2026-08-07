@@ -195,18 +195,18 @@ def test_reduction_absorbs_pre_map_only():
 
 
 def test_unsupported_map_is_not_fused():
-    """``rsqrt`` has no real counterpart, so the approximate reduce kernel
-    cannot prove it; the anchor must decline rather than fuse partially."""
+    """``sin`` has no real counterpart, so the approximate reduce kernel cannot
+    prove it; the anchor must decline rather than fuse partially."""
     _need_cuda()
 
     def fn(x):
-        return torch.rsqrt(x.abs() + 1).sum(dim=-1)
+        return torch.sin(x).sum(dim=-1)
 
     graph = _fake_graph(fn, torch.randn(4, 64, device="cuda"))
     passes.clear_fusion_rules()
     passes.KuiperPostGradPass()(graph)
     assert not _fused(graph)
-    assert "aten.rsqrt.default" in _targets(graph)
+    assert "aten.sin.default" in _targets(graph)
 
 
 def test_multi_use_map_is_not_absorbed():
@@ -251,3 +251,38 @@ def test_fused_reduction_matches_eager():
                             (torch.ops.aten.pow.Tensor_Scalar, 2)]),
         fusion.encode_maps([(torch.ops.aten.div.Tensor, 128)]))
     torch.testing.assert_close(out, fn(x), rtol=1e-5, atol=1e-5)
+
+
+def test_rmsnorm_collapses_to_one_reduction():
+    """The whole RMSNorm reduction -- square, mean, add epsilon, rsqrt -- is one
+    kernel; only the final broadcast multiply is left."""
+    _need_cuda()
+
+    def fn(x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+
+    graph = _fake_graph(fn, torch.randn(4, 128, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+
+    tgts = _targets(graph)
+    assert tgts == ["kuiperjit.hreduce_poly.default", "aten.mul.Tensor"], tgts
+    node = _fused(graph)[0]
+    assert node.args[1] == "aten.mean.dim" and node.args[3] is True
+    assert fusion.decode_maps(node.args[5]) == [
+        (torch.ops.aten.pow.Tensor_Scalar, 2)]
+    assert fusion.decode_maps(node.args[6]) == [
+        (torch.ops.aten.add.Tensor, 1e-6), torch.ops.aten.rsqrt.default]
+
+
+def test_fused_rmsnorm_matches_eager():
+    _need_cuda()
+    torch.manual_seed(0)
+    x = torch.randn(8, 256, device="cuda")
+    out = torch.ops.kuiperjit.hreduce_poly.default(
+        x, "aten.mean.dim", 1, True, None,
+        fusion.encode_maps([(torch.ops.aten.pow.Tensor_Scalar, 2)]),
+        fusion.encode_maps([(torch.ops.aten.add.Tensor, 1e-6),
+                            torch.ops.aten.rsqrt.default]))
+    ref = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)

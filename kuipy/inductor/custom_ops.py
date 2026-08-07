@@ -130,7 +130,9 @@ def _reduce_call(a, op, dim, keepdim, dtype, pre, post):
     from . import fusion
     func = fusion.REDUCE_BY_NAME[op]
     pre_maps, post_maps = fusion.decode_maps(pre), fusion.decode_maps(post)
-    args = (a, [dim] if func is aten.sum.dim_IntList else dim, keepdim)
+    from .. import kuiops
+    dim_arg = ([dim] if func in kuiops.HReducePolyImpl._DIM_LIST_OPS else dim)
+    args = (a, dim_arg, keepdim)
     kwargs = {"pre_map": pre_maps, "post_map": post_maps}
     if dtype is not None:
         kwargs["dtype"] = dtype

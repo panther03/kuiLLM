@@ -335,8 +335,9 @@ def test_hreduce_poly_support_constraints():
     floats = ints.float()
     assert impl.supported(
         aten.sum.dim_IntList, (ints, [0]), {}) is None
+    # keepdim only changes the shape of the output allocation.
     assert impl.supported(
-        aten.sum.dim_IntList, (ints, [1], True), {}) is None
+        aten.sum.dim_IntList, (ints, [1], True), {}) is not None
     rank3 = ints.reshape(1, 2, 4)
     assert impl.supported(
         aten.sum.dim_IntList, (rank3, [2]), {}) is not None
@@ -395,6 +396,46 @@ def test_hreduce_poly_maps_exact():
     assert torch.equal(out.to(torch.int64), ref)
 
 
+@pytest.mark.parametrize("shape,dim,keepdim", [
+    ((3, 64), -1, True), ((3, 64), 1, False), ((2, 3, 32), -1, True),
+])
+def test_mean_via_reduce(shape, dim, keepdim):
+    """`mean` is the plain reduction with a divide-by-`cols` post-map; the
+    divisor is the kernel's own `cols` argument, not a passed-in constant."""
+    _need_cuda()
+    torch.manual_seed(0)
+    X = torch.randn(*shape, device="cuda", dtype=torch.float32)
+    out = kuipy.run(aten.mean.dim)(X, [dim], keepdim)
+    ref = X.mean(dim=dim, keepdim=keepdim)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, torch.float32)
+
+
+def test_mean_with_maps():
+    """RMSNorm's reduction: square each element, average, then rsqrt."""
+    _need_cuda()
+    torch.manual_seed(0)
+    X = torch.randn(4, 128, device="cuda", dtype=torch.float32)
+    out = kuipy.run(aten.mean.dim,
+                    pre_map=[(aten.pow.Tensor_Scalar, 2)],
+                    post_map=[(aten.add.Tensor, 1e-6), aten.rsqrt.default],
+                    )(X, [-1], True)
+    _assert_close(out, torch.rsqrt(X.pow(2).mean(-1, keepdim=True) + 1e-6),
+                  torch.float32)
+
+
+def test_mean_support_constraints():
+    _need_cuda()
+    impl = kuiops.HReducePolyImpl()
+    floats = torch.ones(2, 4, device="cuda", dtype=torch.float32)
+    ints = torch.ones(2, 4, device="cuda", dtype=torch.int32)
+    assert impl.supported(aten.mean.dim, (floats, [-1], True), {}) is not None
+    # Dividing by the reduced length needs the kernel specified over the reals.
+    assert impl.supported(aten.mean.dim, (ints, [-1], True), {}) is None
+    # Only the innermost axis is reduced.
+    assert impl.supported(aten.mean.dim, (floats, [0], True), {}) is None
+
+
 def test_hreduce_poly_maps_support_constraints():
     _need_cuda()
     impl = kuiops.HReducePolyImpl()
@@ -407,8 +448,8 @@ def test_hreduce_poly_maps_support_constraints():
     assert sup(pre_map=[aten.relu.default]) is not None
     # No real-valued model for these, so they cannot be fused into a kernel
     # specified over the reals.
-    assert sup(pre_map=[aten.rsqrt.default]) is None
     assert sup(post_map=[aten.sin.default]) is None
+    assert sup(post_map=[aten.cos.default]) is None
     # A binary op with no constant, and a unary op given one.
     assert sup(pre_map=[aten.mul.Tensor]) is None
     assert sup(pre_map=[(aten.relu.default, 1.0)]) is None

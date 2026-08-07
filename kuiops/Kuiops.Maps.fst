@@ -8,12 +8,14 @@ module Kuiops.Maps
    chain and discharges no proof obligation at extraction time.
 
    Only ops whose real model is expressible with Kuiper's approximation rules
-   live here: [rsqrt], [sin] and [cos] have no real counterpart, so they cannot
-   be fused into a reduction specified over the reals. *)
+   live here: [sin] and [cos] have no real counterpart, so they cannot be fused
+   into a reduction specified over the reals. [rsqrt] is the exception -- see
+   [rrsqrt] below. *)
 
 open Kuiper
 
 module I64 = FStar.Int64
+module SZ = Kuiper.SizeT
 
 (* [f] approximates [g]: it maps any value approximating [r] to a value
    approximating [g r]. The unary analogue of [Kuiper.Approximates.approx2]. *)
@@ -126,3 +128,47 @@ let amap_silu (t:Type0)
         (1.0R +. exp (0.0R -. r));
       a_mul x (div one (add one (fexp (sub zero x)))) r
         (1.0R /. (1.0R +. exp (0.0R -. r))))
+
+(* --- Maps parameterised by the reduced length --- *)
+
+(* Every Kuiper [sz] fits in a [uint32], so the round trip through [uint64] and
+   the reinterpretation as a signed [int64] are both value-preserving. *)
+inline_for_extraction noextract
+let sz_to_i64 (n : SZ.t) : (m : I64.t { I64.v m == SZ.v n }) =
+  FStar.Int.Cast.uint64_to_int64 (FStar.SizeT.sizet_to_uint64 n)
+
+(* [mean]: divide by the number of reduced elements. *)
+inline_for_extraction noextract
+let amap_div_sz (#t:Type0)
+  {| scalar t, floating t, real_like t, floating_real_like t |}
+  (n : SZ.t { SZ.v n > 0 }) : amap t =
+  mk_amap (fun x -> div x (of_int (sz_to_i64 n)))
+    (fun r -> r /. Real.of_int (SZ.v n))
+    (fun x r ->
+      let _ = of_int_approx #t (sz_to_i64 n) in
+      div_approx x (of_int (sz_to_i64 n)) r (Real.of_int (SZ.v n)))
+
+(* --- Reciprocal square root --- *)
+
+(* ASSUMED. Kuiper's [real_like] hierarchy has no square root, so the real
+   model of [rsqrt] is uninterpreted and its approximation rule is an axiom.
+   The rule is only sound where the real argument is positive, which is why it
+   carries that precondition. *)
+assume val rrsqrt (r : real) : real
+
+assume val rsqrt_approx (#t:Type0)
+  {| scalar t, floating t, real_like t, floating_real_like t |}
+  (x : t) (r : real)
+  : Lemma (requires x %~ r /\ r >. 0.0R) (ensures rsqrt x %~ rrsqrt r)
+
+(* GAP. The [pre_map]/[post_map] slots demand an unconditional [approx1], but
+   [rsqrt_approx] only holds on positives, and the reduction's specification
+   says nothing about the sign of the value reaching the post-map. Closing this
+   properly needs a domain-restricted map in the kernel specification; until
+   then the non-positive case is admitted here, and this is the only unsound
+   step in [Kuiops.Maps]. *)
+inline_for_extraction noextract
+let amap_rsqrt (t:Type0)
+  {| scalar t, floating t, real_like t, floating_real_like t |} : amap t =
+  mk_amap (fun x -> rsqrt x) rrsqrt
+    (fun x r -> if r >. 0.0R then rsqrt_approx x r else admit ())

@@ -23,9 +23,6 @@ SZ.fits ((SZ.v d0) * ((SZ.v d1) * ((SZ.v d2) * (SZ.v d3))))
 {%- macro cs(n) -%}
 {% for k in range(n) %}CCons d{{ k }} ({% endfor %}CNil{% for k in range(n) %}){% endfor %}
 {%- endmacro -%}
-{%- macro idx(n, tail) -%}
-{% for k in range(n) %}(i{{ k }}, {% endfor %}{{ tail }}{% for k in range(n) %}){% endfor %}
-{%- endmacro -%}
 {%- macro rm(n) -%}
 {%- if n == 0 -%}pack lunit
 {%- elif n == 1 -%}l1_forward (SZ.v d0)
@@ -55,35 +52,16 @@ open Pulse.Lib.Pledge
 open Kuiops.HReducePoly.Spec
 open Kuiops.HReducePoly.Exact
 open Kuiops.HReducePoly.Ops
+open Kuiops.HReducePoly.Index
 open Kuiper.Float.Casts
 open Kuiops.ElementwiseOps
 
 module SZ = Kuiper.SizeT
 
-inline_for_extraction noextract
-let append_index
-  {% for k in range(r) %}(d{{ k }} : szp)
-  {% endfor %}(i : conc ({{ shp(r - 1) }}))
-  (j : szlt (SZ.v d{{ r - 1 }}))
-  : conc ({{ shp(r) }}) =
-  {% if r > 1 %}let {{ idx(r - 1, '()') }} = i in{% endif %}
-  {{ idx(r - 1, '(j, ())') }}
-
-let append_index_up
-  {% for k in range(r) %}(d{{ k }} : szp)
-  {% endfor %}(i : conc ({{ shp(r - 1) }}))
-  (j : szlt (SZ.v d{{ r - 1 }}))
-  : Lemma (
-      up (append_index {% for k in range(r) %}d{{ k }} {% endfor %}i j) ==
-      abs_snoc #{{ r - 1 }} #({{ shp(r - 1) }})
-        #(SZ.v d{{ r - 1 }}) (up i) (SZ.v j))
-= ()
-
 fn {{ name }}
-  {% for k in range(r) %}(d{{ k }} : szp{% if loop.last %} { {{ fits(r) }} }{% endif %})
-  {% endfor %}(rows : szp {
-    SZ.v rows == sizeof ({{ shp(r - 1) }}) /\ rows <= max_blocks })
-  (nth : szp {
+  {% for k in range(r) %}(d{{ k }} : szp{% if loop.last %} {
+    {{ fits(r) }} /\ batches_ok ({{ shp(r - 1) }}) }{% endif %})
+  {% endfor %}(nth : szp {
     nth <= max_threads /\ nth <= d{{ r - 1 }} /\
     SZ.fits (d{{ r - 1 }} + nth) })
   (input : tensor ({{ in_et }}) ({{ rm(r) }}) { is_global input })
@@ -105,11 +83,11 @@ fn {{ name }}
 {
   with vout. assert on gpu_loc (output |-> vout);
   FStar.Classical.forall_intro_3 {{ reduce_op }}_assoc;
-  reduce_indexed #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
+  reduce #({{ in_et }}) #({{ out_et }}) #({{ out_et }})
     ({{ cs(r - 1) }}) {{ reduce_op }} ({{ pre_map }}) ({{ post_map }})
-    rows d{{ r - 1 }} nth
-    (append_index {% for k in range(r) %}d{{ k }} {% endfor %})
-    (append_index_up {% for k in range(r) %}d{{ k }} {% endfor %})
+    d{{ r - 1 }} nth
+    (index{{ r }} {% for k in range(r) %}d{{ k }} {% endfor %})
+    (index{{ r }}_up {% for k in range(r) %}d{{ k }} {% endfor %})
     #({{ rm(r) }}) #({{ crm(r) }})
     #({{ rm(r - 1) }}) #({{ crm(r - 1) }})
     input output s;

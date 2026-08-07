@@ -31,21 +31,25 @@ let out_approx
   = forall (i : abs d).
       acc vout' i %~ reduced f_r pre_map_r post_map_r vr i
 
+(* [index]/[index_up] build a flat index of the input shape from a batch index
+   and a position along the reduced axis. [Kuiops.HReducePoly.Spec.conc_snoc]
+   does exactly this, but recurses over an erased shape and so is not
+   extractable; callers pass a monomorphic builder from
+   [Kuiops.HReducePoly.Index] instead. *)
 inline_for_extraction noextract
-fn reduce_indexed
+fn reduce
   (#et_i : Type0) {| scalar et_i, real_like et_i |}
   (#et : Type0) {| scalar et, real_like et |}
   (#et_o : Type0) {| scalar et_o, real_like et_o |}
   (#r : erased nat)
   (#d : shape r)
-  (cd : cshape d)
+  (cd : cshape d { batches_ok d })
   (f : et -> et -> et)
   (f_r : (real -> real -> real) { is_associative f_r /\ approx2 f f_r })
   (pre_map : et_i -> et)
   (pre_map_r : (real -> real) { approx1 pre_map pre_map_r })
   (post_map : et -> et_o)
   (post_map_r : (real -> real) { approx1 post_map post_map_r })
-  (rows : szp { SZ.v rows == sizeof d /\ rows <= max_blocks })
   (cols : szp)
   (nth : szp { nth <= max_threads /\ nth <= cols /\ SZ.fits (cols + nth) })
   (index : conc d -> szlt cols -> conc (snoc_shape d cols))
