@@ -1,23 +1,106 @@
 module Kuiops.Floating.Axioms
 
-(* THE PROPOSED TRUSTED BASE, AND NOTHING ELSE.
+(* WHERE FLOAT-LEVEL FACTS ARE ACTUALLY NEEDED IN FLASH ATTENTION.
 
-   Every declaration below is a [val] with no definition: each one is an
-   axiom that would be added to Kuiper's trusted computing base.  There are
-   eleven.  Nothing else in the SDPA flash-attention correctness development
-   is trusted -- everything else is derived from these plus the existing
-   [floating] laws.  See [etc/floating_laws_proposal.fst] for the
-   machine-checked argument that these are sufficient; the mock class there
-   states all eleven verbatim, so the argument transfers unchanged.
+   Revised after the review question "in the context you are using them, do
+   you really need these facts directly on floats?".  The short answer is
+   that you were right and my previous framing was wrong.  Concretely:
 
-   They are stated as free-standing lemmas over the EXISTING
-   [Kuiper.Floating.Base.floating] class, so adopting them requires no change
-   to any typeclass and no re-instantiation of any backend.
+   THE APPROXIMATION CHAIN NEEDS ZERO NEW AXIOMS.  [a_add], [a_mul],
+   [sub_approx], [exp_approx] and [fmax_approx] are unconditional
+   congruences, so approximation propagates through the whole online-softmax
+   recurrence with no float reasoning at all.  Your [x `sub` x %~ 0.0R]
+   route is exactly what the committed proof already does everywhere -- and
+   indeed the proof in [kuiops/sdpa/] is complete today with NO axioms.
 
-   NO CHANGE IS NEEDED to [real_like] or [floating_real_like].
+   Float-level facts are needed in exactly one situation: when the KERNEL
+   BRANCHES ON A FLOAT, or when a [floating] law's own side condition does.
+   Approximation cannot decide a branch, because [v_approximates] carries no
+   error bound -- [l %~ 0.7R] does not entail [gt l zero].
 
-   THE ONE EXCEPTION -- a change rather than an addition -- is the correction
-   to [lt_neg_flip] in [Kuiper.Floating.Base] and its four backing [val]s in
+   There are four such sites in [kuipy/unverified/flash_attn_fa1.cu], and
+   only two of them cost anything:
+
+   +----------------------------------------+----------------+-----------+
+   | CUDA site                              | float fact     | new axioms|
+   +----------------------------------------+----------------+-----------+
+   | l.169,171,218  fmaxf(-INFINITY, x)     | fmax(-inf,x)=x |     0     |
+   | l.181  (sv == -INFINITY) ? 0 : expf()  | Finite sv =>   |     0     |
+   |                                        |   sv =!= -inf  |           |
+   | l.173,222  if(!isfinite(corr)) corr=0  | Finite corr    |     4     |
+   | l.241  inv = (gl > 0) ? 1/gl : 0       | gt gl zero     |     7     |
+   +----------------------------------------+----------------+-----------+
+
+   The first two are the cases you already granted, and they cost nothing:
+   both are discharged from the EXISTING laws ([fmax_spec],
+   [negate_lt_is_lte], [eq_spec], [kind_infinity]).  See
+   [Spec.Bridge.fmax_ninf_l] and [Spec.Bridge.sel_prob_admitted].
+
+   ------------------------------------------------------------------------
+   SITE 3 -- CUDA line 173.  Not an axiom problem; a missing primitive.
+
+   The reference kernel writes
+
+     float corr = __expf(Msh[w][i] - mnew);
+     if (!isfinite(corr)) corr = 0.0f;          // line 173
+
+   so [corr] is finite BY CONSTRUCTION, with no reasoning required.  The
+   Kuiper port cannot express that clamp: [is_finite]/[kind] return the
+   erasable [fkind], so finiteness cannot drive concrete control flow.  The
+   port therefore assumes it ([KfSub.fst:476]) and propagates the obligation
+   upward as the [cw_upto] conjunct of [flash_no_overflow].
+
+   Why finiteness of [corr] is needed at all -- it is used at exactly ONE
+   place, [Spec.Bridge.step_fresh], the step where the lane absorbs its
+   first key.  There the old denominator is the literal [zero], and the
+   proof needs [mul zero corr == zero].  That is [floating.mul_zero], whose
+   side condition is [Finite? (kind x)].  So [mul_zero]'s side condition IS
+   CUDA line 173; a NaN [corr] would poison the accumulator exactly as it
+   would in C.
+
+   CONCLUSION FOR SITE 3: the right fix is an extractable [is_finite] on the
+   [floating] class, matching the reference kernel.  Then the clamp is code,
+   the assume disappears, and axioms 1-4 below are not needed.  Adding the
+   axioms instead would prove, at some cost, a fact the CUDA obtains with a
+   branch.
+
+   ------------------------------------------------------------------------
+   SITE 4 -- CUDA line 241.  Genuinely float-level, but avoidable by
+   keeping it as a precondition -- which is what the kernel's own header
+   already prescribes.
+
+     float inv = (gl_sh[i] > 0.0f) ? (1.0f / gl_sh[i]) : 0.0f;
+
+   To know the kernel took the [1/gl] branch -- i.e. that the output is a
+   normalised softmax at all -- the proof needs [gt gl zero] at the FLOAT
+   level.  No amount of real reasoning supplies it, for the error-bound
+   reason above.  This is what the seven sign/order axioms 5-11 are for, and
+   I confirmed mechanically that they are used for nothing else: deleting
+   all seven from the mock class in [etc/floating_laws_proposal.fst] leaves
+   the site-3 obligation verifying unchanged.
+
+   But the CUDA header already states the intended contract for the other
+   branch:
+
+     "the fully-masked row (max stays -inf) cannot occur for causal, and is
+      anyway guarded by `inv = (l > 0) ? 1/l : 0` -> a defined finite 0
+      output for which we simply claim no real-softmax approximation."
+
+   That is precisely a CONDITIONAL theorem, which is what the current
+   [flash_no_overflow] already gives.  So axioms 5-11 buy only cosmetics:
+   they would let the [gt gl zero] conjunct be restated as the input-level
+   condition "the row admits at least one key with a finite score"
+   (automatic when [has_mask = false]) instead of being carried as is.
+
+   ------------------------------------------------------------------------
+   RECOMMENDATION: adopt NONE of the eleven.
+
+     - Site 3: add an extractable [is_finite] to [floating] and clamp, as
+       the CUDA does.  This also removes the one [assume] in the port.
+     - Site 4: keep [gt gl zero] as a precondition, per the CUDA header.
+
+   The only change I would still press for is the correction to
+   [lt_neg_flip] in [Kuiper.Floating.Base] and its four backing [val]s in
    [Kuiper.{Float16,BFloat16,Float32,Float64}.Base]:
 
      ensures lt x y <==> lte (zero `sub` y) (zero `sub` x)   (* current *)
@@ -25,274 +108,89 @@ module Kuiops.Floating.Axioms
 
    As it stands the class proves [False]; see [etc/floating_ord_unsound.fst].
 
-   Check this file with:  ./fstar.sh etc/Kuiops.Floating.Axioms.fsti
+   The eleven are kept below only as the answer to "what WOULD it take to
+   discharge sites 3 and 4 by proof instead", with each one's site recorded.
+   [etc/floating_laws_proposal.fst] machine-checks that they suffice.
 
-   ------------------------------------------------------------------------
-   RESPONSE TO REVIEW: "these exist on reals, argue by approximation"
-
-   Six of the eleven were marked "EXISTS ON REALS - shouldn't be needed", on
-   the grounds that any finite float has a [to_real], so the real-level
-   lemma plus approximation ought to suffice.  I checked this mechanically
-   rather than by argument; the experiment is [etc/floating_real_route.fst],
-   which verifies clean.  The result is that the route does not close, for a
-   structural reason.  In brief:
-
-   1. THE APPROXIMATION CLASSES TRANSFER NOTHING BACK.  Part 1 of that file
-      instantiates [real_like] + [floating_real_like] with
-
-        v_approximates := fun _ _ -> True
-
-      Every law of both classes -- [to_real_ok], [a0], [a1], [a_add],
-      [a_mul], [fmax_approx], [sub_approx], [exp_approx], [div_approx] --
-      holds trivially under it, for any float type and any [to_real].  So NO
-      float fact whatsoever follows from those classes.  This is by design:
-      [v_approximates] is an error-tolerant relation ([a_add] has no
-      rounding side condition, so it must absorb accumulated error) and is
-      deliberately abstract.  Information flows float -> real, never back.
-
-   2. THE ONE LAW THAT WOULD RULE OUT THE TRIVIAL MODEL IS UNAVAILABLE FOR
-      FLOATS.  That law is [precise_real_like.v_approximates_inj].  In the
-      installed tree [precise_real_like] is instantiated for exactly four
-      types -- [u8], [u16], [u32], [u64] -- and for no float type.  That is
-      not an oversight.  It cannot hold for a float type: [a_add] forces
-      [add x y] to approximate the EXACT sum, while [to_real (add x y)] is
-      the ROUNDED value, so a float approximates many reals.  Part 4 of the
-      experiment spells this out.
-
-   3. THERE IS ALSO NO ORDER-TRANSFER LAW.  Nothing anywhere in Kuiper
-      relates [lt]/[lte]/[eq] to [<.]/[<=.].  Even granting injectivity, a
-      real-level fact cannot be converted into a float-level comparison
-      without one.
-
-   Part 2 of the experiment grants BOTH missing bridges anyway, as
-   generously as possible, and finds that exactly three of the six do become
-   derivable: [lte_trans], [sub_self], [exp_zero].  Part 3 shows the other
-   three ([one_pos], [sub_nonpos], and the [add]/[mul] sign laws) still do
-   not follow even then, and Part 4 replays each with one extra hypothesis
-   to prove the failures are attributable to precisely the missing link and
-   not to a defect in the attempts.
-
-   So the concession is: three of the six COULD be dropped, but only in
-   exchange for two new axioms, one of which ([precise_real_like] for
-   floats) is FALSE.  Dropping them is therefore not actually available, and
-   even if it were it would trade three axioms for two.  Each law's entry
-   below records its individual verdict.
-
-   The one change the review does buy: [sub_nan_spec] has been WEAKENED to
-   the single implication that is actually consumed.  See its entry.        *)
+   Check this file with:  ./fstar.sh etc/Kuiops.Floating.Axioms.fsti        *)
 
 open Kuiper.Floating
 
-(* ------------------------------------------------------------------ *)
-(* A. The float order.  Independent of flash attention.                *)
-(* ------------------------------------------------------------------ *)
+(* ================================================================== *)
+(* SITE 3 (CUDA l.173) -- obsolete if [floating] gains [is_finite].    *)
+(* ================================================================== *)
 
-(* A: Looks good *)
-(* Comparisons are false at NaN.
-
-   Every ordering law in [floating] is guarded by [~(NaN? (kind x))], and
-   nothing points the other way, so no proof can conclude "x is a number"
-   from "x compares".  Without this, an ordering hypothesis carries no
-   information about [kind] at all. *)
+(* Comparisons are false at NaN.  Every ordering law in [floating] is
+   guarded by [~(NaN? (kind x))] and nothing points the other way, so no
+   proof can conclude "x is a number" from "x compares". *)
 val cmp_nan (#t : Type) {| floating t |} (x y : t)
   : Lemma (requires NaN? (kind x) \/ NaN? (kind y))
           (ensures ~(lt x y) /\ ~(lte x y) /\ ~(eq x y))
 
-(* A: EXISTS ON REALS - Shouldn't be needed *)
-(* VERDICT: derivable from reals, but only via a new order-transfer axiom,
-   so it is a one-for-one swap and not a saving.
-
-   Transitivity of [<=.] on reals is indeed free.  Getting from there to
-   [lte x z] needs
-
-     ord_transfer : ~(NaN? (kind x)) /\ ~(NaN? (kind y)) ==>
-                    (lte x y <==> to_real x <=. to_real y)
-
-   which does not exist anywhere in Kuiper.  With it, [lte_trans] follows
-   (proved in Part 2a of the experiment) -- but [ord_transfer] is itself a
-   new axiom, and it buys nothing else: it does not rescue [one_pos] or any
-   of the sign laws, because those concern [to_real] of a COMPUTED result.
-
-   I have kept [lte_trans] because it is the weaker of the two (implied by
-   [ord_transfer]) and needs no [real_like] instance in scope.  Happy to
-   swap if you prefer [ord_transfer] as the more fundamental statement.
-
-   The class relates [lt], [lte] and [eq] to one another pointwise but never
-   chains two comparisons, so [lte] is not currently known to be an order.
-   Needed as soon as a running maximum is compared across iterations. *)
-val lte_trans (#t : Type) {| floating t |} (x y z : t)
-  : Lemma (requires lte x y /\ lte y z) (ensures lte x z)
-
-(* ------------------------------------------------------------------ *)
-(* B. Subtraction.                                                     *)
-(* ------------------------------------------------------------------ *)
-
-(* A: This is maybe fine, but I'd prefer it worded differently:
-instead of saying conclusively a NaN difference can only result from these things (which I am skeptical is true),
-you should say inf - inf = NaN, NaN - NaN = NaN. These would be perfectly acceptable. *)
-(* VERDICT: weakened, but not in the suggested direction -- the suggested
-   wording is the converse of the one the proof consumes.
-
-   The old biconditional was used at four sites, and at every one of them it
-   is used to establish the precondition of [sub_nonpos], i.e. to rule NaN
-   OUT.  That is the [==>] direction (contrapositive: non-NaN operands that
-   are not equal infinities give a non-NaN difference).  "[inf - inf] is
-   NaN" and "[NaN - NaN] is NaN" are the [<==] direction; they say when a
-   NaN APPEARS, which the proof never needs.
-
-   So I have dropped the [<==] direction entirely and restated the axiom as
-   the bare implication that is used.  This is strictly weaker than what was
-   proposed before, and I re-verified [etc/floating_laws_proposal.fst]
-   against this weakened form -- it still goes through unchanged.
-
-   On the skepticism about the content: this is IEEE 754 subtraction, whose
-   only NaN-producing cases on non-NaN operands are the two infinite ones
-   with equal signs.  [kind] does not record a sign, so "equal signs" is
-   expressed as [x == y].  ([+inf - -inf] is [+inf], correctly excluded.)
-   [floating] says nothing about [kind (sub x y)] at all beyond
-   [neg_kind]. *)
+(* A difference of numbers is not NaN.  Stated as the single implication the
+   proof consumes -- NaN is ruled OUT.  (Your suggested wording, "inf - inf
+   is NaN" and "NaN - NaN is NaN", is the converse; it says when a NaN
+   APPEARS, which is never what is needed.)  [kind] records no sign, so
+   "equal-signed infinities" is expressed as [x == y]; [+inf - -inf] is
+   [+inf] and is correctly excluded. *)
 val sub_not_nan (#t : Type) {| floating t |} (x y : t)
   : Lemma (requires ~(NaN? (kind x)) /\ ~(NaN? (kind y)) /\
                     ~(Infinite? (kind x) /\ Infinite? (kind y) /\ x == y))
           (ensures ~(NaN? (kind (x `sub` y))))
 
-(* A: EXISTS ON REALS - Shouldn't be needed
-   because if something is finite you should have a real approximation for it *)
-(* VERDICT: not available.  It is true that a finite float has a [to_real],
-   and the real side is trivial: [sub_approx] gives
-   [v_approximates (sub x x) (to_real x -. to_real x)], i.e.
-   [v_approximates (sub x x) 0.0R], and [a0] gives
-   [v_approximates zero 0.0R].  But concluding [sub x x == zero] from those
-   two is exactly [v_approximates_inj], which is [precise_real_like] -- a
-   class no float type has or can have (point 2 in the header).
-
-   Part 2b of the experiment confirms the derivation works the moment
-   injectivity is granted, and point 2 explains why it cannot be.
-
-   Directly: [sub_is_add_neg] rewrites [x - y] to [x + (-y)], but no law
-   then gives [x + (-x) == 0]; the class has no additive inverse. *)
-val sub_self (#t : Type) {| floating t |} (x : t)
-  : Lemma (requires Finite? (kind x)) (ensures x `sub` x == zero)
-
-(* A: EXISTS ON REALS - Shouldn't be needed  *)
-(* VERDICT: not available, and not even with both bridges granted.
-
-   This concludes a float comparison about a COMPUTED result.  Via reals it
-   would need to know where [to_real (sub x y)] sits.  What is available is
-   [sub_approx], which yields [v_approximates (sub x y) (to_real x -.
-   to_real y)] -- a fact about [v_approximates], not about [to_real] of the
-   result.  Passing from the former to the latter is functionality of
-   [v_approximates] in its real argument, which is precisely what rounding
-   makes false.  Part 3 of the experiment shows the attempt failing with
-   both bridges and every relevant hypothesis supplied; Part 4 shows it
-   succeeding the instant that functionality is added, and then shows
-   functionality is false.
-
-   Sound under round-to-nearest: rounding is monotone and [0] is exact.
-   [floating] has no monotonicity law of any kind. *)
+(* [x <= y ==> x - y <= 0].  Sound under round-to-nearest: rounding is
+   monotone and [0] is exact.  [floating] has no monotonicity law at all. *)
 val sub_nonpos (#t : Type) {| floating t |} (x y : t)
   : Lemma (requires ~(NaN? (kind x)) /\ ~(NaN? (kind y)) /\ lte x y /\
                     ~(NaN? (kind (x `sub` y))))
           (ensures lte (x `sub` y) zero)
 
-(* ------------------------------------------------------------------ *)
-(* C. The exponential.  [fexp] is currently a bare field with no laws.  *)
-(* ------------------------------------------------------------------ *)
-
-(* A: This is fine. *)
-(* THE CENTRAL AXIOM.  [exp] maps [[-inf, 0]] into [[0, 1]]: on a
-   non-positive argument it cannot overflow, cannot be NaN, and cannot be
-   negative.
-
-   This is exactly why shifting by the running maximum makes online softmax
-   safe, and it is the property the whole flash-attention kernel is built
-   around.  It covers [x = -inf] (giving [0]), which is the case that arises
-   when a key tile is entirely masked out.
-
-   [floating_real_like.exp_approx] does not help: it relates [fexp] to the
-   reals through the abstract [v_approximates], which says nothing about
-   [kind]. *)
+(* [exp] maps [[-inf, 0]] into [[0, 1]]: on a non-positive argument it
+   cannot overflow, cannot be NaN, and cannot be negative.  This is the law
+   that would replace the [isfinite] clamp, since [m_old <= m_new] always.
+   [exp_approx] does not help: it relates [fexp] to the reals through the
+   abstract [v_approximates], which says nothing about [kind]. *)
 val exp_nonpos (#t : Type) {| floating t |} (x : t)
   : Lemma (requires ~(NaN? (kind x)) /\ lte x zero)
           (ensures Finite? (kind (fexp x)) /\
                    lte zero (fexp x) /\ lte (fexp x) one)
 
-(* A: EXISTS ON REALS - Shouldn't be needed *)
-(* VERDICT: not available, for the same reason as [sub_self].
+(* ================================================================== *)
+(* SITE 4 (CUDA l.241) -- needed only to discharge [gt gl zero] rather  *)
+(* than carry it.  Verified to be used for nothing else.               *)
+(* ================================================================== *)
 
-   The real side is again clean -- [exp_approx] at [zero] with [a0] gives
-   [v_approximates (fexp zero) (exp 0.0R)], and [FStar.Math.Exp.exp_base]
-   gives [exp 0.0R == 1.0R], so [v_approximates (fexp zero) 1.0R]; with
-   [a1] giving [v_approximates one 1.0R], the two agree on a real.  But
-   concluding [fexp zero == one] is once more [v_approximates_inj].  Proved
-   in Part 2c of the experiment, conditional on the same unavailable class.
+(* The order is transitive.  [floating] relates [lt], [lte] and [eq] to one
+   another pointwise but never chains two comparisons.  Needed to compare a
+   running maximum across warps in the block combine (CUDA l.218). *)
+val lte_trans (#t : Type) {| floating t |} (x y z : t)
+  : Lemma (requires lte x y /\ lte y z) (ensures lte x z)
 
-   I also checked whether this axiom could be avoided by weakening it to
-   "[fexp zero] is positive" and folding [one_pos] into it.  It cannot:
-   [gsum_pos] rewrites [1 * l] to [l] via [mul_one], and with positivity
-   alone it would instead need [0 < x /\ 0 < y ==> 0 < x * y], which is
-   FALSE for floats (the product can underflow to zero).  The equality is
-   load-bearing.
+(* [x - x == 0] for finite [x], exactly.  [sub_is_add_neg] rewrites [x - y]
+   to [x + (-y)], but no law then gives [x + (-x) == 0]: the class has no
+   additive inverse.  Used for the argmax warp, where [Msh[ww][i] == gm]. *)
+val sub_self (#t : Type) {| floating t |} (x : t)
+  : Lemma (requires Finite? (kind x)) (ensures x `sub` x == zero)
 
-   [exp 0 == 1] is what gives the softmax denominator its one strictly
-   positive summand: the key that attains the row maximum. *)
+(* [exp 0 == 1], exactly.  This cannot be weakened to "[fexp zero] is
+   positive": [gsum_pos] rewrites [1 * l] to [l] via [mul_one], and with
+   positivity alone it would instead need [0 < x /\ 0 < y ==> 0 < x * y],
+   which is FALSE for floats (the product can underflow).  Nor can it be
+   generalised to finite [x], since [fexp] underflows to zero for very
+   negative arguments. *)
 val exp_zero (#t : Type) {| floating t |} (_ : unit)
   : Lemma (fexp (zero <: t) == one)
 
-(* ------------------------------------------------------------------ *)
-(* D. Signs.                                                           *)
-(* ------------------------------------------------------------------ *)
-
-(* A: EXISTS ON REALS - Shouldn't be needed
-   Zero and one approximate 0.0R and 1.0R, no? Do you really need this directly? *)
-(* VERDICT: not available, and this one fails for an extra, independent
-   reason worth flagging.
-
-   Yes, [zero] and [one] approximate [0.0R] and [1.0R] -- that is exactly
-   what [a0] and [a1] say.  But they constrain [v_approximates], NOT
-   [to_real].  Nothing in [real_like] pins [to_real zero] to [0.0R] or
-   [to_real one] to [1.0R]; the trivial model of point 1 has
-   [to_real = fun _ -> 0.0R] and satisfies [a0] and [a1] happily.
-
-   And injectivity does not close the gap either: it takes TWO FLOATS
-   approximating ONE REAL and concludes the floats are equal.  Here we have
-   one float and would need to extract its [to_real], which is the opposite
-   shape.  So [one_pos] fails even with BOTH bridges granted -- see Part 3
-   of the experiment, where it is the only entry that fails for this second
-   reason rather than the rounding one.
-
-   [floating] pins [kind zero] and [kind one] but never orders them, or even
-   says they are distinct. *)
+(* [0 < 1].  [floating] pins [kind zero] and [kind one] but never orders
+   them, or even says they are distinct. *)
 val one_pos (#t : Type) {| floating t |} (_ : unit)
   : Lemma (lt (zero <: t) one)
 
-(* A: All of these should be provable on reals *)
-(* VERDICT: not available.  Same obstruction as [sub_nonpos], and the
-   sharpest illustration of it.
-
-   On reals these are of course trivial.  The difficulty is not the real
-   arithmetic; it is that the conclusion is a FLOAT comparison about
-   [add x y], and the only route to [to_real (add x y)] runs through
-   [a_add], which speaks about [v_approximates] and not [to_real].  Closing
-   that step means asserting that the real a float approximates is unique --
-   and [a_add] itself forces that to be false, since [add x y] approximates
-   the exact sum while [to_real (add x y)] is the rounded one.  Concretely,
-   for [x] one ulp below half an ulp of [one], [add one x == one], so
-   uniqueness would force [to_real x == 0.0R] and hence [x == zero].
-
-   Parts 3 and 4 of the experiment differ by exactly this one hypothesis:
-   without it all three fail, with it all three succeed.
-
-   A second, smaller gap turned up while checking: nothing says arithmetic
-   on non-NaN operands yields a non-NaN result, so the real route would need
-   a NaN-propagation law too -- which is float-level content by definition.
-
-   Non-negatives are closed under [+] and [*], and a sum with a positive
-   summand is positive.  Sound under round-to-nearest for the same reason as
-   [sub_nonpos].
-
-   Stated in this specialised form rather than as general monotonicity of
-   [add] / [mul] because these hypotheses already exclude the [inf + -inf]
+(* Non-negatives are closed under [+] and [*], and a sum with a positive
+   summand is positive -- the folds behind [rowsum] (l.183) and [gl]
+   (l.225).  Sound under round-to-nearest for the same reason as
+   [sub_nonpos].  Stated in this specialised form rather than as general
+   monotonicity because these hypotheses already exclude the [inf + -inf]
    and [0 * inf] NaN cases, so no side conditions are needed. *)
 val add_nonneg (#t : Type) {| floating t |} (x y : t)
   : Lemma (requires lte zero x /\ lte zero y) (ensures lte zero (add x y))
