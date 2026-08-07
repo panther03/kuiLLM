@@ -47,6 +47,12 @@ let rec abs_snoc (#r : nat) (#d : shape r) (#n : nat)
     let ih, it = i <: natlt h & abs t in
     (ih, abs_snoc it j)
 
+(* The batch (non-reduced) dimensions, one CUDA block each. [csizeof] turns a
+   [cshape] satisfying this into the block count, so the kernel entry points
+   take no separate [rows] argument. *)
+let batches_ok (#r : nat) (d : shape r) : prop =
+  sizeof d > 0 /\ SZ.fits (sizeof d) /\ sizeof d <= SZ.v max_blocks
+
 inline_for_extraction noextract
 val conc_snoc (#r : erased nat) (#d : shape r) (#n : erased nat)
   (cd : cshape d) (i : conc d) (j : szlt n) : conc (snoc_shape d n)

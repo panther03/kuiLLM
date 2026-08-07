@@ -12,7 +12,7 @@ can serve it — shared by the replacement pass (``passes.py``) and the tracer
 (``tracing.py``) so both agree on coverage.
 """
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -27,24 +27,30 @@ _EFFICIENT_SDPA = aten._scaled_dot_product_efficient_attention.default
 _CUDNN_SDPA = aten._scaled_dot_product_cudnn_attention.default
 
 
-def _run_impl(func, args, kwargs):
+def _run_impl(func, args, kwargs, reference=None):
     """Run a kuiops Impl for a node the pass already claimed at compile time.
 
     A batch capture (``kuipy.batch_capture``) extracts + queues the kernel and
     signals ``CaptureDeferred``; we then run the reference ATen op so the warm-up
     pass still produces correct values while every kernel is collected for one
     combined build. When ``verify`` is active the reference is compared to the
-    Kuiper output (host-side norm — eager, non-captured pass only)."""
+    Kuiper output (host-side norm — eager, non-captured pass only).
+
+    ``reference`` overrides the fallback for calls whose kwargs are kernel-only
+    (fused maps), so they cannot simply be replayed against ``func``."""
+    if reference is None:
+        def reference():
+            return func(*args, **kwargs)
     impl = registry.impl_for(func)
     spec = impl.supported(func, args, kwargs)
     if spec is None:
-        return func(*args, **kwargs)
+        return reference()
     try:
         out = impl.run(spec, args, kwargs)
     except _compile.CaptureDeferred:
-        return func(*args, **kwargs)
+        return reference()
     if V.enabled:
-        V.compare(str(func), out, func(*args, **kwargs))
+        V.compare(str(func), out, reference())
     return out
 
 
@@ -117,6 +123,43 @@ def _sdpa_cudnn_fake(q, k, v, bias, scale, causal):
     return (q.new_empty((N, H, L, D)),
             q.new_empty((N, H, 0), dtype=torch.float32),
             e0, e0, 0, 0, empty, empty, q.new_empty((0,)))
+
+
+def _reduce_call(a, op, dim, keepdim, dtype, pre, post):
+    """Unpack a fused reduction into ``(func, args, kwargs, reference)``."""
+    from . import fusion
+    func = fusion.REDUCE_BY_NAME[op]
+    pre_maps, post_maps = fusion.decode_maps(pre), fusion.decode_maps(post)
+    from .. import kuiops
+    dim_arg = ([dim] if func in kuiops.HReducePolyImpl._DIM_LIST_OPS else dim)
+    args = (a, dim_arg, keepdim)
+    kwargs = {"pre_map": pre_maps, "post_map": post_maps}
+    if dtype is not None:
+        kwargs["dtype"] = dtype
+
+    def apply(x, maps):
+        for m in maps:
+            x = m[0](x, m[1]) if isinstance(m, tuple) else m(x)
+        return x
+
+    def reference():
+        kw = {"dtype": dtype} if dtype is not None else {}
+        return apply(func(apply(a, pre_maps), args[1], keepdim, **kw), post_maps)
+
+    return func, args, kwargs, reference
+
+
+@torch.library.custom_op("kuiperjit::hreduce_poly", mutates_args=())
+def hreduce_poly(a: Tensor, op: str, dim: int, keepdim: bool,
+                 dtype: Optional[torch.dtype], pre: str, post: str) -> Tensor:
+    func, args, kwargs, reference = _reduce_call(
+        a, op, dim, keepdim, dtype, pre, post)
+    return _run_impl(func, args, kwargs, reference)
+
+
+@hreduce_poly.register_fake
+def _hreduce_poly_fake(a, op, dim, keepdim, dtype, pre, post):
+    return _reduce_call(a, op, dim, keepdim, dtype, pre, post)[3]()
 
 
 # ---------------------------------------------------------------------------

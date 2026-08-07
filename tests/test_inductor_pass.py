@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from kuipy.inductor import passes, custom_ops, tracing
+from kuipy.inductor import passes, custom_ops, fusion, tracing
 
 _CUDA = torch.cuda.is_available()
 
@@ -147,3 +147,142 @@ def test_custom_fusion_rule_runs():
     passes.KuiperPostGradPass()(graph)
     passes.clear_fusion_rules()
     assert calls, "registered fusion rule was not invoked"
+
+
+# ---------------------------------------------------------------------------
+# Elementwise-into-reduction fusion
+# ---------------------------------------------------------------------------
+
+def _fused(graph):
+    return [n for n in graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops.kuiperjit.hreduce_poly.default]
+
+
+def test_reduction_absorbs_pre_and_post_maps():
+    _need_cuda()
+
+    def fn(x):
+        return torch.relu(x).pow(2).sum(dim=-1) / 64
+
+    graph = _fake_graph(fn, torch.randn(4, 64, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+
+    tgts = _targets(graph)
+    assert tgts == ["kuiperjit.hreduce_poly.default"], tgts
+    node = _fused(graph)[0]
+    assert node.args[0].op == "placeholder"
+    assert fusion.decode_maps(node.args[5]) == [
+        torch.ops.aten.relu.default, (torch.ops.aten.pow.Tensor_Scalar, 2)]
+    assert fusion.decode_maps(node.args[6]) == [(torch.ops.aten.div.Tensor, 64)]
+
+
+def test_reduction_absorbs_pre_map_only():
+    _need_cuda()
+
+    def fn(x):
+        return torch.nn.functional.silu(x).sum(dim=1)
+
+    graph = _fake_graph(fn, torch.randn(4, 64, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+
+    assert _targets(graph) == ["kuiperjit.hreduce_poly.default"]
+    node = _fused(graph)[0]
+    assert fusion.decode_maps(node.args[5]) == [torch.ops.aten.silu.default]
+    assert fusion.decode_maps(node.args[6]) == []
+
+
+def test_unsupported_map_is_not_fused():
+    """``sin`` has no real counterpart, so the approximate reduce kernel cannot
+    prove it; the anchor must decline rather than fuse partially."""
+    _need_cuda()
+
+    def fn(x):
+        return torch.sin(x).sum(dim=-1)
+
+    graph = _fake_graph(fn, torch.randn(4, 64, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+    assert not _fused(graph)
+    assert "aten.sin.default" in _targets(graph)
+
+
+def test_multi_use_map_is_not_absorbed():
+    """A node read elsewhere in the graph must stay materialised."""
+    _need_cuda()
+
+    def fn(x):
+        y = torch.relu(x)
+        return y.sum(dim=-1), y
+
+    graph = _fake_graph(fn, torch.randn(4, 64, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+    assert not _fused(graph)
+    assert "aten.relu.default" in _targets(graph)
+
+
+def test_dtype_changing_op_is_not_a_map():
+    """Maps run at the tensor's own element type, so a promoting cast is not
+    fusable and the reduce is claimed unfused."""
+    _need_cuda()
+
+    def fn(x):
+        return x.to(torch.float32).sum(dim=-1)
+
+    graph = _fake_graph(fn, torch.randn(4, 64, device="cuda", dtype=torch.bfloat16))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+    assert not _fused(graph)
+
+
+def test_fused_reduction_matches_eager():
+    _need_cuda()
+    x = torch.randn(8, 128, device="cuda")
+
+    def fn(t):
+        return torch.relu(t).pow(2).sum(dim=-1) / 128
+
+    out = torch.ops.kuiperjit.hreduce_poly.default(
+        x, "aten.sum.dim_IntList", 1, False, None,
+        fusion.encode_maps([torch.ops.aten.relu.default,
+                            (torch.ops.aten.pow.Tensor_Scalar, 2)]),
+        fusion.encode_maps([(torch.ops.aten.div.Tensor, 128)]))
+    torch.testing.assert_close(out, fn(x), rtol=1e-5, atol=1e-5)
+
+
+def test_rmsnorm_collapses_to_one_reduction():
+    """The whole RMSNorm reduction -- square, mean, add epsilon, rsqrt -- is one
+    kernel; only the final broadcast multiply is left."""
+    _need_cuda()
+
+    def fn(x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+
+    graph = _fake_graph(fn, torch.randn(4, 128, device="cuda"))
+    passes.clear_fusion_rules()
+    passes.KuiperPostGradPass()(graph)
+
+    tgts = _targets(graph)
+    assert tgts == ["kuiperjit.hreduce_poly.default", "aten.mul.Tensor"], tgts
+    node = _fused(graph)[0]
+    assert node.args[1] == "aten.mean.dim" and node.args[3] is True
+    assert fusion.decode_maps(node.args[5]) == [
+        (torch.ops.aten.pow.Tensor_Scalar, 2)]
+    assert fusion.decode_maps(node.args[6]) == [
+        (torch.ops.aten.add.Tensor, 1e-6), torch.ops.aten.rsqrt.default]
+
+
+def test_fused_rmsnorm_matches_eager():
+    _need_cuda()
+    torch.manual_seed(0)
+    x = torch.randn(8, 256, device="cuda")
+    out = torch.ops.kuiperjit.hreduce_poly.default(
+        x, "aten.mean.dim", 1, True, None,
+        fusion.encode_maps([(torch.ops.aten.pow.Tensor_Scalar, 2)]),
+        fusion.encode_maps([(torch.ops.aten.add.Tensor, 1e-6),
+                            torch.ops.aten.rsqrt.default]))
+    ref = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)

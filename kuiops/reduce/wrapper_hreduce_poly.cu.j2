@@ -8,14 +8,13 @@ torch::Tensor op_{{ module }}(torch::Tensor Input)
 {
     at::cuda::CUDAGuard g(Input.device());
     auto Out = torch::empty(
-        { {% for k in range(r - 1) %}Input.size({{ k }}){% if not loop.last %}, {% endif %}{% endfor %} },
+        { {% for k in range(r - 1) %}Input.size({{ k }}), {% endfor %}{% if keepdim %}1{% endif %} },
         Input.options().dtype({{ out_scalar }}));
 
     const int64_t cols = Input.size({{ r - 1 }});
     const int64_t nth = std::min<int64_t>(cols, 1024);
     {{ sym }}(
-        {% for k in range(r) %}(uint32_t)Input.size({{ k }}), {% endfor %}
-        (uint32_t)Out.numel(), (uint32_t)nth,
+        {% for k in range(r) %}(uint32_t)Input.size({{ k }}), {% endfor %}(uint32_t)nth,
         reinterpret_cast<{{ cpp_in }}*>(Input.data_ptr()),
         reinterpret_cast<{{ cpp_kernel_out }}*>(Out.data_ptr()),
         kuiops::current_stream());

@@ -12,7 +12,8 @@ import os
 import torch
 
 from . import custom_ops  # noqa: F401  (registers kuiperjit::* ops on import)
-from . import passes, tracing
+from . import fusion, passes, tracing
+from .fusion import register_anchor
 from .passes import register_fusion_rule, clear_fusion_rules
 
 _MODE_ENV = "KUIPY_INDUCTOR_MODE"
