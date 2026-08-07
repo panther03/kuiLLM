@@ -48,6 +48,12 @@ JIT_STRICTNESS = int(os.environ.get("KUIPY_JIT_STRICTNESS", "1"))
 
 JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
 
+# Overrides ptxas' occupancy-driven register heuristic, which can starve the
+# tile-copy loops of the registers needed to keep several global loads in
+# flight. Worth a lot on some GEMM shapes and a loss on others, so it is off by
+# default: the right budget depends on the tile and belongs in the autotuner.
+NVCC_MAXRREGCOUNT = int(os.environ.get("KUIPY_MAXRREGCOUNT", "0"))
+
 # Bump this whenever a change makes previously selected tuning parameters stale.
 TUNING_SCHEMA_VERSION = 5
 AUTOTUNE = os.environ.get("KUIPY_AUTOTUNE", "0") == "1"
@@ -138,6 +144,8 @@ else:
     NVCC_BASE_FLAGS = _NVCC_COMMON_FLAGS + [
         "-O3", "--use_fast_math", "-Xcompiler", "-fPIC",
     ]
+    if NVCC_MAXRREGCOUNT:
+        NVCC_BASE_FLAGS += [f"-maxrregcount={NVCC_MAXRREGCOUNT}"]
 
 def cuda_device_capability(device=0):
     """Compute capability for a CUDA device, or None when CUDA is unavailable."""

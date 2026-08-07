@@ -1409,494 +1409,6 @@ fn flash_split_output
 }
 
 ghost
-fn flash_gather_output
-  (#et : Type0)
-  (b hq hkv group sq rows tiles d : szp {
-    SZ.v hq == SZ.v hkv * SZ.v group /\
-    SZ.v rows == SZ.v group * SZ.v sq /\
-    SZ.v rows <= SZ.v tiles * 16 /\
-    SZ.fits (SZ.v tiles * 16) })
-  (#lout : layout4 b hq sq d)
-  (gout : array4 et lout)
-  requires
-    pure (SZ.fits (tlayout_ulen lout)) **
-    (forall+ (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)).
-      flash_block_output b hq hkv group sq rows tiles d gout bid)
-  ensures live gout
-{
-  forevery_map
-    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
-      flash_block_output b hq hkv group sq rows tiles d gout bid)
-    (fun bid ->
-      forall+ (lane : natlt BW.warp_size).
-        out_store_cells b hq sq 16sz d rows gout
-          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (SZ.v group)
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
-          lane)
-    fn bid {
-      unfold flash_block_output
-        b hq hkv group sq rows tiles d gout bid;
-    };
-  forevery_map
-    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
-      forall+ (lane : natlt BW.warp_size).
-        out_store_cells b hq sq 16sz d rows gout
-          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-          (SZ.v group)
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
-          lane)
-    (fun bid ->
-      forall+ (lane : natlt BW.warp_size)
-        (ij : out_stride_index2
-          16 (SZ.v d) BW.warp_size lane).
-        when_ (
-          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-            + ij._1 < SZ.v rows)
-          (out_cell b hq sq d gout
-              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (SZ.v group)
-              (flash_bid_rt
-                (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                + ij._1)
-              ij._2))
-    fn bid {
-      forevery_map
-        (fun (lane : natlt BW.warp_size) ->
-          out_store_cells b hq sq 16sz d rows gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (SZ.v group)
-            (flash_bid_rt
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
-            lane)
-        (fun lane ->
-          forall+ (ij : out_stride_index2
-            16 (SZ.v d) BW.warp_size lane).
-            when_ (
-              flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                + ij._1 < SZ.v rows)
-              (out_cell b hq sq d gout
-                  (flash_bid_bi
-                    (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-                  (flash_bid_kvh
-                    (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-                  (SZ.v group)
-                  (flash_bid_rt
-                    (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                    + ij._1)
-                  ij._2))
-        fn lane {
-          unfold out_store_cells b hq sq 16sz d rows gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (SZ.v group)
-            (flash_bid_rt
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
-            lane;
-        };
-    };
-  forevery_map
-    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
-      forall+ (lane : natlt BW.warp_size)
-        (ij : out_stride_index2
-          16 (SZ.v d) BW.warp_size lane).
-        when_ (
-          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-            + ij._1 < SZ.v rows)
-          (out_cell b hq sq d gout
-              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (SZ.v group)
-              (flash_bid_rt
-                (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                + ij._1)
-              ij._2))
-    (fun bid ->
-      forall+ (li : (lane : natlt BW.warp_size &
-        out_stride_index2 16 (SZ.v d) BW.warp_size lane)).
-        let ij = li._2 in
-        when_ (
-          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-            + ij._1 < SZ.v rows)
-          (out_cell b hq sq d gout
-              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-              (SZ.v group)
-              (flash_bid_rt
-                (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                + ij._1)
-              ij._2))
-    fn bid {
-      forevery_flatten_dep
-        (fun (lane : natlt BW.warp_size)
-          (ij : out_stride_index2
-            16 (SZ.v d) BW.warp_size lane) ->
-          when_ (
-            flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-              + ij._1 < SZ.v rows)
-            (out_cell b hq sq d gout
-                (flash_bid_bi
-                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-                (flash_bid_kvh
-                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-                (SZ.v group)
-                (flash_bid_rt
-                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-                  + ij._1)
-                ij._2));
-    };
-  forevery_flatten_dep
-    (fun
-      (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
-      (li : (lane : natlt BW.warp_size &
-        out_stride_index2 16 (SZ.v d) BW.warp_size lane)) ->
-      let ij = li._2 in
-      when_ (
-        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-          + ij._1 < SZ.v rows)
-        (out_cell b hq sq d gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (SZ.v group)
-            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-              + ij._1)
-            ij._2));
-  forevery_map
-    (fun (owner : flash_owner_idx
-      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)) ->
-      let bid = owner._1 in
-      let ij = owner._2._2 in
-      when_ (
-        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-          + ij._1 < SZ.v rows)
-        (out_cell b hq sq d gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
-            (SZ.v group)
-            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
-              + ij._1)
-            ij._2))
-    (fun owner ->
-      let x = (flash_padded_owner_bij
-        (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner in
-      when_ (flash_padded_active (SZ.v rows) x)
-        (let y = flash_padded_logical (SZ.v rows) x in
-        out_cell b hq sq d gout
-          y._1 y._2 (SZ.v group) y._3 y._4))
-    fn owner {
-      let x = (flash_padded_owner_bij
-        (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner;
-      let (bi, kvh, rt, i, dd) = x;
-      let owner_active =
-        flash_bid_rt
-          (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-          + owner._2._2._1 < SZ.v rows;
-      let padded_active = flash_padded_active (SZ.v rows) x;
-      let active = t2b owner_active;
-      assert pure (owner_active <==> padded_active);
-      assert pure (active == t2b padded_active);
-      if active {
-        flash_when_prop_elim_true
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-            + owner._2._2._1 < SZ.v rows)
-          active (
-          out_cell b hq sq d gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-            (SZ.v group)
-            (flash_bid_rt
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-              + owner._2._2._1)
-            owner._2._2._2);
-        rewrite each
-          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-          as bi;
-        rewrite each
-          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-          as kvh;
-        rewrite each
-          (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-          as rt;
-        rewrite each owner._2._2._1 as i;
-        rewrite each owner._2._2._2 as dd;
-        assert pure (clamp_nat_lt (SZ.v rows) (rt * 16 + i)
-          == rt * 16 + i);
-        rewrite
-          (out_cell b hq sq d gout bi kvh (SZ.v group)
-            (rt * 16 + i) dd)
-          as
-          (let y = flash_padded_logical (SZ.v rows) x in
-           out_cell b hq sq d gout
-             y._1 y._2 (SZ.v group) y._3 y._4);
-        rewrite each x as
-          ((flash_padded_owner_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner);
-        flash_when_prop_intro_true
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-            + owner._2._2._1 < SZ.v rows)
-          active (
-          let y = flash_padded_logical (SZ.v rows)
-            ((flash_padded_owner_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner) in
-          out_cell b hq sq d gout
-            y._1 y._2 (SZ.v group) y._3 y._4);
-      } else {
-        flash_when_prop_elim_false
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-            + owner._2._2._1 < SZ.v rows)
-          active (
-          out_cell b hq sq d gout
-            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
-            (SZ.v group)
-            (flash_bid_rt
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-              + owner._2._2._1)
-            owner._2._2._2);
-        flash_when_prop_intro_false
-          (flash_bid_rt
-            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
-            + owner._2._2._1 < SZ.v rows)
-          active (
-          let y = flash_padded_logical (SZ.v rows)
-            ((flash_padded_owner_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner) in
-          out_cell b hq sq d gout
-            y._1 y._2 (SZ.v group) y._3 y._4);
-      }
-    };
-  forevery_iso_back
-    (flash_padded_owner_bij
-      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d))
-    (fun (x : flash_padded_idx
-      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)) ->
-      when_ (flash_padded_active (SZ.v rows) x)
-        (let y = flash_padded_logical (SZ.v rows) x in
-        out_cell b hq sq d gout
-          y._1 y._2 (SZ.v group) y._3 y._4));
-  forevery_refine_pred
-    (fun x ->
-      let y = flash_padded_logical (SZ.v rows) x in
-      out_cell b hq sq d gout
-        y._1 y._2 (SZ.v group) y._3 y._4)
-    (flash_padded_active (SZ.v rows));
-  forevery_iso
-    (flash_active_padded_bij
-      (SZ.v b) (SZ.v hkv) (SZ.v rows) (SZ.v tiles) (SZ.v d))
-    (fun (x : flash_active_padded_idx
-      (SZ.v b) (SZ.v hkv) (SZ.v rows) (SZ.v tiles) (SZ.v d)) ->
-      let y = flash_padded_logical (SZ.v rows) x in
-      out_cell b hq sq d gout
-        y._1 y._2 (SZ.v group) y._3 y._4);
-  forevery_map
-    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
-      natlt (SZ.v rows) & natlt (SZ.v d)) ->
-      out_cell b hq sq d gout
-        ((flash_active_padded_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v rows)
-          (SZ.v tiles) (SZ.v d)).ff
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).gg y))._1
-        ((flash_active_padded_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v rows)
-          (SZ.v tiles) (SZ.v d)).ff
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).gg y))._2
-        (SZ.v group)
-        ((flash_active_padded_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v rows)
-          (SZ.v tiles) (SZ.v d)).ff
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).gg y))._3
-        ((flash_active_padded_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v rows)
-          (SZ.v tiles) (SZ.v d)).ff
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).gg y))._4)
-    (fun y ->
-      out_cell b hq sq d gout
-        y._1 y._2 (SZ.v group) y._3 y._4)
-    fn y {
-      bij_inv_bk
-        (flash_active_padded_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v rows)
-          (SZ.v tiles) (SZ.v d))
-        y;
-      rewrite
-        (out_cell b hq sq d gout
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).ff
-            ((flash_active_padded_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v rows)
-              (SZ.v tiles) (SZ.v d)).gg y))._1
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).ff
-            ((flash_active_padded_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v rows)
-              (SZ.v tiles) (SZ.v d)).gg y))._2
-          (SZ.v group)
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).ff
-            ((flash_active_padded_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v rows)
-              (SZ.v tiles) (SZ.v d)).gg y))._3
-          ((flash_active_padded_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v rows)
-            (SZ.v tiles) (SZ.v d)).ff
-            ((flash_active_padded_bij
-              (SZ.v b) (SZ.v hkv) (SZ.v rows)
-              (SZ.v tiles) (SZ.v d)).gg y))._4)
-        as
-        (out_cell b hq sq d gout
-          y._1 y._2 (SZ.v group) y._3 y._4);
-    };
-  forevery_map
-    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
-      natlt (SZ.v rows) & natlt (SZ.v d)) ->
-      out_cell b hq sq d gout
-        y._1 y._2 (SZ.v group) y._3 y._4)
-    (fun y ->
-      exists* (v : et).
-        tensor_pts_to_cell gout #1.0R
-          ((flash_output_logical_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-            (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
-          v)
-    fn y {
-      unfold out_cell b hq sq d gout
-        y._1 y._2 (SZ.v group) y._3 y._4;
-      with v. assert (
-        tensor_pts_to_cell gout #1.0R
-          (idx4 y._1
-            (out_qh (SZ.v hq) (SZ.v sq) y._2
-              (SZ.v group) y._3)
-            (out_qpos (SZ.v sq) y._3)
-            y._4)
-          v);
-      rewrite
-        (tensor_pts_to_cell gout #1.0R
-          (idx4 y._1
-            (out_qh (SZ.v hq) (SZ.v sq) y._2
-              (SZ.v group) y._3)
-            (out_qpos (SZ.v sq) y._3)
-            y._4)
-          v)
-        as
-        (tensor_pts_to_cell gout #1.0R
-          ((flash_output_logical_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-            (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
-          v);
-    };
-  forevery_iso
-    (flash_pair4_bij
-      #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-      #(natlt (SZ.v rows)) #(natlt (SZ.v d)))
-    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
-      natlt (SZ.v rows) & natlt (SZ.v d)) ->
-      exists* (v : et).
-        tensor_pts_to_cell gout #1.0R
-          ((flash_output_logical_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-            (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
-          v);
-  let vf = forevery_exists
-    (fun (yy : (natlt (SZ.v b) & natlt (SZ.v hkv)) &
-      (natlt (SZ.v rows) & natlt (SZ.v d))) (v : et) ->
-      let y = (flash_pair4_bij
-        #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-        #(natlt (SZ.v rows)) #(natlt (SZ.v d))).gg yy in
-      tensor_pts_to_cell gout #1.0R
-        ((flash_output_logical_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
-        v);
-  let all_bij =
-    bij_comp
-      (flash_output_logical_bij
-        (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-        (SZ.v hq) (SZ.v rows) (SZ.v d))
-      (flash_pair4_bij
-        #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-        #(natlt (SZ.v rows)) #(natlt (SZ.v d)));
-  let eout : chest (b @| hq @| sq @| d @| INil) et =
-    mk (b @| hq @| sq @| d @| INil)
-      (fun idx -> vf (all_bij.ff idx));
-  forevery_map
-    (fun (yy : (natlt (SZ.v b) & natlt (SZ.v hkv)) &
-      (natlt (SZ.v rows) & natlt (SZ.v d))) ->
-      let y = (flash_pair4_bij
-        #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-        #(natlt (SZ.v rows)) #(natlt (SZ.v d))).gg yy in
-      tensor_pts_to_cell gout #1.0R
-        ((flash_output_logical_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
-        (vf yy))
-    (fun yy ->
-      tensor_pts_to_cell gout #1.0R (all_bij.gg yy) (vf yy))
-    fn yy {
-      assert pure (
-        all_bij.gg yy ==
-        (flash_output_logical_bij
-          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg
-          ((flash_pair4_bij
-            #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-            #(natlt (SZ.v rows)) #(natlt (SZ.v d))).gg yy));
-      rewrite
-        (tensor_pts_to_cell gout #1.0R
-          ((flash_output_logical_bij
-            (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
-            (SZ.v hq) (SZ.v rows) (SZ.v d)).gg
-            ((flash_pair4_bij
-              #(natlt (SZ.v b)) #(natlt (SZ.v hkv))
-              #(natlt (SZ.v rows)) #(natlt (SZ.v d))).gg yy))
-          (vf yy))
-        as
-        (tensor_pts_to_cell gout #1.0R (all_bij.gg yy) (vf yy));
-    };
-  forevery_map
-    (fun (yy : (natlt (SZ.v b) & natlt (SZ.v hkv)) &
-      (natlt (SZ.v rows) & natlt (SZ.v d))) ->
-      tensor_pts_to_cell gout #1.0R (all_bij.gg yy) (vf yy))
-    (fun yy ->
-      tensor_pts_to_cell gout #1.0R
-        (all_bij.gg yy) (acc eout (all_bij.gg yy)))
-    fn yy {
-      bij_inv_bk all_bij yy;
-      assert pure (
-        acc eout (all_bij.gg yy) == vf yy);
-      rewrite
-        (tensor_pts_to_cell gout #1.0R (all_bij.gg yy) (vf yy))
-        as
-        (tensor_pts_to_cell gout #1.0R
-          (all_bij.gg yy) (acc eout (all_bij.gg yy)));
-    };
-  forevery_iso_back all_bij
-    (fun idx ->
-      tensor_pts_to_cell gout #1.0R idx (acc eout idx));
-  tensor_implode gout;
-  fold live gout;
-}
-
-ghost
 fn flash_output_add_warps
   (#et : Type0)
   (nw : szp)
@@ -1975,8 +1487,11 @@ fn flash_output_add_warps
 }
 
 ghost
-fn flash_output_remove_warps
-  (#et : Type0)
+fn flash_output_remove_warps_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nw : szp)
   (b hq hkv group sq rows tiles d : szp {
     SZ.v hq == SZ.v hkv * SZ.v group /\
@@ -1984,25 +1499,29 @@ fn flash_output_remove_warps
     SZ.v rows <= SZ.v tiles * 16 /\
     SZ.fits (SZ.v tiles * 16) })
   (#lout : layout4 b hq sq d)
-  (gout : array4 et lout)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
   requires
     forall+ (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size).
       when_ (w = 0)
-        (out_store_cells b hq sq 16sz d rows gout
+        (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
           (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
           (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
           (SZ.v group)
           (flash_bid_rt
             (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
           lane)
-  ensures flash_block_output
-    b hq hkv group sq rows tiles d gout bid
-{
+  ensures flash_block_output_v nw
+    b hq hkv group sq rows tiles d gout escale eO egl bid
+
+  {
   forevery_flatten
     (fun (w : natlt (SZ.v nw)) (lane : natlt BW.warp_size) ->
       when_ (w = 0)
-        (out_store_cells b hq sq 16sz d rows gout
+        (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
           (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
           (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
           (SZ.v group)
@@ -2011,7 +1530,7 @@ fn flash_output_remove_warps
           lane));
   forevery_refine_pred
     (fun (wl : natlt (SZ.v nw) & natlt BW.warp_size) ->
-      out_store_cells b hq sq 16sz d rows gout
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (SZ.v group)
@@ -2022,7 +1541,7 @@ fn flash_output_remove_warps
       wl._1 = 0);
   forevery_iso (flash_w0_bij nw)
     (fun wl ->
-      out_store_cells b hq sq 16sz d rows gout
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (SZ.v group)
@@ -2031,7 +1550,7 @@ fn flash_output_remove_warps
         wl._2);
   forevery_map
     (fun lane ->
-      out_store_cells b hq sq 16sz d rows gout
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (SZ.v group)
@@ -2039,7 +1558,7 @@ fn flash_output_remove_warps
           (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
         ((flash_w0_bij nw).gg lane)._2)
     (fun lane ->
-      out_store_cells b hq sq 16sz d rows gout
+      out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
         (SZ.v group)
@@ -2049,8 +1568,8 @@ fn flash_output_remove_warps
     fn lane {
       rewrite each ((flash_w0_bij nw).gg lane)._2 as lane;
     };
-  fold flash_block_output
-    b hq hkv group sq rows tiles d gout bid;
+  fold (flash_block_output_v nw
+    b hq hkv group sq rows tiles d gout escale eO egl bid);
 }
 
 ghost
@@ -2227,4 +1746,580 @@ fn flash_gather_thread_rotensor
           (f /. (SZ.v nw * BW.warp_size)) e);
     };
   TRO.tensor_gather_n a (SZ.v nw * BW.warp_size) #f;
+}
+
+let flash_out_chest
+  (#et : Type0)
+  (b hq hkv group sq rows d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq })
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et)
+  : GTot (chest (b @| hq @| sq @| d @| INil) et)
+= mk (b @| hq @| sq @| d @| INil)
+    (fun idx -> vfun ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).ff idx))
+
+let flash_out_chest_acc
+  (#et : Type0)
+  (b hq hkv group sq rows d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq })
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et)
+  : Lemma (forall (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+             natlt (SZ.v rows) & natlt (SZ.v d)).
+      acc (flash_out_chest b hq hkv group sq rows d vfun)
+        ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+      == vfun y)
+= ()
+
+(* Per-cell payload of the gather chain: the output cell at
+   (bi, kvh, r, dd) pinned to [vfun]'s value there. *)
+unfold
+let out_cell_vf
+  (#et : Type0) (b hq hkv sq rows d : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et lout)
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et)
+  (bi : natlt (SZ.v b)) (kvh : natlt (SZ.v hkv)) (group : pos)
+  (r : nat) (dd : natlt (SZ.v d)) : slprop
+= out_cell_v b hq sq d gout bi kvh group r dd
+    (vfun (bi, kvh, clamp_nat_lt (SZ.v rows) r, dd))
+
+ghost
+fn flash_gather_output_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest2 et_acc (SZ.v nw) 16)
+  (eO : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : (natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) -> chest1 et_acc 16)
+  (vfun : (natlt (SZ.v b) & natlt (SZ.v hkv) &
+    natlt (SZ.v rows) & natlt (SZ.v d)) -> GTot et_ab)
+  requires
+    pure (SZ.fits (tlayout_ulen lout)) **
+    pure (forall (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) (i : natlt 16) (dd : natlt (SZ.v d)).
+      flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i < SZ.v rows ==>
+      vfun (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            clamp_nat_lt (SZ.v rows) (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+            dd)
+      == FC.fcast (SF.out_val (escale bid) (eO bid) (egl bid) i dd)) **
+    (forall+ (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)).
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (escale bid) (eO bid) (egl bid) bid)
+  ensures
+    gout |-> Frac 1.0R (flash_out_chest b hq hkv group sq rows d vfun)
+{
+  forevery_map
+    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      flash_block_output_v nw b hq hkv group sq rows tiles d gout
+        (escale bid) (eO bid) (egl bid) bid)
+    (fun bid ->
+      forall+ (lane : natlt BW.warp_size).
+        out_store_cells_v nw b hq sq 16sz d rows gout
+          (escale bid) (eO bid) (egl bid)
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (SZ.v group)
+          (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+          lane)
+    fn bid {
+      unfold flash_block_output_v nw
+        b hq hkv group sq rows tiles d gout
+        (escale bid) (eO bid) (egl bid) bid;
+    };
+  forevery_map
+    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      forall+ (lane : natlt BW.warp_size).
+        out_store_cells_v nw b hq sq 16sz d rows gout
+          (escale bid) (eO bid) (egl bid)
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+          (SZ.v group)
+          (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+          lane)
+    (fun bid ->
+      forall+ (lane : natlt BW.warp_size)
+        (ij : out_stride_index2
+          16 (SZ.v d) BW.warp_size lane).
+        when_ (
+          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+            + ij._1 < SZ.v rows)
+          (out_cell_vf b hq hkv sq rows d gout vfun
+              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (SZ.v group)
+              (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                + ij._1)
+              ij._2))
+    fn bid {
+      forevery_map
+        (fun (lane : natlt BW.warp_size) ->
+          out_store_cells_v nw b hq sq 16sz d rows gout
+            (escale bid) (eO bid) (egl bid)
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (SZ.v group)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+            lane)
+        (fun lane ->
+          forall+ (ij : out_stride_index2
+            16 (SZ.v d) BW.warp_size lane).
+            when_ (
+              flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                + ij._1 < SZ.v rows)
+              (out_cell_vf b hq hkv sq rows d gout vfun
+                  (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (SZ.v group)
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                    + ij._1)
+                  ij._2))
+        fn lane {
+          unfold out_store_cells_v nw b hq sq 16sz d rows gout
+            (escale bid) (eO bid) (egl bid)
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (SZ.v group)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+            lane;
+          forevery_map
+            #(out_stride_index2 16 (SZ.v d) BW.warp_size lane)
+            (fun ij ->
+              when_ (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                (out_cell_v b hq sq d gout
+                  (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (SZ.v group)
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                  ij._2
+                  (FC.fcast (SF.out_val
+                    (escale bid) (eO bid) (egl bid) ij._1 ij._2))))
+            (fun ij ->
+              when_ (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                (out_cell_vf b hq hkv sq rows d gout vfun
+                  (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                  (SZ.v group)
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                  ij._2))
+            fn ij {
+              let bb : bool =
+                (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows);
+              if bb {
+                flash_when_elim_true
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                  (out_cell_v b hq sq d gout
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2
+                    (FC.fcast (SF.out_val
+                      (escale bid) (eO bid) (egl bid) ij._1 ij._2)));
+                rewrite
+                  (out_cell_v b hq sq d gout
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2
+                    (FC.fcast (SF.out_val
+                      (escale bid) (eO bid) (egl bid) ij._1 ij._2)))
+                as
+                  (out_cell_vf b hq hkv sq rows d gout vfun
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2);
+                flash_when_intro_true
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                  (out_cell_vf b hq hkv sq rows d gout vfun
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2);
+              } else {
+                assert pure (
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows) == false);
+                flash_when_elim_false
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                  (out_cell_v b hq sq d gout
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2
+                    (FC.fcast (SF.out_val
+                      (escale bid) (eO bid) (egl bid) ij._1 ij._2)));
+                flash_when_intro_false
+                  (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1 < SZ.v rows)
+                  (out_cell_vf b hq hkv sq rows d gout vfun
+                    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                    (SZ.v group)
+                    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + ij._1)
+                    ij._2);
+              }
+            };
+        };
+    };
+  forevery_map
+    (fun (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) ->
+      forall+ (lane : natlt BW.warp_size)
+        (ij : out_stride_index2
+          16 (SZ.v d) BW.warp_size lane).
+        when_ (
+          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+            + ij._1 < SZ.v rows)
+          (out_cell_vf b hq hkv sq rows d gout vfun
+              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (SZ.v group)
+              (flash_bid_rt
+                (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                + ij._1)
+              ij._2))
+    (fun bid ->
+      forall+ (li : (lane : natlt BW.warp_size &
+        out_stride_index2 16 (SZ.v d) BW.warp_size lane)).
+        let ij = li._2 in
+        when_ (
+          flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+            + ij._1 < SZ.v rows)
+          (out_cell_vf b hq hkv sq rows d gout vfun
+              (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+              (SZ.v group)
+              (flash_bid_rt
+                (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                + ij._1)
+              ij._2))
+    fn bid {
+      forevery_flatten_dep
+        (fun (lane : natlt BW.warp_size)
+          (ij : out_stride_index2
+            16 (SZ.v d) BW.warp_size lane) ->
+          when_ (
+            flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+              + ij._1 < SZ.v rows)
+            (out_cell_vf b hq hkv sq rows d gout vfun
+                (flash_bid_bi
+                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                (flash_bid_kvh
+                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+                (SZ.v group)
+                (flash_bid_rt
+                  (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+                  + ij._1)
+                ij._2));
+    };
+  forevery_flatten_dep
+    (fun
+      (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+      (li : (lane : natlt BW.warp_size &
+        out_stride_index2 16 (SZ.v d) BW.warp_size lane)) ->
+      let ij = li._2 in
+      when_ (
+        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+          + ij._1 < SZ.v rows)
+        (out_cell_vf b hq hkv sq rows d gout vfun
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (SZ.v group)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+              + ij._1)
+            ij._2));
+  forevery_map
+    (fun (owner : flash_owner_idx
+      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)) ->
+      let bid = owner._1 in
+      let ij = owner._2._2 in
+      when_ (
+        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+          + ij._1 < SZ.v rows)
+        (out_cell_vf b hq hkv sq rows d gout vfun
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+            (SZ.v group)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+              + ij._1)
+            ij._2))
+    (fun owner ->
+      let x = (flash_padded_owner_bij
+        (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner in
+      when_ (flash_padded_active (SZ.v rows) x)
+        (let y = flash_padded_logical (SZ.v rows) x in
+        out_cell_vf b hq hkv sq rows d gout vfun
+          y._1 y._2 (SZ.v group) y._3 y._4))
+    fn owner {
+      let x = (flash_padded_owner_bij
+        (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner;
+      let (bi, kvh, rt, i, dd) = x;
+      let owner_active =
+        flash_bid_rt
+          (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+          + owner._2._2._1 < SZ.v rows;
+      let padded_active = flash_padded_active (SZ.v rows) x;
+      let active = t2b owner_active;
+      assert pure (owner_active <==> padded_active);
+      assert pure (active == t2b padded_active);
+      if active {
+        flash_when_prop_elim_true
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+            + owner._2._2._1 < SZ.v rows)
+          active (
+          out_cell_vf b hq hkv sq rows d gout vfun
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+            (SZ.v group)
+            (flash_bid_rt
+              (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+              + owner._2._2._1)
+            owner._2._2._2);
+        rewrite each
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+          as bi;
+        rewrite each
+          (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+          as kvh;
+        rewrite each
+          (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+          as rt;
+        rewrite each owner._2._2._1 as i;
+        rewrite each owner._2._2._2 as dd;
+        assert pure (clamp_nat_lt (SZ.v rows) (rt * 16 + i)
+          == rt * 16 + i);
+        rewrite
+          (out_cell_vf b hq hkv sq rows d gout vfun bi kvh (SZ.v group)
+            (rt * 16 + i) dd)
+          as
+          (let y = flash_padded_logical (SZ.v rows) x in
+           out_cell_vf b hq hkv sq rows d gout vfun
+             y._1 y._2 (SZ.v group) y._3 y._4);
+        rewrite each x as
+          ((flash_padded_owner_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner);
+        flash_when_prop_intro_true
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+            + owner._2._2._1 < SZ.v rows)
+          active (
+          let y = flash_padded_logical (SZ.v rows)
+            ((flash_padded_owner_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner) in
+          out_cell_vf b hq hkv sq rows d gout vfun
+            y._1 y._2 (SZ.v group) y._3 y._4);
+      } else {
+        flash_when_prop_elim_false
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+            + owner._2._2._1 < SZ.v rows)
+          active (
+          out_cell_vf b hq hkv sq rows d gout vfun
+            (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+            (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1)
+            (SZ.v group)
+            (flash_bid_rt
+              (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+              + owner._2._2._1)
+            owner._2._2._2);
+        flash_when_prop_intro_false
+          (flash_bid_rt
+            (SZ.v b) (SZ.v hkv) (SZ.v tiles) owner._1 * 16
+            + owner._2._2._1 < SZ.v rows)
+          active (
+          let y = flash_padded_logical (SZ.v rows)
+            ((flash_padded_owner_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)).gg owner) in
+          out_cell_vf b hq hkv sq rows d gout vfun
+            y._1 y._2 (SZ.v group) y._3 y._4);
+      }
+    };
+  forevery_iso_back
+    (flash_padded_owner_bij
+      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d))
+    (fun (x : flash_padded_idx
+      (SZ.v b) (SZ.v hkv) (SZ.v tiles) (SZ.v d)) ->
+      when_ (flash_padded_active (SZ.v rows) x)
+        (let y = flash_padded_logical (SZ.v rows) x in
+        out_cell_vf b hq hkv sq rows d gout vfun
+          y._1 y._2 (SZ.v group) y._3 y._4));
+  forevery_refine_pred
+    (fun x ->
+      let y = flash_padded_logical (SZ.v rows) x in
+      out_cell_vf b hq hkv sq rows d gout vfun
+        y._1 y._2 (SZ.v group) y._3 y._4)
+    (flash_padded_active (SZ.v rows));
+  forevery_iso
+    (flash_active_padded_bij
+      (SZ.v b) (SZ.v hkv) (SZ.v rows) (SZ.v tiles) (SZ.v d))
+    (fun (x : flash_active_padded_idx
+      (SZ.v b) (SZ.v hkv) (SZ.v rows) (SZ.v tiles) (SZ.v d)) ->
+      let y = flash_padded_logical (SZ.v rows) x in
+      out_cell_vf b hq hkv sq rows d gout vfun
+        y._1 y._2 (SZ.v group) y._3 y._4);
+  forevery_map
+    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+      natlt (SZ.v rows) & natlt (SZ.v d)) ->
+      out_cell_vf b hq hkv sq rows d gout vfun
+        ((flash_active_padded_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v rows)
+          (SZ.v tiles) (SZ.v d)).ff
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).gg y))._1
+        ((flash_active_padded_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v rows)
+          (SZ.v tiles) (SZ.v d)).ff
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).gg y))._2
+        (SZ.v group)
+        ((flash_active_padded_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v rows)
+          (SZ.v tiles) (SZ.v d)).ff
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).gg y))._3
+        ((flash_active_padded_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v rows)
+          (SZ.v tiles) (SZ.v d)).ff
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).gg y))._4)
+    (fun y ->
+      out_cell_vf b hq hkv sq rows d gout vfun
+        y._1 y._2 (SZ.v group) y._3 y._4)
+    fn y {
+      bij_inv_bk
+        (flash_active_padded_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v rows)
+          (SZ.v tiles) (SZ.v d))
+        y;
+      rewrite
+        (out_cell_vf b hq hkv sq rows d gout vfun
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).ff
+            ((flash_active_padded_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v rows)
+              (SZ.v tiles) (SZ.v d)).gg y))._1
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).ff
+            ((flash_active_padded_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v rows)
+              (SZ.v tiles) (SZ.v d)).gg y))._2
+          (SZ.v group)
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).ff
+            ((flash_active_padded_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v rows)
+              (SZ.v tiles) (SZ.v d)).gg y))._3
+          ((flash_active_padded_bij
+            (SZ.v b) (SZ.v hkv) (SZ.v rows)
+            (SZ.v tiles) (SZ.v d)).ff
+            ((flash_active_padded_bij
+              (SZ.v b) (SZ.v hkv) (SZ.v rows)
+              (SZ.v tiles) (SZ.v d)).gg y))._4)
+        as
+        (out_cell_vf b hq hkv sq rows d gout vfun
+          y._1 y._2 (SZ.v group) y._3 y._4);
+    };
+  forevery_map
+    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+      natlt (SZ.v rows) & natlt (SZ.v d)) ->
+      out_cell_vf b hq hkv sq rows d gout vfun
+        y._1 y._2 (SZ.v group) y._3 y._4)
+    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+      natlt (SZ.v rows) & natlt (SZ.v d)) ->
+      tensor_pts_to_cell gout #1.0R
+        ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+        (vfun (y._1, y._2, y._3, y._4)))
+    fn y {
+      assert pure (clamp_nat_lt (SZ.v rows) y._3 == y._3);
+      unfold out_cell_v b hq sq d gout
+        y._1 y._2 (SZ.v group) y._3 y._4
+        (vfun (y._1, y._2, clamp_nat_lt (SZ.v rows) y._3, y._4));
+      rewrite
+        (tensor_pts_to_cell gout #1.0R
+          (idx4 y._1
+            (out_qh (SZ.v hq) (SZ.v sq) y._2
+              (SZ.v group) y._3)
+            (out_qpos (SZ.v sq) y._3)
+            y._4)
+          (vfun (y._1, y._2, clamp_nat_lt (SZ.v rows) y._3, y._4)))
+      as
+        (tensor_pts_to_cell gout #1.0R
+          ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+          (vfun (y._1, y._2, y._3, y._4)));
+    };
+  flash_out_chest_acc b hq hkv group sq rows d vfun;
+  forevery_map
+    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+      natlt (SZ.v rows) & natlt (SZ.v d)) ->
+      tensor_pts_to_cell gout #1.0R
+        ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+        (vfun (y._1, y._2, y._3, y._4)))
+    (fun (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+      natlt (SZ.v rows) & natlt (SZ.v d)) ->
+      tensor_pts_to_cell gout #1.0R
+        ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+        (acc (flash_out_chest b hq hkv group sq rows d vfun)
+          ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)))
+    fn y {
+      rewrite
+        (tensor_pts_to_cell gout #1.0R
+          ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+          (vfun (y._1, y._2, y._3, y._4)))
+      as
+        (tensor_pts_to_cell gout #1.0R
+          ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)
+          (acc (flash_out_chest b hq hkv group sq rows d vfun)
+            ((flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d)).gg y)));
+    };
+  forevery_iso_back
+    (flash_output_logical_bij
+          (SZ.v b) (SZ.v hkv) (SZ.v group) (SZ.v sq)
+          (SZ.v hq) (SZ.v rows) (SZ.v d))
+    (fun idx ->
+      tensor_pts_to_cell gout #1.0R idx
+        (acc (flash_out_chest b hq hkv group sq rows d vfun) idx));
+  tensor_implode gout;
 }

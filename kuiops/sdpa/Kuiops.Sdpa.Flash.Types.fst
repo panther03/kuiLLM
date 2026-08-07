@@ -17,11 +17,16 @@ open Kuiper.Tensor.Layout.Alg
 open Kuiper.Bijection
 open Kuiper.ForEvery
 open Kuiper.Kernel.FlashAttention.KernelDesc
+open Kuiops.Sdpa.Flash.Vals
 
 module SZ = Kuiper.SizeT
+module EM = Kuiper.EMatrix
 module TRO = Kuiper.TensorRO
 module BW = Kuiper.Barrier.Warp
 module B = Kuiper.Barrier
+module SF = Kuiops.Sdpa.Flash.Spec.Float
+module SS = Kuiops.Sdpa.Flash.Spec.Step
+module FC = Kuiper.Float.Casts
 
 inline_for_extraction noextract
 let flash_scale_cimap
@@ -77,6 +82,132 @@ let thread_lane (nw : szp) (tid : natlt (block_threads nw)) : natlt BW.warp_size
 let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
   ij:(natlt rows & natlt cols) { (ij._1 * cols + ij._2) % nthr == tid }
 
+(* Ownership of one cell of a strided load loop: written cells carry their
+   final value, the rest are still arbitrary. *)
+let q_cell
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols) : slprop
+= if ij._1 * cols + ij._2 < cur
+  then tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2)
+  else exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v
+
+ghost fn q_cell_intro_todo
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v) **
+           pure (ij._1 * cols + ij._2 >= cur)
+  ensures q_cell a qt cur ij
+{
+  rewrite (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v)
+       as (q_cell a qt cur ij);
+}
+
+ghost fn q_cell_elim_todo
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij ** pure (ij._1 * cols + ij._2 >= cur)
+  ensures exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v
+{
+  rewrite (q_cell a qt cur ij)
+       as (exists* (v : et). tensor_pts_to_cell a (idx2 ij._1 ij._2) v);
+}
+
+ghost fn q_cell_intro_done
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2) **
+           pure (ij._1 * cols + ij._2 < cur)
+  ensures q_cell a qt cur ij
+{
+  rewrite (tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2))
+       as (q_cell a qt cur ij);
+}
+
+ghost fn q_cell_bump
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur cur' : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij **
+           pure ((ij._1 * cols + ij._2 < cur) == (ij._1 * cols + ij._2 < cur'))
+  ensures q_cell a qt cur' ij
+{
+  rewrite (q_cell a qt cur ij) as (q_cell a qt cur' ij);
+}
+
+ghost fn q_cell_elim_done
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (qt : chest2 et rows cols) (cur : nat)
+  (ij : natlt rows & natlt cols)
+  requires q_cell a qt cur ij ** pure (ij._1 * cols + ij._2 < cur)
+  ensures tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2)
+{
+  rewrite (q_cell a qt cur ij)
+       as (tensor_pts_to_cell a (idx2 ij._1 ij._2) (acc2 qt ij._1 ij._2));
+}
+
+(* A strided thread's cells all lie at or past its own offset ... *)
+let stride_ge_tid (nthr : pos) (tid : natlt nthr) (f : nat)
+  : Lemma (requires f % nthr == tid) (ensures f >= tid)
+  = if f < tid then FStar.Math.Lemmas.small_mod f nthr else ()
+
+(* ... and two distinct ones are at least a stride apart. *)
+let stride_gap (nthr : pos) (tid : natlt nthr) (cur f : nat)
+  : Lemma (requires cur % nthr == tid /\ f % nthr == tid /\ f <> cur)
+          (ensures f < cur \/ f >= cur + nthr)
+  = FStar.Math.Lemmas.euclidean_division_definition f nthr;
+    FStar.Math.Lemmas.euclidean_division_definition cur nthr;
+    if f > cur && f < cur + nthr then
+      FStar.Math.Lemmas.lemma_mult_lt_right nthr (cur / nthr) (f / nthr)
+    else ()
+
+(* A flat row-major index determines its cell. *)
+let flat_inj (cols : pos) (i : nat) (j : natlt cols)
+  : Lemma ((i * cols + j) / cols == i /\ (i * cols + j) % cols == j)
+  = FStar.Math.Lemmas.lemma_div_plus j i cols;
+    FStar.Math.Lemmas.lemma_mod_plus j i cols;
+    FStar.Math.Lemmas.small_div j cols;
+    FStar.Math.Lemmas.small_mod j cols
+
+let flat_lt (rows cols : nat) (i : natlt rows) (j : natlt cols)
+  : Lemma (i * cols + j < rows * cols)
+  = FStar.Math.Lemmas.lemma_mult_le_right cols (i + 1) rows
+
+(* Advancing the "done" watermark by one stride leaves every other cell of the
+   thread's stride class on the same side of it. *)
+let stride_next (nthr : pos) (tid : natlt nthr) (rows : nat) (cols : pos)
+  (i : natlt rows) (j : natlt cols) (ij : natlt rows & natlt cols)
+  : Lemma
+    (requires (i * cols + j) % nthr == tid /\
+              (ij._1 * cols + ij._2) % nthr == tid /\
+              ij =!= ((i, j) <: (natlt rows & natlt cols)))
+    (ensures (ij._1 * cols + ij._2 < i * cols + j) ==
+             (ij._1 * cols + ij._2 < i * cols + j + nthr))
+  = flat_inj cols i j;
+    flat_inj cols ij._1 ij._2;
+    stride_gap nthr tid (i * cols + j) (ij._1 * cols + ij._2)
+
+inline_for_extraction noextract
+let q_sel (#et : Type0) {| scalar et |} (cond : bool) (v : et) : et =
+  if cond then v else zero
+
+(* The all-zero output tile: the initial value [Osh] is filled with
+   (flash_attn_fa1.cu, line 114). *)
+unfold
+let ozero (#et : Type0) {| scalar et |} (rows cols : nat) : chest2 et rows cols
+  = const (rows @| cols @| INil) zero
+
+unfold
+let strided_cells2_v
+  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
+  (a : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (e : chest2 et rows cols) : slprop
+= forall+ (ij : stride_index2 rows cols nthr tid).
+    Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R (acc2 e ij._1 ij._2)
+
 unfold
 let strided_cells2
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
@@ -84,11 +215,31 @@ let strided_cells2
 = forall+ (ij : stride_index2 rows cols nthr tid).
     exists* (v : et). Cell a (idx2 ij._1 ij._2) |-> Frac 1.0R v
 
+ghost
+fn lower_32to16 (p : natlt 16 -> slprop)
+  requires forall+ (i:natlt BW.warp_size). when__ (i < 16) (fun _ -> p i)
+  ensures  forall+ (i:natlt 16). p i
+{
+  forevery_refine_split (fun (i:natlt BW.warp_size) -> when__ (i < 16) (fun _ -> p i))
+    (fun (i:natlt BW.warp_size) -> i < 16);
+  drop_ (forall+ (i:natlt BW.warp_size { ~(i < 16) }). when__ (i < 16) (fun _ -> p i));
+  forevery_ext #(i:natlt BW.warp_size { i < 16 })
+    (fun (i:natlt BW.warp_size { i < 16 }) -> when__ (i < 16) (fun _ -> p i))
+    (fun (i:natlt BW.warp_size { i < 16 }) -> p i);
+  forevery_natlt_restrict BW.warp_size p;
+}
+
+unfold
+let cell_full_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (i : natlt len) (v : et) : slprop
+= Cell a (idx1 i) |-> Frac 1.0R v
+
 unfold
 let cell_full
   (#et : Type0) (#len : nat) (#l : layout1 len)
   (a : array1 et l) (i : natlt len) : slprop
-= exists* (v : et). Cell a (idx1 i) |-> Frac 1.0R v
+= exists* (v : et). cell_full_v a i v
 
 let row_layout
   (#et : Type0) (#rows #cols : erased nat) (#l : layout2 rows cols)
@@ -106,12 +257,24 @@ let clamp_nat_lt (n : pos) (x : nat) : natlt n =
   if x < n then x else 0
 
 unfold
+let row_subtile_v
+  (#et:Type0) (#l : layout2 16 16)
+  (shA : array2 et l)
+  (i : natlt 16) (r : chest2 et 1 16) : slprop
+= array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
+
+unfold
 let row_subtile
   (#et:Type0) (#l : layout2 16 16)
   (shA : array2 et l)
   (i : natlt 16) : slprop
-= exists* (r : chest2 et 1 16).
-    array2_subtile shA 1 16 i 0 |-> Frac 1.0R r
+= exists* (r : chest2 et 1 16). row_subtile_v shA i r
+
+(* The single row of a [1 x 16] subtile, as the [chest1] the per-lane
+   online-softmax update sees. *)
+unfold
+let subtile_row (#et : Type0) (r : chest2 et 1 16) : GTot (chest1 et 16)
+= tr_val (EM.ematrix_row r 0)
 
 inline_for_extraction noextract
 let clamp_lt (sk : szp) (x : sz) : szlt sk =
@@ -123,14 +286,28 @@ let out_stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 
     (ij._1 * cols + ij._2) % nthr == tid}
 
 unfold
+let cell_full_n_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (shA : array1 et l) (i : natlt len) (v : et) : slprop
+= tensor_pts_to_cell shA (idx1 i) v
+
+unfold
 let cell_full_n
   (#et : Type0) (#len : nat) (#l : layout1 len)
   (shA : array1 et l) (i : natlt len) : slprop
-= exists* (v : et). tensor_pts_to_cell shA (idx1 i) v
+= exists* (v : et). cell_full_n_v shA i v
 
 inline_for_extraction noextract
 let lane_active (bm : szp) (lane : szlt warp_size) : bool =
   lane <^ bm
+
+let ml_cells_v
+  (#et : Type0) (bm : szp)
+  (#lm #ll : layout1 bm)
+  (shm : array1 et lm) (shl : array1 et ll)
+  (lane : szlt warp_size) (vm vl : et) : slprop
+= cell_full_n_v shm (SZ.v (clamp_lt bm lane)) vm **
+  cell_full_n_v shl (SZ.v (clamp_lt bm lane)) vl
 
 let ml_cells
   (#et : Type0) (bm : szp)
@@ -155,6 +332,19 @@ let combine_cells
        (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v (clamp_lt bm lane))) e)
   ** cell_full_n shgm (SZ.v (clamp_lt bm lane))
   ** cell_full_n shgl (SZ.v (clamp_lt bm lane))
+
+(* [combine_cells] with the values warp 0 computes made explicit. *)
+let combine_cells_v
+  (#et : Type0) (nw bm : szp)
+  (#lgm #lgl : layout1 bm)
+  (shscale : array2 et (l2_row_major nw bm))
+  (shgm : array1 et lgm) (shgl : array1 et lgl)
+  (lane : szlt warp_size)
+  (escale : chest2 et (SZ.v nw) 1) (vgm vgl : et) : slprop
+= tensor_pts_to
+    (array2_stride_subtile shscale 1 (SZ.v bm) 0 (SZ.v (clamp_lt bm lane))) escale
+  ** cell_full_n_v shgm (SZ.v (clamp_lt bm lane)) vgm
+  ** cell_full_n_v shgl (SZ.v (clamp_lt bm lane)) vgl
 
 let out_qh
   (hq sq : pos) (kvh : nat) (group : pos) (r : nat) : natlt hq
@@ -187,6 +377,38 @@ let out_store_cells
     when_ (r0 + ij._1 < SZ.v rows)
       (out_cell b hq sq d gout bi kvh group (r0 + ij._1) ij._2)
 
+let out_cell_v
+  (#et : Type0) (b hq sq d : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et lout)
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r : nat) (dd : natlt (SZ.v d)) (v : et) : slprop
+= tensor_pts_to_cell gout
+    (idx4 bi
+      (out_qh (SZ.v hq) (SZ.v sq) kvh group r)
+      (out_qpos (SZ.v sq) r)
+      dd)
+    v
+
+(* The epilogue's output cells, pinned to the values the combine publishes. *)
+let out_store_cells_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw b hq sq bm d rows : szp)
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) (SZ.v bm))
+  (eO : chest2 et_acc (SZ.v nw * SZ.v bm) (SZ.v d))
+  (egl : chest1 et_acc (SZ.v bm))
+  (bi : natlt (SZ.v b)) (kvh : nat) (group : pos)
+  (r0 : nat) (lane : natlt BW.warp_size) : slprop
+= forall+ (ij : out_stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size lane).
+    when_ (r0 + ij._1 < SZ.v rows)
+      (out_cell_v b hq sq d gout bi kvh group (r0 + ij._1) ij._2
+        (FC.fcast (SF.out_val escale eO egl ij._1 ij._2)))
+
 unfold let flash_nwarps : nat = 4
 
 unfold
@@ -197,6 +419,14 @@ let flash_scale_tile
   exists* (e : chest2 et (SZ.v nw) 1).
     tensor_pts_to
       (array2_stride_subtile shscale 1 16 0 lane) e
+
+let flash_scale_tile_v
+  (#et : Type0) (nw : szp)
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (e : chest2 et (SZ.v nw) 1)
+  (lane : natlt 16) : slprop =
+  tensor_pts_to
+    (array2_stride_subtile shscale 1 16 0 lane) e
 
 inline_for_extraction noextract
 let flash_shmems
@@ -580,6 +810,173 @@ let flash_block_output
       (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
       lane
 
+(* [flash_block_output] with each written cell pinned to the value the
+   block's epilogue publishes. *)
+let flash_block_output_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw : szp)
+  (b hq hkv group sq rows tiles d : szp {
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lout : layout4 b hq sq d)
+  (gout : array4 et_ab lout)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : slprop =
+  forall+ (lane : natlt BW.warp_size).
+    out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
+      (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+      (SZ.v group)
+      (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+      lane
+
+unfold
+let flash_eQsh
+  (#et_ab : Type0) {| scalar et_ab |}
+  (d : szp) (b hq hkv group sq rows tiles : szp)
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_ab 16 (SZ.v d))
+= SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+(* The K matrix the block sweeps: the [(bi, kvh)] slice of the global K. *)
+let flash_eKkv
+  (#et_ab : Type0)
+  (d : szp) (b hkv sk tiles : szp)
+  (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_ab (SZ.v sk) (SZ.v d))
+= chest_slice 0 (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (chest_slice 0 (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid) eK)
+
+(* Number of key tiles the block sweeps. *)
+let flash_nkt
+  (b hkv sq sk rows tiles : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (causal : bool)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles)) : GTot nat
+= SF.key_tiles 16 16 (SZ.v sq) (SZ.v sk) (SZ.v rows)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16) causal
+
+
+(* The per-warp row maxima and denominators published through block barrier 1. *)
+let flash_eM
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_acc (SZ.v nw) 16)
+= flash_eM_at nw d b hq sq rows sk eQ
+    (flash_eKkv d b hkv sk tiles eK bid) emask has_mask causal scale
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (SZ.v group)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+let flash_eL
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_acc (SZ.v nw) 16)
+= flash_eL_at nw d b hq sq rows sk eQ
+    (flash_eKkv d b hkv sk tiles eK bid) emask has_mask causal scale
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (SZ.v group)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+let flash_escale
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_acc (SZ.v nw) 16)
+= flash_escale_at nw d b hq sq rows sk eQ
+    (flash_eKkv d b hkv sk tiles eK bid) emask has_mask causal scale
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (SZ.v group)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+let flash_egl
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest1 et_acc 16)
+= flash_egl_at nw d b hq sq rows sk eQ
+    (flash_eKkv d b hkv sk tiles eK bid) emask has_mask causal scale
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (SZ.v group)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
+let flash_eO
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  : GTot (chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+= flash_eO_at nw d b hq sq rows sk eQ
+    (flash_eKkv d b hkv sk tiles eK bid)
+    (flash_eKkv d b hkv sk tiles eV bid) emask has_mask causal scale
+    (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
+    (SZ.v group)
+    (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16)
+
 unfold
 let flash_views_live
   (#et_ab #et_acc : Type0) (#nw #d : pos)
@@ -645,7 +1042,7 @@ let flash_w0_bij (nw : szp)
 }
 
 unfold
-let b0_pre
+let b0_raw
   (#et_q #et_o : Type0) (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
@@ -657,21 +1054,65 @@ let b0_pre
   strided_cells2 (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
 
 unfold
-let b0_post
-  (#et_q #et_o : Type0) (nw d : szp)
+let b0_pre
+  (#et_q #et_o : Type0) {| scalar et_o |} (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_q 16 (SZ.v d))
   (shO : array2 et_o (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (tid : natlt (block_threads nw)) : slprop
 = let w = thread_w nw tid in
   let lane = thread_lane nw tid in
-  (exists* (e : chest2 et_q 16 (SZ.v d)).
-     shQ |-> Frac (1.0R /. (block_threads nw)) e)
-  ** (exists* (o : chest2 et_o (16 / warp_row_span) (SZ.v d / 16)).
-        array2_stride_subtile
-          (array2_subtile shO 16 (SZ.v d <: pos) w 0)
-          warp_row_span 16 (lane / 16) (lane % 16)
-          |-> Frac 1.0R o)
+  strided_cells2_v shQ (block_threads nw) tid eQsh **
+  strided_cells2_v (array2_subtile shO 16 (SZ.v d <: pos) w 0) BW.warp_size lane
+    (ozero 16 (SZ.v d))
+
+unfold
+let b0_post
+  (#et_q #et_o : Type0) {| scalar et_o |} (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (shQ : array2 et_q (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_q 16 (SZ.v d))
+  (shO : array2 et_o (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (tid : natlt (block_threads nw)) : slprop
+= let w = thread_w nw tid in
+  let lane = thread_lane nw tid in
+  (shQ |-> Frac (1.0R /. (block_threads nw)) eQsh)
+  ** (array2_stride_subtile
+        (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+        warp_row_span 16 (lane / 16) (lane % 16)
+        |-> Frac 1.0R (ematrix_stride_subtile (ozero #et_o 16 (SZ.v d))
+                         warp_row_span 16 (lane / 16) (lane % 16)))
+
+unfold
+let b1_pre_one_v
+  (#et : Type0) (nw : szp)
+  (#lM : layout2 (SZ.v nw) 16)
+  (shM : array2 et lM) (e : chest2 et (SZ.v nw) 16)
+  (tid : natlt (block_threads nw)) : slprop
+= let w = thread_w nw tid in
+  let lane = thread_lane nw tid in
+  when__ (lane < 16) (fun _ ->
+    cell_full_v (row shM w) (lane <: natlt 16) (acc2 e w lane))
+
+unfold
+let b1_pre_v
+  (#et : Type0) (nw : szp)
+  (#lM #lL : layout2 (SZ.v nw) 16)
+  (shM : array2 et lM) (shL : array2 et lL)
+  (eM eL : chest2 et (SZ.v nw) 16)
+  (tid : natlt (block_threads nw)) : slprop
+= b1_pre_one_v nw shM eM tid ** b1_pre_one_v nw shL eL tid
+
+unfold
+let b1_post_v
+  (#et : Type0) (nw : szp)
+  (#lM #lL : layout2 (SZ.v nw) 16)
+  (shM : array2 et lM) (shL : array2 et lL)
+  (eM eL : chest2 et (SZ.v nw) 16)
+  (_tid : natlt (block_threads nw)) : slprop
+= (shM |-> Frac (1.0R /. (block_threads nw)) eM)
+  ** (shL |-> Frac (1.0R /. (block_threads nw)) eL)
 
 unfold
 let b1_pre_one
@@ -761,51 +1202,126 @@ let b2_post
   ** (exists* (e : chest1 et 16).
      shgl |-> Frac (1.0R /. (block_threads nw)) e)
 
+unfold
+let b2_o_pre_v
+  (#et : Type0) (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (eO : chest2 et (SZ.v nw * 16) (SZ.v d))
+  (tid : natlt (block_threads nw)) : slprop
+= let w = thread_w nw tid in
+  let lane = thread_lane nw tid in
+  array2_stride_subtile
+    (array2_subtile shO 16 (SZ.v d <: pos) w 0)
+    warp_row_span 16 (lane / 16) (lane % 16)
+    |-> Frac 1.0R
+          (ematrix_stride_subtile
+            (ematrix_subtile eO 16 (SZ.v d <: pos) w 0)
+            warp_row_span 16 (lane / 16) (lane % 16))
+
+unfold
+let b2_scale_pre_v
+  (#et : Type0) (nw : szp)
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shgl : array1 et (l1_forward 16))
+  (escale : chest2 et (SZ.v nw) 16) (egl : chest1 et 16)
+  (tid : natlt (block_threads nw)) : slprop
+= let lane = thread_lane nw tid in
+  if_ (b2_active nw tid)
+    (tensor_pts_to
+       (array2_stride_subtile shscale 1 16 0 (clamp_nat_lt 16 lane))
+       (ematrix_stride_subtile escale 1 16 0 (clamp_nat_lt 16 lane))
+     ** cell_full_v shgl (clamp_nat_lt 16 lane)
+          (acc1 egl (clamp_nat_lt 16 lane)))
+
+unfold
+let b2_pre_v
+  (#et : Type0) (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (shgl : array1 et (l1_forward 16))
+  (escale : chest2 et (SZ.v nw) 16)
+  (eO : chest2 et (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et 16)
+  (tid : natlt (block_threads nw)) : slprop
+= b2_o_pre_v nw d shO eO tid ** b2_scale_pre_v nw shscale shgl escale egl tid
+
+unfold
+let b2_post_v
+  (#et : Type0) (nw d : szp)
+  (#_ : squash (16 /?+ SZ.v d))
+  (shscale : array2 et (l2_row_major (SZ.v nw) 16))
+  (shO : array2 et (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (shgl : array1 et (l1_forward 16))
+  (escale : chest2 et (SZ.v nw) 16)
+  (eO : chest2 et (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et 16)
+  (_tid : natlt (block_threads nw)) : slprop
+= (shscale |-> Frac (1.0R /. (block_threads nw)) escale)
+  ** (shO |-> Frac (1.0R /. (block_threads nw)) eO)
+  ** (shgl |-> Frac (1.0R /. (block_threads nw)) egl)
+
 let barrier_rin
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   : B.barrier_side (block_threads nw)
 = fun it tid ->
-    if it = 0 then b0_pre nw d shQ shO tid
-    else if it = 1 then b1_pre nw shM shL tid
-    else if it = 2 then b2_pre nw d shscale shO shgl tid
+    if it = 0 then b0_pre nw d shQ eQsh shO tid
+    else if it = 1 then b1_pre_v nw shM shL eM eL tid
+    else if it = 2 then b2_pre_v nw d shscale shO shgl escale eO egl tid
     else emp
 
 let barrier_rout
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   : B.barrier_side (block_threads nw)
 = fun it tid ->
-    if it = 0 then b0_post nw d shQ shO tid
-    else if it = 1 then b1_post nw shM shL tid
-    else if it = 2 then b2_post nw d shscale shO shgl tid
+    if it = 0 then b0_post nw d shQ eQsh shO tid
+    else if it = 1 then b1_post_v nw shM shL eM eL tid
+    else if it = 2 then b2_post_v nw d shscale shO shgl escale eO egl tid
     else emp
 
 let barrier_contract
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
   (nw d : szp)
   (#_ : squash (16 /?+ SZ.v d))
   (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   : B.contract (block_threads nw)
 = {
-  rin = barrier_rin nw d shQ shM shL shscale shO shgl;
-  rout = barrier_rout nw d shQ shM shL shscale shO shgl;
+  rin = barrier_rin nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl;
+  rout = barrier_rout nw d shQ eQsh shM shL eM eL shscale shO shgl escale eO egl;
 }
 
 let barrier_count (_nw : szp) : GTot nat = 3
@@ -861,6 +1377,9 @@ let flash_thread_pre
 unfold
 let flash_thread_post
   (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nw nthr : szp { SZ.v nthr == block_threads nw })
   (b hq hkv group sq rows tiles sk : szp {
     SZ.v hq == SZ.v hkv * SZ.v group /\
@@ -882,6 +1401,9 @@ let flash_thread_post
   (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
   (w : natlt (SZ.v nw))
   (lane : natlt BW.warp_size) : slprop =
@@ -902,7 +1424,7 @@ let flash_thread_post
     (flash_warp_s v w) (flash_warp_p v w)
     (flash_warp_pv v w) (flash_warp_cw v w) lane **
   when_ (w = 0)
-    (out_store_cells b hq sq 16sz d rows gout
+    (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
       (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid)
       (SZ.v group)
@@ -940,6 +1462,44 @@ let flash_block_state
   (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
   (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
   flash_block_output b hq hkv group sq rows tiles d gout
+    (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+
+(* [flash_block_state] with the block's output cells pinned to the values
+   its epilogue publishes. *)
+let flash_block_state_v
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
+  (nw nblk : szp)
+  (b hq hkv group sq rows tiles sk d : szp {
+    SZ.v nblk == SZ.v b * SZ.v hkv * SZ.v tiles /\
+    SZ.v hq == SZ.v hkv * SZ.v group /\
+    SZ.v rows == SZ.v group * SZ.v sq /\
+    SZ.v rows <= SZ.v tiles * 16 /\
+    SZ.fits (SZ.v tiles * 16) })
+  (#lgQ : layout4 b hq sq d)
+  (#lgK #lgV : layout4 b hkv sk d)
+  (#lgmask : TRO.vlayout4 b hq sq sk)
+  (#lout : layout4 b hq sq d)
+  (gQ : array4 et_ab lgQ)
+  (gK : array4 et_ab lgK)
+  (gV : array4 et_ab lgV)
+  (gmask : TRO.roarray4 et_ab lgmask)
+  (gout : array4 et_ab lout)
+  (#fQ #fK #fV #fmask : perm)
+  (#eQ : chest (b @| hq @| sq @| d @| INil) et_ab)
+  (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
+  (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (bid : natlt (SZ.v nblk)) : slprop =
+  (gQ |-> Frac (fQ /. (SZ.v nblk)) eQ) **
+  (gK |-> Frac (fK /. (SZ.v nblk)) eK) **
+  (gV |-> Frac (fV /. (SZ.v nblk)) eV) **
+  (gmask |-> Frac (fmask /. (SZ.v nblk)) emask) **
+  flash_block_output_v nw b hq hkv group sq rows tiles d gout escale eO egl
     (bid <: natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
 
 inline_for_extraction noextract
@@ -991,7 +1551,7 @@ let sdpa_flash_jt_frame
 
 unfold
 let sdpa_flash_pre
-  (#et_ab #et_acc : Type0)
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1016,9 +1576,13 @@ let sdpa_flash_pre
   (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgm shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (tid : szlt nthr)
   (bi : szlt b) (r0 : sz) (group : szp) (kvh : sz)
   (#fQ #fKg #fVg #fmask : perm)
@@ -1029,10 +1593,12 @@ let sdpa_flash_pre
   : slprop
 = gpu **
   thread_id (block_threads nw) tid **
-  B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+  B.barrier_tok (barrier_contract nw d shQ
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))
+    shM shL eM eL shscale shO shgl escale eO egl) **
   B.barrier_state 0 **
   (gQ |-> Frac fQ eQ) **
-  b0_pre nw d shQ shO tid **
+  b0_raw nw d shQ shO tid **
   if_ (lane_active 16sz (sdpa_flash_lane nw nthr tid))
     (ml_cells 16sz
       (row shM (SZ.v (sdpa_flash_w nw nthr tid)))
@@ -1052,6 +1618,9 @@ let sdpa_flash_pre
 unfold
 let sdpa_flash_post
   (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_acc et_ab |}
   (nw nthr : szp)
   (d : szp { 16 /?+ SZ.v d })
   (sk : szp { SZ.v nthr == block_threads nw })
@@ -1076,9 +1645,13 @@ let sdpa_flash_post
   (shPVc : array2 et_acc lPVc)
   (shcw : array1 et_acc lcw)
   (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
   (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
   (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
   (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
   (tid : szlt nthr)
   (bi : szlt b) (r0 : sz) (group : szp) (kvh : sz)
   (#fQ #fKg #fVg #fmask : perm)
@@ -1089,19 +1662,21 @@ let sdpa_flash_post
   : slprop
 = gpu **
   thread_id (block_threads nw) tid **
-  B.barrier_tok (barrier_contract nw d shQ shM shL shscale shO shgl) **
+  B.barrier_tok (barrier_contract nw d shQ
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))
+    shM shL eM eL shscale shO shgl escale eO egl) **
   B.barrier_state 3 **
   (gQ |-> Frac fQ eQ) **
-  (exists* (e : chest2 et_ab 16 (SZ.v d)).
-    shQ |-> Frac (1.0R /. (block_threads nw)) e) **
-  b1_post nw shM shL tid **
-  b2_post nw d shscale shO shgl tid **
+  (shQ |-> Frac (1.0R /. (block_threads nw))
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))) **
+  b1_post_v nw shM shL eM eL tid **
+  b2_post_v nw d shscale shO shgl escale eO egl tid **
   sdpa_flash_jt_frame d sk b hq sq
     shK shV shS shP shPVc shcw gK gV gmask
     #fKg #fVg #fmask #eKg #eVg #emask
     (SZ.v (sdpa_flash_lane nw nthr tid))
   ** if_ (sdpa_flash_w nw nthr tid = 0sz)
-    (out_store_cells b hq sq 16sz d rows gout
+    (out_store_cells_v nw b hq sq 16sz d rows gout escale eO egl
       bi (SZ.v kvh) (SZ.v group) (SZ.v r0)
       (SZ.v (sdpa_flash_lane nw nthr tid)))
 
@@ -1153,3 +1728,172 @@ instance cvl4_bcast_keys (d0 d1 d2 d3 : nat {
     cimap = (fun (i : conc (d0 @| d1 @| d2 @| d3 @| INil)) ->
                let (_, (_, (_, (l, ())))) = i in l);
   }
+
+(* [mextract_row] hands out the row as an [lseq]; writing it back through the
+   trade and reading it out again is the identity. *)
+let subtile_row_upd (#et : Type0) (r : chest2 et 1 16) (s : chest1 et 16)
+  : Lemma (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s)) == s)
+  = assert (equal (subtile_row (EM.ematrix_upd_row r 0 (chest1_to_seq s))) s)
+
+(* A [1 x 16] subtile is determined by its single row, so knowing that row is
+   row [i] of some [16 x 16] tile pins the subtile itself. *)
+let row_subtile_det
+  (#et : Type0) (r : chest2 et 1 16) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (requires forall (j : natlt 16). acc1 (subtile_row r) j == acc2 e i j)
+          (ensures r == ematrix_subtile e 1 16 i 0)
+  = assert (equal r (ematrix_subtile e 1 16 i 0))
+
+(* Reading a subtile's row back out of the tile it came from. *)
+let subtile_row_sub
+  (#et : Type0) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (subtile_row (ematrix_subtile e 1 16 i 0) == SF.erow e i)
+  = assert (equal (subtile_row (ematrix_subtile e 1 16 i 0)) (SF.erow e i))
+
+let row_subtile_erow
+  (#et : Type0) (r : chest2 et 1 16) (e : chest2 et 16 16) (i : natlt 16)
+  : Lemma (requires subtile_row r == SF.erow e i)
+          (ensures r == ematrix_subtile e 1 16 i 0)
+  = assert (forall (j : natlt 16). acc1 (SF.erow e i) j == acc2 e i j);
+    row_subtile_det r e i
+
+(* Total lookup into a 16-vector: out-of-range indices are clamped so the
+   whole-warp descriptions can be written against an unrefined lane index. *)
+unfold
+let acc16 (#et : Type0) (e : chest1 et 16) (i : nat) : GTot et
+= acc1 e (if i < 16 then i else 0)
+
+let from_tiles_row16 (#et : Type0) (e : chest2 et 16 16)
+  : Lemma (ematrix_from_tiles 1 16
+             (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc) == e)
+  = assert (equal (ematrix_from_tiles 1 16
+                     (fun (tr : natlt 16) (tc : natlt 1) -> ematrix_subtile e 1 16 tr tc)) e)
+
+(* The value the kernel leaves in the logical output cell [(bi, kvh, r, dd)]:
+   the epilogue of the row tile [r / 16] owned by block [(bi, kvh, r / 16)]. *)
+let flash_out_vfun
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (y : natlt (SZ.v b) & natlt (SZ.v hkv) &
+       natlt (SZ.v rows) & natlt (SZ.v d))
+  : GTot et_ab
+= FC.fcast (SF.out_val
+    (flash_escale_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (flash_eO_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eV))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (flash_egl_at nw d b hq sq rows sk eQ
+      (chest_slice 0 y._2 (chest_slice 0 y._1 eK))
+      emask has_mask causal scale
+      y._1 y._2 (SZ.v group) (y._3 / 16 * 16))
+    (y._3 % 16) y._4)
+
+let flash_out_vfun_bid
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+  (i : natlt 16) (dd : natlt (SZ.v d))
+  (_ : squash (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+               + i < SZ.v rows))
+  : Lemma
+      (flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+         emask has_mask causal scale
+         (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+          flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+          clamp_nat_lt (SZ.v rows)
+            (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+          dd)
+       == FC.fcast (SF.out_val
+            (flash_escale nw d b hq hkv group sq rows tiles sk
+               eQ eK emask has_mask causal scale bid)
+            (flash_eO nw d b hq hkv group sq rows tiles sk
+               eQ eK eV emask has_mask causal scale bid)
+            (flash_egl nw d b hq hkv group sq rows tiles sk
+               eQ eK emask has_mask causal scale bid)
+            i dd))
+= let rt = flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid in
+  FStar.Math.Lemmas.lemma_div_plus i rt 16;
+  FStar.Math.Lemmas.lemma_mod_plus i rt 16;
+  FStar.Math.Lemmas.small_div i 16;
+  FStar.Math.Lemmas.small_mod i 16
+
+let flash_out_vfun_all
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| FC.float_cast et_ab et_acc |} {| FC.float_cast et_acc et_ab |}
+  (nw : szp) (d : szp { 16 /?+ SZ.v d })
+  (b hq hkv group sq rows tiles sk : szp)
+  (#_ : squash (SZ.v sq <= SZ.v sk))
+  (eQ : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v d @| INil) et_ab)
+  (eK eV : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
+  (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
+  (has_mask causal : bool) (scale : et_acc)
+  : Lemma
+      (forall (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+         (i : natlt 16) (dd : natlt (SZ.v d)).
+        flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+          + i < SZ.v rows ==>
+        flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+          emask has_mask causal scale
+          (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+           flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+           clamp_nat_lt (SZ.v rows)
+             (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+           dd)
+        == FC.fcast (SF.out_val
+             (flash_escale nw d b hq hkv group sq rows tiles sk
+                eQ eK emask has_mask causal scale bid)
+             (flash_eO nw d b hq hkv group sq rows tiles sk
+                eQ eK eV emask has_mask causal scale bid)
+             (flash_egl nw d b hq hkv group sq rows tiles sk
+                eQ eK emask has_mask causal scale bid)
+             i dd))
+= let aux (bid : natlt (SZ.v b * SZ.v hkv * SZ.v tiles))
+          (i : natlt 16) (dd : natlt (SZ.v d))
+    : Lemma
+        (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+           + i < SZ.v rows ==>
+         flash_out_vfun nw d b hq hkv group sq rows sk eQ eK eV
+           emask has_mask causal scale
+           (flash_bid_bi (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            flash_bid_kvh (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid,
+            clamp_nat_lt (SZ.v rows)
+              (flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16 + i),
+            dd)
+         == FC.fcast (SF.out_val
+              (flash_escale nw d b hq hkv group sq rows tiles sk
+                 eQ eK emask has_mask causal scale bid)
+              (flash_eO nw d b hq hkv group sq rows tiles sk
+                 eQ eK eV emask has_mask causal scale bid)
+              (flash_egl nw d b hq hkv group sq rows tiles sk
+                 eQ eK emask has_mask causal scale bid)
+              i dd))
+    = if flash_bid_rt (SZ.v b) (SZ.v hkv) (SZ.v tiles) bid * 16
+           + i < SZ.v rows
+      then flash_out_vfun_bid nw d b hq hkv group sq rows tiles sk
+             eQ eK eV emask has_mask causal scale bid i dd ()
+  in
+  FStar.Classical.forall_intro_3 aux

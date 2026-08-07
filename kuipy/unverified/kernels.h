@@ -37,3 +37,15 @@ void flash_attn_fa2_launch(
     int64_t ms_b, int64_t ms_h, int64_t ms_q, int64_t ms_k,
     bool force_decode_kernel,
     cudaStream_t stream);
+// ---------------------------------------------------------------------------
+// Templated tensor-core GEMM (gemm_tc.cuh / gemm_tc.cu). Tilings are registered
+// in a table; `config` indexes it and `gemm_tc_config_info` publishes each
+// entry as {bm, bn, bk, wm, wn, stages, skew, warps, smem_bytes} so a caller
+// can tell which tilings a shape admits.
+// ---------------------------------------------------------------------------
+int gemm_tc_num_configs();
+void gemm_tc_config_info(int index, int* out /* [9] */);
+void gemm_tc_launch(bool bf16, int config, const void* A, const void* B,
+                    const void* C, void* D, float* workspace, int M, int N,
+                    int K, float alpha, float beta, int splits, int group,
+                    int epi, cudaStream_t stream);

@@ -1,9 +1,3 @@
-// N.B: Try to compile this file with g++/clang instead of nvcc. At one point in time
-// compiling torch/extension.h with nvcc was super slow, and my impression is it should be avoidable
-// because we aren't launching any kernels here so we don't need the syntactic features of CUDA. If 
-// there is truly a need to compile this file with nvcc, then go ahead and rename it to wrapper.cu. 
-// Either way, once you figure it out, remove this comment.
-
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -120,6 +114,75 @@ static torch::Tensor gemm_bcast_bias_epilogue2(torch::Tensor input, torch::Tenso
                                      mptr<half>(Bc), mptr<half>(bias),
                                      mptr<half>(out),
                                      c10::cuda::getCurrentCUDAStream().stream());
+    C10_CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+// The templated tensor-core GEMM is the only kernel here whose tiling is picked
+// per call, so it publishes its instantiation table and takes the chosen entry
+// as an argument; kuipy's autotuner does the picking.
+static std::vector<std::vector<int64_t>> gemm_tc_configs() {
+    std::vector<std::vector<int64_t>> out;
+    for (int i = 0; i < gemm_tc_num_configs(); i++) {
+        int info[9];
+        gemm_tc_config_info(i, info);
+        out.emplace_back(info, info + 9);
+    }
+    return out;
+}
+
+// D = alpha*(mat1@mat2) + beta*input, out of place. `input` may be absent (no
+// epilogue term), 2-D (M,N) or a length-N vector broadcast over the rows.
+static torch::Tensor gemm_tc(c10::optional<torch::Tensor> input, torch::Tensor A,
+                             torch::Tensor B, double beta, double alpha,
+                             int64_t config, int64_t splits, int64_t group) {
+    const auto dtype = A.scalar_type();
+    TORCH_CHECK(dtype == torch::kFloat16 || dtype == torch::kBFloat16,
+                "gemm_tc takes fp16 or bf16 operands");
+    TORCH_CHECK(B.scalar_type() == dtype, "mat1/mat2 dtype must match");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "mat1/mat2 must be 2D");
+    TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "mat1/mat2 must be contiguous");
+    TORCH_CHECK(A.size(1) == B.size(0), "mat1.size(1) must equal mat2.size(0)");
+    TORCH_CHECK(config >= 0 && config < gemm_tc_num_configs(), "no such gemm_tc config");
+    TORCH_CHECK(splits >= 1 && group >= 1, "splits/group must be positive");
+
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+    int info[9];
+    gemm_tc_config_info((int)config, info);
+    TORCH_CHECK(M % info[0] == 0 && N % info[1] == 0 && K % info[2] == 0,
+                "config ", config, " needs M%", info[0], "==0, N%", info[1],
+                "==0, K%", info[2], "==0");
+
+    int epi = 0;
+    const void* cp = nullptr;
+    if (input.has_value() && input->defined()) {
+        const auto& c = *input;
+        TORCH_CHECK(c.scalar_type() == dtype, "input dtype must match mat1/mat2");
+        TORCH_CHECK(c.is_contiguous(), "input must be contiguous");
+        if (c.dim() == 2) {
+            TORCH_CHECK(c.size(0) == M && c.size(1) == N, "input must be (M, N)");
+            epi = 1;
+        } else {
+            TORCH_CHECK(c.dim() == 1 && c.size(0) == N,
+                        "input must be (M, N) or a length-N row vector");
+            epi = 2;
+        }
+        cp = c.data_ptr();
+    }
+
+    auto out = torch::empty({M, N}, A.options());
+    torch::Tensor ws;
+    float* wsp = nullptr;
+    if (splits > 1) {
+        ws = torch::empty({splits, M, N}, A.options().dtype(torch::kFloat32));
+        wsp = ws.data_ptr<float>();
+    }
+
+    at::cuda::CUDAGuard g(A.device());
+    gemm_tc_launch(dtype == torch::kBFloat16, (int)config, A.data_ptr(), B.data_ptr(),
+                   cp, out.data_ptr(), wsp, (int)M, (int)N, (int)K, (float)alpha,
+                   (float)beta, (int)splits, (int)group, epi,
+                   c10::cuda::getCurrentCUDAStream().stream());
     C10_CUDA_CHECK(cudaGetLastError());
     return out;
 }
@@ -267,6 +330,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "out-of-place epilogue makes the broadcast a one-line change.",
           py::arg("input"), py::arg("mat1"), py::arg("mat2"),
           py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0);
+    m.def("gemm_tc_configs", &gemm_tc_configs,
+          "The gemm_tc tiling table, one {bm, bn, bk, wm, wn, stages, skew, "
+          "warps, smem_bytes} row per config index.");
+    m.def("gemm_tc", &gemm_tc,
+          "Templated tensor-core GEMM: D = alpha*(mat1@mat2) + beta*input, out "
+          "of place, fp16/bf16 in and out with fp32 accumulation. `input` may "
+          "be None, (M, N), or a length-N vector broadcast over the rows. "
+          "`config` indexes gemm_tc_configs(); `splits` is the split-K factor "
+          "and `group` the L2 block-swizzle width.",
+          py::arg("input"), py::arg("mat1"), py::arg("mat2"),
+          py::kw_only(), py::arg("beta") = 1.0, py::arg("alpha") = 1.0,
+          py::arg("config") = 0, py::arg("splits") = 1, py::arg("group") = 8);
     m.def("flash_attn_fa1", &flash_attn_fa1,
           "semi-fast FlashAttention using tensor cores.",
           py::arg("query"), py::arg("key"), py::arg("value"),

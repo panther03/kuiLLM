@@ -150,6 +150,7 @@ class TuneStore:
             entry["spec"]["module"]
             for entry in self._read()["entries"].values()
             if isinstance(entry, dict) and isinstance(entry.get("spec"), dict)
+            and entry["spec"].get("module") is not None
         }
 
 
@@ -214,12 +215,16 @@ def _benchmark(spec, run_candidate, args, kwargs, device):
 
 
 def _cleanup(candidates, winner, store):
+    # Specs without a "module" name a kernel that was built ahead of time (the
+    # unverified table-driven ones), so there is no losing artifact to remove.
     referenced = store.referenced_modules()
     with _registry_lock:
-        referenced.update(spec["module"] for spec in _selected.values())
+        referenced.update(spec["module"] for spec in _selected.values()
+                          if spec.get("module") is not None)
     for spec in candidates:
-        module = spec["module"]
-        if module != winner["module"] and module not in referenced:
+        module = spec.get("module")
+        if module is not None and module != winner.get("module") \
+                and module not in referenced:
             try:
                 _compile.delete_kernel(module)
             except OSError as exc:

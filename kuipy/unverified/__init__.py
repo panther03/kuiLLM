@@ -20,6 +20,9 @@ it is doing.
 The extension is built on first attribute access, so ``kuipy.unverified.<kernel>``
 is the kernel's Python entry point. Kernels mirror the signature of the ATen op
 they implement, so they are interchangeable with ``kuipy.run(op)`` in benchmarks.
+A kernel whose entry point needs Python logic -- ``gemm_tc`` picks its tiling by
+autotuning -- gets a ``<kernel>_tuned.py`` module beside the sources, and
+``__getattr__`` below exports that in place of the raw binding.
 """
 from pathlib import Path
 
@@ -28,6 +31,7 @@ from .. import config as C
 _HERE = Path(__file__).resolve().parent
 _SOURCES = ["wrapper.cpp", "gemm_hacky_epilogue.cu", "gemm_pipe.cu",
             "gemm_bcast_bias_epilogue.cu", "gemm_bcast_bias_epilogue2.cu",
+            "gemm_tc.cu",
             "flash_attn_fa1.cu", "flash_attn_fa2.cu",
             "flash_attn_manual_extract.cu"]
 
@@ -55,4 +59,11 @@ def module():
 def __getattr__(name):
     if name.startswith("__"):   # don't build for import-machinery lookups
         raise AttributeError(name)
-    return getattr(module(), name)
+    # gemm_tc's tiling is a per-call choice, so the exported entry point is the
+    # autotuned wrapper rather than the raw binding (still at module().gemm_tc).
+    if name == "gemm_tc":
+        from .gemm_tc_tuned import gemm_tc as value
+    else:
+        value = getattr(module(), name)
+    globals()[name] = value   # skip __getattr__ on every later access
+    return value
