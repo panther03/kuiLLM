@@ -159,8 +159,11 @@ let eO_at_cell
 
       The fix is an extractable [is_finite] on [floating], after which the
       clamp becomes code, the assume in [KfSub] disappears, and this conjunct
-      can be dropped.  Adding [fexp] laws instead would prove by SMT what the
-      reference obtains with a branch.
+      can be dropped.  [etc/isfinite_proposal.fst] gives the proposed
+      signature and machine-checks that the clamp discharges the obligation
+      with no hypothesis at all.  Adding [fexp] laws instead would prove by
+      SMT what the reference obtains with a branch, and would prove it only
+      under a side condition about [SF.key_tiles].
 
    3. Positivity of the epilogue denominator is a genuinely float-level fact,
       because the kernel BRANCHES on it:
@@ -179,10 +182,18 @@ let eO_at_cell
       Note it is NOT a consequence of (1): a caller-supplied mask may reject
       every key of a row, and then the denominator really is zero.  Under
       [causal] with no mask tensor the diagonal key is always admitted, so it
-      holds automatically.  Discharging it in that case, rather than carrying
-      it, would need sign and monotonicity laws for [add]/[mul] plus
-      [fexp zero == one]; see [etc/Kuiops.Floating.Axioms.fsti] for the exact
-      set and why adopting them is not currently recommended. *)
+      holds automatically.
+
+      This conjunct is the one that is fairly charged with being an
+      "assume dressed up as a precondition": it is an internal value, and a
+      caller cannot audit it.  Replacing it with the input-level condition
+      "row [i] admits at least one key" is possible, but needs sign and
+      monotonicity laws for [add]/[mul] plus [fexp zero == one]; see
+      [etc/Kuiops.Floating.Axioms.fsti] for the exact set and
+      [etc/floating_laws_proposal.fst] ([denominator_pos]) for a
+      machine-checked proof that they suffice.  There is no route around
+      them: the kernel branches on this float, and [%~] carries no error
+      bound, so no real-level fact can decide the branch. *)
 let row_no_overflow
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}

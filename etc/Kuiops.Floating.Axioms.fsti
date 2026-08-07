@@ -93,14 +93,39 @@ module Kuiops.Floating.Axioms
    (automatic when [has_mask = false]) instead of being carried as is.
 
    ------------------------------------------------------------------------
-   RECOMMENDATION: adopt NONE of the eleven.
+   RECOMMENDATION, REVISED AGAIN after the review objection that
+   [flash_no_overflow] "is basically saying: my inputs are such that I have
+   some invariant on an internal state in my implementation", and that a
+   precondition must be auditable for non-vacuity.
 
-     - Site 3: add an extractable [is_finite] to [floating] and clamp, as
-       the CUDA does.  This also removes the one [assume] in the port.
-     - Site 4: keep [gt gl zero] as a precondition, per the CUDA header.
+   That objection retires the "so it is only cosmetics" argument above.
+   Restating conjunct (3) as an input-level condition is not cosmetics if
+   the alternative is a precondition nobody can audit -- it is the whole
+   point.  So:
 
-   The only change I would still press for is the correction to
-   [lt_neg_flip] in [Kuiper.Floating.Base] and its four backing [val]s in
+     - Site 3 (axioms 1-4): adopt NONE.  Add an extractable [isfinite] to
+       [floating] and clamp, exactly as the CUDA does.  Strictly better than
+       the axioms: unconditional, whereas [exp_nonpos] discharges the
+       obligation only under [~(m == -inf /\ s == -inf)], whose proof is an
+       argument about [SF.key_tiles] -- more internal reasoning, which is
+       what we are trying to eliminate.  It also removes the one [assume] in
+       the port, and the identical one upstream in
+       [Kuiper.Kernel.OnlineSoftmax].  Spec and machine-checked
+       demonstration: [etc/isfinite_proposal.fst].
+
+     - Site 4 (axioms 5-11): ADOPT.  [isfinite] does not touch conjunct (3),
+       which is then the only non-auditable conjunct left.  These seven
+       replace it with "query row [r] admits at least one key", a statement
+       about [emask]/[has_mask]/[causal]/[r] only.  [denominator_pos] in
+       [etc/floating_laws_proposal.fst] machine-checks the reduction; its
+       surviving hypotheses are all consequences of [all_finite] plus that
+       one non-emptiness condition, and none of them mention kernel state.
+
+   Conjunct (1), [all_finite], stays: unfolded it says "for every admitted
+   key [k], [scale * <q,k> + bias] is finite", which mentions only inputs.
+
+   Independently of all the above, the correction to [lt_neg_flip] in
+   [Kuiper.Floating.Base] and its four backing [val]s in
    [Kuiper.{Float16,BFloat16,Float32,Float64}.Base]:
 
      ensures lt x y <==> lte (zero `sub` y) (zero `sub` x)   (* current *)
@@ -108,9 +133,8 @@ module Kuiops.Floating.Axioms
 
    As it stands the class proves [False]; see [etc/floating_ord_unsound.fst].
 
-   The eleven are kept below only as the answer to "what WOULD it take to
-   discharge sites 3 and 4 by proof instead", with each one's site recorded.
-   [etc/floating_laws_proposal.fst] machine-checks that they suffice.
+   [etc/floating_laws_proposal.fst] machine-checks that the eleven suffice;
+   each one's site is recorded below.
 
    Check this file with:  ./fstar.sh etc/Kuiops.Floating.Axioms.fsti        *)
 
