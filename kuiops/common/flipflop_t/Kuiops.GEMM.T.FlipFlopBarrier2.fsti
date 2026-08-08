@@ -105,6 +105,58 @@ let bp_sharing
   : slprop
   = m |-> Frac (1.0R /. nthr) em
 
+(* ---- Array2-level strided-chunk (de)composition, exported for reuse ----
+   These operate on an arbitrary [array2 et l] (any layout, not just full
+   ones), so the skewed pipeline tiles of SuperGEMM can be partitioned with
+   the same proofs. *)
+
+ghost
+fn split_array2_into_strided_chunks
+  (#et : Type0) {| sized et, hvc : has_vec_cpy et |}
+  (#rows #cols : nat)
+  (#l : layout2 rows cols)
+  (m : array2 et l)
+  (#em : chest2 et rows cols)
+  (nthr : pos)
+  requires
+    m |-> em
+  ensures
+    pure (SZ.fits (l.ulen))
+  ensures
+    forall+ (tid : natlt nthr).
+      own_strided_chunks m em nthr tid
+
+ghost
+fn join_array2_from_strided_chunks
+  (#et : Type0) {| sized et, hvc : has_vec_cpy et |}
+  (#rows #cols : nat)
+  (#l : layout2 rows cols)
+  (m : array2 et l)
+  (#em : chest2 et rows cols)
+  (nthr : pos)
+  requires
+    pure (SZ.fits (l.ulen))
+  requires
+    forall+ (tid : natlt nthr).
+      own_strided_chunks m em nthr tid
+  ensures
+    m |-> em
+
+ghost
+fn join_array2_from_strided_chunks_underspec
+  (#et : Type0) {| sized et, hvc : has_vec_cpy et |}
+  (#rows #cols : nat)
+  (#l : layout2 rows cols)
+  (m : array2 et l)
+  (nthr : pos)
+  requires
+    pure (SZ.fits (l.ulen))
+  requires
+    forall+ (tid : natlt nthr).
+      live_strided_chunks m nthr tid
+  ensures
+    live m
+
 let barrier_p
   (#etA : Type0) (#etB : Type0)
   {| sized etA, has_vec_cpy etA, sized etB, has_vec_cpy etB |}
