@@ -18,7 +18,9 @@ common/gemm_t_tc2d
 common/transpose2
 common/flipflop_t
 common/blockmm
-common/supergemm/epimm
-common/supergemm/epimm_splitk
+common/skewed
+common/pipelined
 common/supergemm/mm
+common/supergemm/mm_epi
 common/supergemm/mm_splitk
+common/supergemm/mm_epi_splitk
