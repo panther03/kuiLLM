@@ -224,9 +224,12 @@ let kpre1
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
 
-(* For step 1 the output tile is just "live" both before and after, so
-   [kpost1] and [kpre1] have the same body (distinct names so the Kernel can
-   later refine [kpost1] to a functional postcondition). *)
+(* On exit the A/B global read shares come back at an UNSPECIFIED chest: the
+   pipelined staging path ([kloop]) re-materialises each fractional share
+   through the [cp.async] batch pledge, which (in step 1, memory safety only)
+   does not track that a global read preserves content.  Pinning the chest to
+   [eA]/[eB] is deferred to the functional-spec step; hence the existentials.
+   [output_lane_live'] is likewise contents-unspecified. *)
 unfold
 let kpost1
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
@@ -248,8 +251,8 @@ let kpost1
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= gA |-> Frac (fA /. (nblk * nthr)) eA **
-  gB |-> Frac (fB /. (nblk * nthr)) eB **
+= (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') **
+  (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') **
   output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
   pure (aligned 16 (core gA)) **
   pure (aligned 16 (core gB)) **
@@ -498,3 +501,24 @@ val kpost_sendable
   : is_send_across block_of
       (kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
+
+(* ---- shared-buffer 16-byte alignment (for cp.async in [kloop]) ----
+   Each of the four pipeline buffers is a block array (by [c_shmems_inv]),
+   hence 16-byte aligned ([Kuiops.SHMem.Aligned.shmem_aligned16]).  The kernel
+   body ([Kuiops.SuperGEMM.Mm.Kernel]) needs exactly these four facts to
+   discharge [kloop]'s [sq_al].  The [c_shmems_inv] witness is available inside
+   the [f] field (its [sh] binder is refined), so this is a real derivation,
+   not an axiom. *)
+val shared_buffers_aligned16
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (#_ : squash (c_shmems_inv sh))
+  ()
+  : Lemma
+      (aligned 16 (core (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh))))

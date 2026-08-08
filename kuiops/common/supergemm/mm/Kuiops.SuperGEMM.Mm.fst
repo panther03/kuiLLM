@@ -1,21 +1,8 @@
 module Kuiops.SuperGEMM.Mm
 
-(* Module 8: the single top-level polymorphic async launcher for the
-   software-pipelined tensor-core GEMM.  Computes D = A @ B^T, where B is
-   supplied as an [(cols, shared)] = [(N, K)] row-major operand (i.e. the
-   weight PyTorch hands to [aten.mm] for [A @ W^T]).  There is no C operand;
-   [post_map : et_acc -> et_d] is applied elementwise to the accumulator on
-   the way out (at the JIT instantiation this is [Kuiper.Float.Casts.fcast]).
-
-   Step 1: memory-safety only.  The pledge hands D back at some unspecified
-   value; A and B likewise come back existentially quantified (see the
-   [Kernel]/[Shared] note -- a global read share is re-materialised through the
-   cp.async pledge, which does not yet track content preservation).  The
-   functional specification ([eD' %~ ...]) is step 4.
-
-   This interface deliberately declares exactly ONE [fn] and nothing else: it
-   is imported by every JIT'd operator, so anything extra costs compile time on
-   every kernel build. *)
+(* Implementation of the top-level async launcher; see the interface for the
+   contract.  The body is minimal: compute the grid/block dimensions once, then
+   [launch] the assembled [kernel_desc] under the stream's epoch pledge. *)
 
 #lang-pulse
 
@@ -27,12 +14,14 @@ open Kuiper.TensorCore
 open Kuiper.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
+open Kuiops.SuperGEMM.Mm.Kernel { mk_kernel }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
 
-inline_for_extraction noextract
+#set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
+
 fn supergemm_mm_async
   (et_ab et_acc et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab |}
@@ -82,3 +71,17 @@ fn supergemm_mm_async
         (exists* (eA' : chest2 et_ab (SZ.v rows) (SZ.v shared)). gA |-> Frac fA eA' **
           (exists* (eB' : chest2 et_ab (SZ.v cols) (SZ.v shared)). gB |-> Frac fB eB' **
             (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). gD |-> eD'))))
+{
+  let nblk = (rows /^ bm) *^ (cols /^ bn);
+  let nthr = (bm /^ wm) *^ (bn /^ wn) *^ warp_size;
+
+  assert pure (SZ.v nblk == SZ.v rows / SZ.v bm * (SZ.v cols / SZ.v bn));
+  assert pure (SZ.v nthr == P.nthr bm bn wm wn);
+
+  launch (
+    mk_kernel
+      gA #eA gB #eB gD post_map
+      bm bn bk wm wn skew
+      fA fB nblk nthr ()
+  ) s;
+}

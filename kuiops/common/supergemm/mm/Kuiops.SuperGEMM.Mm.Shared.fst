@@ -26,6 +26,7 @@ open Kuiops.SHMem.CellSend { live_strided_chunks_block_sendable }
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
 module FB = Kuiops.GEMM.T.FlipFlopBarrier2
+module Aligned = Kuiops.SHMem.Aligned
 
 (* ------------------------------------------------------------------ *)
 (* Extract the fits fact for the skewed scratch from [constraints].   *)
@@ -840,6 +841,7 @@ let shared_thread_final_sendable
     scratch_tile_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
   is_send_across_star _ _ #sendQ #sendScratch
 
+#push-options "--split_queries always"
 let output_lane_live_sendable
   (#et : Type0) {| scalar et, has_vec_cpy et |}
   (#m #n : szp)
@@ -871,6 +873,7 @@ let output_lane_live_sendable
   assert (forall (mi : natlt wm) (nj : natlt wn).
     is_global (output_fragment' gD bm bn tm tn wm wn bid wid mi nj));
   solve
+#pop-options
 
 let kpre1_sendable
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
@@ -964,6 +967,69 @@ let kpre_sendable
     (shared_thread_live bm bn bk wm wn skew sh nthr tid)
     #base_send #shared_send
 
+let kpost1_sendable
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#m #n #k : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k))
+  (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
+  (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (gD : array2 et_d lD { is_global gD })
+  (bm bn wm wn : szp)
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
+  (fA fB : perm)
+  (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (bid : natlt nblk) (tid : natlt nthr)
+  : is_send_across block_of (
+      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
+=
+  let output_send =
+    output_lane_live_sendable gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 #_
+      nblk nthr bid tid in
+  let pA = (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') in
+  let pB = (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') in
+  let pOutput = output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid in
+  let pAlignedA = pure (aligned 16 (core gA)) in
+  let pAlignedB = pure (aligned 16 (core gB)) in
+  let pAlignedD = pure (aligned 16 (core gD)) in
+  let pPure = pAlignedA ** pAlignedB ** pAlignedD in
+  let ffA (eA' : chest2 et_ab (SZ.v m) (SZ.v k))
+    : is_send_across block_of (gA |-> Frac (fA /. (nblk * nthr)) eA') =
+    send_across_if_send_across_gpu (gA |-> Frac (fA /. (nblk * nthr)) eA')
+      (is_send_across_global_tensor gA #(fA /. (nblk * nthr)) eA') in
+  let sendA : is_send_across block_of pA =
+    is_send_across_exists (fun eA' -> gA |-> Frac (fA /. (nblk * nthr)) eA') #ffA in
+  let ffB (eB' : chest2 et_ab (SZ.v n) (SZ.v k))
+    : is_send_across block_of (gB |-> Frac (fB /. (nblk * nthr)) eB') =
+    send_across_if_send_across_gpu (gB |-> Frac (fB /. (nblk * nthr)) eB')
+      (is_send_across_global_tensor gB #(fB /. (nblk * nthr)) eB') in
+  let sendB : is_send_across block_of pB =
+    is_send_across_exists (fun eB' -> gB |-> Frac (fB /. (nblk * nthr)) eB') #ffB in
+  let sendAlignedA : is_send_across block_of pAlignedA =
+    is_send_across_placeless pAlignedA
+      #(placeless_pure (aligned 16 (core gA))) in
+  let sendAlignedB : is_send_across block_of pAlignedB =
+    is_send_across_placeless pAlignedB
+      #(placeless_pure (aligned 16 (core gB))) in
+  let sendAlignedD : is_send_across block_of pAlignedD =
+    is_send_across_placeless pAlignedD
+      #(placeless_pure (aligned 16 (core gD))) in
+  let sendPure =
+    is_send_across_star pAlignedA (pAlignedB ** pAlignedD)
+      #sendAlignedA
+      #(is_send_across_star pAlignedB pAlignedD #sendAlignedB #sendAlignedD) in
+  let sendOutputPure =
+    is_send_across_star pOutput pPure #output_send #sendPure in
+  let sendBOutput =
+    is_send_across_star pB (pOutput ** pPure) #sendB #sendOutputPure in
+  is_send_across_star pA (pB ** pOutput ** pPure) #sendA #sendBOutput
+
 let kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
@@ -991,7 +1057,7 @@ let kpost_sendable
         fA fB nblk nthr sh bid tid)
 =
   let base_send =
-    kpre1_sendable gA eA gB eB gD bm bn wm wn #_
+    kpost1_sendable gA eA gB eB gD bm bn wm wn #_
       fA fB nblk nthr bid tid in
   let shared_send =
     shared_thread_final_sendable bm bn bk wm wn skew nthr sh #_ (SZ.v k / SZ.v bk) tid in
@@ -999,3 +1065,33 @@ let kpost_sendable
     (kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
     (shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
     #base_send #shared_send
+
+#push-options "--split_queries always"
+let shared_buffers_aligned16
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (#_ : squash (c_shmems_inv sh))
+  ()
+  : Lemma
+      (aligned 16 (core (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh))) /\
+       aligned 16 (core (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh))))
+=
+  shmem_inv_components bm bn bk wm wn skew sh;
+  Aligned.shmem_aligned16 (sar_a0 bm bn bk wm wn skew sh);
+  Aligned.shmem_aligned16 (sar_a1 bm bn bk wm wn skew sh);
+  Aligned.shmem_aligned16 (sar_b0 bm bn bk wm wn skew sh);
+  Aligned.shmem_aligned16 (sar_b1 bm bn bk wm wn skew sh);
+  assert (core (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh))
+            == sar_a0 bm bn bk wm wn skew sh);
+  assert (core (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh))
+            == sar_a1 bm bn bk wm wn skew sh);
+  assert (core (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh))
+            == sar_b0 bm bn bk wm wn skew sh);
+  assert (core (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh))
+            == sar_b1 bm bn bk wm wn skew sh)
+#pop-options
