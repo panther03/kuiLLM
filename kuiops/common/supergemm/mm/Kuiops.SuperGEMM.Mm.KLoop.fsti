@@ -32,6 +32,19 @@ module T = Kuiper.Tensor
 module B = Kuiper.Barrier
 module P = Kuiops.SuperGEMM.Mm.Params
 
+(* Opaque length of the per-warp accumulator fragment array ([mfrag x nfrag]).
+   Kept opaque so [kloop]'s postcondition carries no [SZ.v]-mul/div arithmetic
+   into its (rlimit-bounded) branch VCs; callers bridge with [acc_len_reveal]. *)
+[@@"opaque_to_smt"]
+let acc_len (wm wn : szp) : nat = SZ.v wm / frag * (SZ.v wn / frag)
+
+val acc_len_reveal (wm wn : szp)
+  : Lemma (acc_len wm wn == SZ.v wm / frag * (SZ.v wn / frag))
+
+val acc_len_alloc (wm wn : szp)
+  : Lemma (requires SZ.fits (SZ.v (wm /^ P.frag_sz) * SZ.v (wn /^ P.frag_sz)))
+          (ensures  acc_len wm wn == SZ.v ((wm /^ P.frag_sz) *^ (wn /^ P.frag_sz)))
+
 inline_for_extraction noextract
 fn subproducts
   (#et_ab #et_acc : Type0)
@@ -168,4 +181,5 @@ fn kloop
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) (SZ.v tid) **
-    live accFrags
+    live accFrags **
+    pure (length accFrags == acc_len wm wn)

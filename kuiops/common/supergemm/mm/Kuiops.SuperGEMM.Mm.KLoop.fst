@@ -35,6 +35,10 @@ module D = Kuiper.Divides
 module TR = Kuiops.Tensor.Transpose2
 module P = Kuiops.SuperGEMM.Mm.Params
 
+let acc_len_reveal wm wn = reveal_opaque (`%acc_len) acc_len
+
+let acc_len_alloc wm wn = reveal_opaque (`%acc_len) acc_len
+
 (* [warp_m * mfrag + i] indexes a 16-row band of the [bm x bk] A tile. *)
 let a_tile_bound (bm wm : pos) (warp_m i : nat)
   : Lemma (requires frag /?+ wm /\ wm /?+ bm /\
@@ -1084,7 +1088,8 @@ fn kloop
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) (SZ.v tid) **
-    live accFrags
+    live accFrags **
+    pure (length accFrags == acc_len wm wn)
 {
   let num_k_tiles = k /^ bk;
   FStar.Math.Lemmas.lemma_mult_le_right (ldt bk skew) 1 (SZ.v bm);
@@ -1094,6 +1099,7 @@ fn kloop
   let aFrags   = __alloc_array_fragment et_ab  FragA   frag_sz frag_sz frag_sz FragLRM  (wm /^ frag_sz);
   let bFrags   = __alloc_array_fragment et_ab  FragB   frag_sz frag_sz frag_sz FragLCM  (wn /^ frag_sz);
   let accFrags = __alloc_array_fragment et_acc FragAcc frag_sz frag_sz frag_sz FragLAcc ((wm /^ frag_sz) *^ (wn /^ frag_sz));
+  acc_len_alloc wm wn;
 
   (* ---- prologue: stage k-tile 0 into buffer 0 ---- *)
   let b0 = PC.get_batch ();
