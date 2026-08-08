@@ -20,6 +20,7 @@ common/flipflop_t
 common/blockmm
 common/skewed
 common/pipelined
+common/shmem_aligned
 common/supergemm/mm
 common/supergemm/mm_epi
 common/supergemm/mm_splitk
