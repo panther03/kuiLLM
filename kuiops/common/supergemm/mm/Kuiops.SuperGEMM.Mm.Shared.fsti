@@ -34,14 +34,15 @@ open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
 open Kuiper.Array2.Strided
 open Kuiper.Tensor.Tiling
-open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 
 module SZ = Kuiper.SizeT
 
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_lane_live }
+open Kuiper.TensorRO { vtlayout_of_tlayout }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live' }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual }
 open Kuiops.SuperGEMM.Mm.Params
-open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing }
+open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q }
+module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
 module FB = Kuiops.GEMM.T.FlipFlopBarrier2
 
@@ -163,38 +164,62 @@ let shared_thread_live
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (tid : natlt (SZ.v nthr))
   : slprop
-= pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-  pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-  pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-  pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
+= pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+  pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+  pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+  pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
   scratch_tile_live bm bn bk wm wn skew sh nthr tid
 
-(* ---- global-side per-thread precondition (sh-free) ---- *)
-
-(* D = A @ B^T; no C input.  [tm tn wm wn] are the tensor-core output tiling
-   (the Kernel instantiates [tm = tn = frag], [wm = mfrag], [wn = nfrag]);
-   they stay generic here. *)
-unfold
-let kpre1
+(* ---- per-thread shared ownership on EXIT of [kloop] ----
+   [kloop] returns [pipe_q ... (ktiles-1)]: read shares of the last-used
+   buffer pair and live chunks of the other pair.  This is deliberately
+   DIFFERENT from [shared_thread_live] (the entry ownership); [kpre] and
+   [kpost] are independent [kernel_desc] fields. *)
+let shared_thread_final
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (ktiles : pos)
+  (tid : natlt (SZ.v nthr))
+  : slprop
+= pipe_q bm bn bk skew
+    (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+    (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+    (SZ.v nthr) ktiles (ktiles - 1) tid **
+  scratch_tile_live bm bn bk wm wn skew sh nthr tid
+
+(* ---- global-side per-thread precondition (sh-free) ----
+   D = A @ B^T; no C input.  The output tiling is hardcoded to the band form
+   [(tm, tn, wmf, wnf) = (frag, wn, mfrag wm, 1)] the Epilogue commits to; the
+   element warp dims [wm x wn] are the szp parameters.  D is layout-generic
+   ([lD] + [strided_row_major]) and carries its own element type [et_d]. *)
+unfold
+let kpre1
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
-  (bm bn : szp) (tm tn wm wn : pos)
+  (gD : array2 et_d lD)
+  (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                wm * tm /?+ SZ.v bm /\ wn * tn /?+ SZ.v bn))
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
-  (nthr : szp{SZ.v nthr == SZ.v bm / (wm * tm) * (SZ.v bn / (wn * tn)) * warp_size})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
 = gA |-> Frac (fA /. (nblk * nthr)) eA **
   gB |-> Frac (fB /. (nblk * nthr)) eB **
-  output_lane_live gD (SZ.v bm) (SZ.v bn) tm tn wm wn bid tid **
+  output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
   pure (aligned 16 (core gA)) **
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
@@ -204,48 +229,48 @@ let kpre1
    later refine [kpost1] to a functional postcondition). *)
 unfold
 let kpost1
-  (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
-  (bm bn : szp) (tm tn wm wn : pos)
+  (gD : array2 et_d lD)
+  (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                wm * tm /?+ SZ.v bm /\ wn * tn /?+ SZ.v bn))
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
-  (nthr : szp{SZ.v nthr == SZ.v bm / (wm * tm) * (SZ.v bn / (wn * tn)) * warp_size})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
 = gA |-> Frac (fA /. (nblk * nthr)) eA **
   gB |-> Frac (fB /. (nblk * nthr)) eB **
-  output_lane_live gD (SZ.v bm) (SZ.v bn) tm tn wm wn bid tid **
+  output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
   pure (aligned 16 (core gA)) **
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
 
-(* ---- full per-thread pre/post: global side + shared ownership ----
-   The reconciliation squash ties the output tiling [tm tn wm wn] to the
-   shared-tile warp dims: the element warp height/width is [wm*tm]/[wn*tn].
-   The Kernel discharges it with [wm := mfrag], [tm := frag] (so
-   [mfrag*frag == wm_element]). *)
+(* ---- full per-thread pre/post: global side + shared ownership ---- *)
 unfold
 let kpre
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
@@ -253,76 +278,84 @@ let kpre
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= kpre1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid **
+= kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
   shared_thread_live bm bn bk wm wn skew sh nthr tid
 
 unfold
 let kpost
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= kpost1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid **
-  shared_thread_live bm bn bk wm wn skew sh nthr tid
+= kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
+  shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid
 
 (* ---- block-level pre/post (sh-free) and frame ---- *)
 
 unfold
 let block_pre
-  (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
-  (bm bn : szp) (tm tn wm wn : pos)
+  (gD : array2 et_d lD)
+  (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                wm * tm /?+ SZ.v bm /\ wn * tn /?+ SZ.v bn))
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
-  (nthr : szp{SZ.v nthr == SZ.v bm / (wm * tm) * (SZ.v bn / (wn * tn)) * warp_size})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk)
   : slprop
 = forall+ (tid : natlt nthr).
-    kpre1 gA eA gB eB gD bm bn tm tn wm wn fA fB nblk nthr bid tid
+    kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid
 
 unfold
 let block_post
-  (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
-  (bm bn : szp) (tm tn wm wn : pos)
+  (gD : array2 et_d lD)
+  (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                wm * tm /?+ SZ.v bm /\ wn * tn /?+ SZ.v bn))
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
-  (nthr : szp{SZ.v nthr == SZ.v bm / (wm * tm) * (SZ.v bn / (wn * tn)) * warp_size})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk)
   : slprop
 = forall+ (tid : natlt nthr).
-    kpost1 gA eA gB eB gD bm bn tm tn wm wn fA fB nblk nthr bid tid
+    kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid
 
 (* Dead skew-pad cells of the four A/B pipeline buffers and the scratch. *)
 let block_frame
@@ -350,18 +383,18 @@ ghost
 fn block_setup
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -370,10 +403,10 @@ fn block_setup
   ()
   requires
     live_c_shmems sh **
-    block_pre gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid
+    block_pre gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
   ensures
     (forall+ (tid : natlt nthr).
-      kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
 
@@ -381,18 +414,19 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
+                SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -401,12 +435,12 @@ fn block_teardown
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_post gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid
+    block_post gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
 
 (* ---- block-sendability of the per-thread pre/post ----
    Needed to populate the [kpre_sendable] / [kpost_sendable] fields of
@@ -417,16 +451,17 @@ fn block_teardown
 val kpre_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)) { is_global gD })
+  (gD : array2 et_d lD { is_global gD })
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
@@ -435,23 +470,25 @@ val kpre_sendable
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      (kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
 
 val kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)) { is_global gD })
+  (gD : array2 et_d lD { is_global gD })
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -459,5 +496,5 @@ val kpost_sendable
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      (kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)

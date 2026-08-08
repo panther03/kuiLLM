@@ -14,11 +14,16 @@ open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 
 module SZ = Kuiper.SizeT
 
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_lane_live, output_fragment, live_lane_cells }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { live_lane_cells }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile_idx_rows, block_tile_idx_cols, warp_tile_idx_rows, warp_tile_idx_cols }
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_split, skew_join }
+open Kuiops.SuperGEMM.Mm.Output { output_fragment', output_lane_live' }
 open Kuiops.SuperGEMM.Mm.Params
-open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing }
+open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q,
+  unfold_pipe_q_even, unfold_pipe_q_odd }
+open Kuiops.SHMem.CellSend { live_strided_chunks_block_sendable }
+module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
 module FB = Kuiops.GEMM.T.FlipFlopBarrier2
 
@@ -89,6 +94,65 @@ fn gather_pipe_buffer
       unfold (FB.bp_sharing (skewed_view rows bk skew sar) em nthr);
     };
   tensor_gather_n_underspec (skewed_view rows bk skew sar) nthr;
+  with em. assert skewed_view rows bk skew sar |-> em;
+  rewrite each
+    skewed_view rows bk skew sar
+    as from_array (l2_skewed_row_major (SZ.v rows) (SZ.v bk) (SZ.v skew)) sar;
+  skew_join (SZ.v rows) (SZ.v bk) (SZ.v skew) sar;
+}
+
+(* Split one skewed pipeline buffer into per-thread DISJOINT writable chunks
+   ([pipe_live] = [own_strided_chunks] partition), and gather them back. *)
+
+ghost
+fn split_pipe_buffer_live
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (rows bk skew : szp)
+  (nthr : pos)
+  (sar : larray et (SZ.v rows * ldt bk skew))
+  (#_ : squash (SZ.fits (SZ.v rows * ldt bk skew)))
+  requires (exists* (v : Seq.seq et). pts_to sar v)
+  ensures
+    (forall+ (tid : natlt nthr). pipe_live (skewed_view rows bk skew sar) nthr tid) **
+    skew_residual sar (SZ.v rows) (SZ.v bk) (SZ.v skew)
+{
+  skew_split (SZ.v rows) (SZ.v bk) (SZ.v skew) sar;
+  with em. assert
+    from_array (l2_skewed_row_major (SZ.v rows) (SZ.v bk) (SZ.v skew)) sar |-> em;
+  rewrite each
+    from_array (l2_skewed_row_major (SZ.v rows) (SZ.v bk) (SZ.v skew)) sar
+    as skewed_view rows bk skew sar;
+  FB.split_array2_into_strided_chunks (skewed_view rows bk skew sar) nthr;
+  forevery_map
+    #(natlt nthr)
+    (fun tid -> FB.own_strided_chunks (skewed_view rows bk skew sar) em nthr tid)
+    (fun tid -> pipe_live (skewed_view rows bk skew sar) nthr tid)
+    fn tid {
+      fold (FB.live_strided_chunks (skewed_view rows bk skew sar) nthr tid);
+      fold (pipe_live (skewed_view rows bk skew sar) nthr tid);
+    };
+}
+
+ghost
+fn gather_pipe_buffer_live
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (rows bk skew : szp)
+  (nthr : pos)
+  (sar : larray et (SZ.v rows * ldt bk skew))
+  (#_ : squash (SZ.fits (SZ.v rows * ldt bk skew)))
+  requires
+    (forall+ (tid : natlt nthr). pipe_live (skewed_view rows bk skew sar) nthr tid) **
+    skew_residual sar (SZ.v rows) (SZ.v bk) (SZ.v skew)
+  ensures (exists* (v : Seq.seq et). pts_to sar v)
+{
+  forevery_map
+    #(natlt nthr)
+    (fun tid -> pipe_live (skewed_view rows bk skew sar) nthr tid)
+    (fun tid -> FB.live_strided_chunks (skewed_view rows bk skew sar) nthr tid)
+    fn tid {
+      unfold (pipe_live (skewed_view rows bk skew sar) nthr tid);
+    };
+  FB.join_array2_from_strided_chunks_underspec (skewed_view rows bk skew sar) nthr;
   with em. assert skewed_view rows bk skew sar |-> em;
   rewrite each
     skewed_view rows bk skew sar
@@ -296,18 +360,18 @@ ghost
 fn block_setup
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -316,10 +380,10 @@ fn block_setup
   ()
   requires
     live_c_shmems sh **
-    block_pre gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid
+    block_pre gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
   ensures
     (forall+ (tid : natlt nthr).
-      kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
 {
@@ -332,47 +396,47 @@ fn block_setup
   unfold_live_c_shmems_nil (snd (snd (snd (snd (snd sh))))) #1.0R;
 
   unfold_live_c_shmem (sar_a0 bm bn bk wm wn skew sh);
-  split_pipe_buffer bm bk skew (SZ.v nthr) (sar_a0 bm bn bk wm wn skew sh);
+  split_pipe_buffer_live bm bk skew (SZ.v nthr) (sar_a0 bm bn bk wm wn skew sh);
   unfold_live_c_shmem (sar_a1 bm bn bk wm wn skew sh);
-  split_pipe_buffer bm bk skew (SZ.v nthr) (sar_a1 bm bn bk wm wn skew sh);
+  split_pipe_buffer_live bm bk skew (SZ.v nthr) (sar_a1 bm bn bk wm wn skew sh);
   unfold_live_c_shmem (sar_b0 bm bn bk wm wn skew sh);
-  split_pipe_buffer bn bk skew (SZ.v nthr) (sar_b0 bm bn bk wm wn skew sh);
+  split_pipe_buffer_live bn bk skew (SZ.v nthr) (sar_b0 bm bn bk wm wn skew sh);
   unfold_live_c_shmem (sar_b1 bm bn bk wm wn skew sh);
-  split_pipe_buffer bn bk skew (SZ.v nthr) (sar_b1 bm bn bk wm wn skew sh);
+  split_pipe_buffer_live bn bk skew (SZ.v nthr) (sar_b1 bm bn bk wm wn skew sh);
   unfold_live_c_shmem (sar_scratch bm bn bk wm wn skew sh);
   split_scratch_to_threads bm bn bk wm wn skew nthr sh;
 
   forevery_zip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr));
+    (fun tid ->
+      pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
+    (fun tid ->
+      pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
   forevery_zip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr));
+    (fun tid ->
+      pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+      pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
+    (fun tid ->
+      pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
   forevery_zip #(natlt (SZ.v nthr))
-    (fun _ ->
-      (pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-       pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr));
+    (fun tid ->
+      (pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+       pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
+      pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
+    (fun tid ->
+      pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
   forevery_zip #(natlt (SZ.v nthr))
-    (fun _ ->
-      ((pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-        pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
-       pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr))
+    (fun tid ->
+      ((pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+        pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
+       pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
+      pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
     (fun tid -> scratch_tile_live bm bn bk wm wn skew sh nthr tid);
   forevery_map #(natlt (SZ.v nthr))
     (fun tid ->
-      (((pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-         pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
-        pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
-       pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr)) **
+      (((pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+         pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
+        pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
+       pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid) **
       scratch_tile_live bm bn bk wm wn skew sh nthr tid)
     (fun tid -> shared_thread_live bm bn bk wm wn skew sh nthr tid)
     fn tid {
@@ -380,20 +444,119 @@ fn block_setup
     };
   forevery_zip #(natlt (SZ.v nthr))
     (fun tid ->
-      kpre1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid)
+      kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
     (fun tid -> shared_thread_live bm bn bk wm wn skew sh nthr tid);
   forevery_map #(natlt (SZ.v nthr))
     (fun tid ->
-      kpre1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid **
+      kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
       shared_thread_live bm bn bk wm wn skew sh nthr tid)
     (fun tid ->
-      kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
     fn tid {
-      fold (kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      fold (kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid);
     };
   fold (block_frame bm bn bk wm wn skew sh);
+}
+#pop-options
+
+#push-options "--split_queries no"
+(* Resolve the parity of the last-used k-tile [it0] and gather the four
+   pipeline buffers back to full ownership.  Factored into its own [fn] with an
+   explicit postcondition so the two-way parity [if] does not force Pulse to
+   infer a parity-indexed join type over the mixed scratch/buffer element
+   types. *)
+ghost
+fn gather_last_pipe_buffers
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (ktiles it0 : nat)
+  (#_ : squash (it0 < ktiles))
+  requires
+    (forall+ (tid : natlt (SZ.v nthr)).
+      pipe_q bm bn bk skew
+        (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+        (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+        (SZ.v nthr) ktiles it0 tid) **
+    skew_residual (sar_a0 bm bn bk wm wn skew sh) (SZ.v bm) (SZ.v bk) (SZ.v skew) **
+    skew_residual (sar_a1 bm bn bk wm wn skew sh) (SZ.v bm) (SZ.v bk) (SZ.v skew) **
+    skew_residual (sar_b0 bm bn bk wm wn skew sh) (SZ.v bn) (SZ.v bk) (SZ.v skew) **
+    skew_residual (sar_b1 bm bn bk wm wn skew sh) (SZ.v bn) (SZ.v bk) (SZ.v skew)
+  ensures
+    live_c_shmem (fst sh) **
+    live_c_shmem (fst (snd sh)) **
+    live_c_shmem (fst (snd (snd sh))) **
+    live_c_shmem (fst (snd (snd (snd sh))))
+{
+  P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
+  if (it0 % 2 = 0) {
+    unfold_pipe_q_even bm bn bk skew
+      (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+      (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+      (SZ.v nthr) ktiles it0 #();
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun _ ->
+        pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr))
+      (fun tid ->
+        pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
+        pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+        pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun _ ->
+        pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr))
+      (fun tid ->
+        pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+        pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun tid ->
+        pipe_live (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
+      (fun tid ->
+        pipe_live (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    gather_pipe_buffer bm bk skew (SZ.v nthr) (sar_a0 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst sh);
+    gather_pipe_buffer bn bk skew (SZ.v nthr) (sar_b0 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd (snd sh)));
+    gather_pipe_buffer_live bm bk skew (SZ.v nthr) (sar_a1 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd sh));
+    gather_pipe_buffer_live bn bk skew (SZ.v nthr) (sar_b1 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd (snd (snd sh))));
+  } else {
+    unfold_pipe_q_odd bm bn bk skew
+      (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+      (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+      (SZ.v nthr) ktiles it0 #();
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun _ ->
+        pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr))
+      (fun tid ->
+        pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
+        pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+        pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun _ ->
+        pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr))
+      (fun tid ->
+        pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid **
+        pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    forevery_unzip #(natlt (SZ.v nthr))
+      (fun tid ->
+        pipe_live (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid)
+      (fun tid ->
+        pipe_live (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) tid);
+    gather_pipe_buffer bm bk skew (SZ.v nthr) (sar_a1 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd sh));
+    gather_pipe_buffer bn bk skew (SZ.v nthr) (sar_b1 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd (snd (snd sh))));
+    gather_pipe_buffer_live bm bk skew (SZ.v nthr) (sar_a0 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst sh);
+    gather_pipe_buffer_live bn bk skew (SZ.v nthr) (sar_b0 bm bn bk wm wn skew sh);
+    fold_live_c_shmem (fst (snd (snd sh)));
+  }
 }
 #pop-options
 
@@ -402,18 +565,19 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)))
+  (gD : array2 et_d lD)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
+                SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -422,77 +586,62 @@ fn block_teardown
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_post gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid
+    block_post gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
 {
   P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
   unfold (block_frame bm bn bk wm wn skew sh);
 
+  (* Peel [kpost1] (= [block_post]) off from the shared final state. *)
   forevery_map #(natlt (SZ.v nthr))
     (fun tid ->
-      kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
     (fun tid ->
-      kpost1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid **
-      shared_thread_live bm bn bk wm wn skew sh nthr tid)
+      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
+      shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
     fn tid {
-      unfold (kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      unfold (kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid);
     };
   forevery_unzip #(natlt (SZ.v nthr))
     (fun tid ->
-      kpost1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid)
-    (fun tid -> shared_thread_live bm bn bk wm wn skew sh nthr tid);
+      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
+    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid);
 
+  (* Split [shared_thread_final] into the [pipe_q] product and the scratch. *)
   forevery_map #(natlt (SZ.v nthr))
-    (fun tid -> shared_thread_live bm bn bk wm wn skew sh nthr tid)
+    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
     (fun tid ->
-      pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
+      pipe_q bm bn bk skew
+        (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+        (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) tid **
       scratch_tile_live bm bn bk wm wn skew sh nthr tid)
     fn tid {
-      unfold (shared_thread_live bm bn bk wm wn skew sh nthr tid);
+      unfold (shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid);
     };
   forevery_unzip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bm bk skew (sar_a0 bm bn bk wm wn skew sh)) (SZ.v nthr))
     (fun tid ->
-      pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      scratch_tile_live bm bn bk wm wn skew sh nthr tid);
-  forevery_unzip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bm bk skew (sar_a1 bm bn bk wm wn skew sh)) (SZ.v nthr))
-    (fun tid ->
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      scratch_tile_live bm bn bk wm wn skew sh nthr tid);
-  forevery_unzip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bn bk skew (sar_b0 bm bn bk wm wn skew sh)) (SZ.v nthr))
-    (fun tid ->
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr) **
-      scratch_tile_live bm bn bk wm wn skew sh nthr tid);
-  forevery_unzip #(natlt (SZ.v nthr))
-    (fun _ ->
-      pipe_sharing (skewed_view bn bk skew (sar_b1 bm bn bk wm wn skew sh)) (SZ.v nthr))
+      pipe_q bm bn bk skew
+        (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+        (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) tid)
     (fun tid -> scratch_tile_live bm bn bk wm wn skew sh nthr tid);
 
-  gather_pipe_buffer bm bk skew (SZ.v nthr) (sar_a0 bm bn bk wm wn skew sh);
-  fold_live_c_shmem (fst sh);
-  gather_pipe_buffer bm bk skew (SZ.v nthr) (sar_a1 bm bn bk wm wn skew sh);
-  fold_live_c_shmem (fst (snd sh));
-  gather_pipe_buffer bn bk skew (SZ.v nthr) (sar_b0 bm bn bk wm wn skew sh);
-  fold_live_c_shmem (fst (snd (snd sh)));
-  gather_pipe_buffer bn bk skew (SZ.v nthr) (sar_b1 bm bn bk wm wn skew sh);
-  fold_live_c_shmem (fst (snd (snd (snd sh))));
+  (* Resolve the parity of the last-used k-tile and open each thread's
+     [pipe_q] product into the concrete pieces via the [Barrier] openers, then
+     gather each pair: the two read-share buffers ([pipe_sharing]) collect nthr
+     fractions back to full, the two live-chunk buffers ([pipe_live]) rejoin
+     the disjoint partition. *)
+  P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
+  gather_last_pipe_buffers bm bn bk wm wn skew nthr sh
+    (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) #();
+
   gather_scratch_from_threads bm bn bk wm wn skew nthr sh;
   fold_live_c_shmem (fst (snd (snd (snd (snd sh)))));
 
@@ -522,6 +671,19 @@ let pipe_sharing_sendable
     : is_send_across block_of (FB.bp_sharing m em nthr) =
     is_send_across_tensor m block_of #_ #(1.0R /. nthr) em in
   is_send_across_exists (fun em -> FB.bp_sharing m em nthr) #ff
+
+(* [pipe_live] = [live_strided_chunks] of a block array is block-sendable
+   (Part B: [Kuiops.SHMem.CellSend]). *)
+let pipe_live_sendable
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (rows bk skew : szp)
+  (sar : larray et (SZ.v rows * ldt bk skew))
+  (#_ : squash (is_block_array sar))
+  (nthr : pos)
+  (tid : natlt nthr)
+  : is_send_across block_of (pipe_live (skewed_view rows bk skew sar) nthr tid)
+=
+  live_strided_chunks_block_sendable (skewed_view rows bk skew sar) #_ nthr tid
 
 let scratch_tile_sendable
   (#et_ab #et_acc : Type0)
@@ -600,13 +762,13 @@ let shared_thread_live_sendable
 =
   let invs = shmem_inv_components bm bn bk wm wn skew sh #_ in
   let sendA0 =
-    pipe_sharing_sendable bm bk skew (sar_a0 bm bn bk wm wn skew sh) #_ (SZ.v nthr) in
+    pipe_live_sendable bm bk skew (sar_a0 bm bn bk wm wn skew sh) #_ (SZ.v nthr) tid in
   let sendA1 =
-    pipe_sharing_sendable bm bk skew (sar_a1 bm bn bk wm wn skew sh) #_ (SZ.v nthr) in
+    pipe_live_sendable bm bk skew (sar_a1 bm bn bk wm wn skew sh) #_ (SZ.v nthr) tid in
   let sendB0 =
-    pipe_sharing_sendable bn bk skew (sar_b0 bm bn bk wm wn skew sh) #_ (SZ.v nthr) in
+    pipe_live_sendable bn bk skew (sar_b0 bm bn bk wm wn skew sh) #_ (SZ.v nthr) tid in
   let sendB1 =
-    pipe_sharing_sendable bn bk skew (sar_b1 bm bn bk wm wn skew sh) #_ (SZ.v nthr) in
+    pipe_live_sendable bn bk skew (sar_b1 bm bn bk wm wn skew sh) #_ (SZ.v nthr) tid in
   let sendScratch =
     scratch_tile_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
   let sB1S = is_send_across_star _ _ #sendB1 #sendScratch in
@@ -614,10 +776,75 @@ let shared_thread_live_sendable
   let sA1 = is_send_across_star _ _ #sendA1 #sB0 in
   is_send_across_star _ _ #sendA0 #sA1
 
+(* Block-sendability of one [pipe_q] product.  The [if it >= ktiles] guard is
+   discharged at the term level, so no separate parity reasoning is needed:
+   both pieces of each pair are block arrays, so both the [pipe_sharing] and
+   [pipe_live] halves are block-sendable regardless of which is which. *)
+let pipe_q_sendable
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (#_ : squash (is_block_array sarA0 /\ is_block_array sarA1 /\
+                is_block_array sarB0 /\ is_block_array sarB1))
+  (nthr : pos)
+  (ktiles : nat)
+  (it : nat)
+  (tid : natlt nthr)
+  : is_send_across block_of
+      (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
+=
+  if it >= ktiles then
+    (is_send_across_placeless #_ #block_of emp
+      <: is_send_across block_of
+           (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid))
+  else begin
+    let mAb = skewed_view bm bk skew (if it % 2 = 0 then sarA0 else sarA1) in
+    let mAo = skewed_view bm bk skew (if it % 2 = 0 then sarA1 else sarA0) in
+    let mBb = skewed_view bn bk skew (if it % 2 = 0 then sarB0 else sarB1) in
+    let mBo = skewed_view bn bk skew (if it % 2 = 0 then sarB1 else sarB0) in
+    let sAb : is_send_across block_of (pipe_sharing mAb nthr) =
+      pipe_sharing_sendable bm bk skew (if it % 2 = 0 then sarA0 else sarA1) #_ nthr in
+    let sBb : is_send_across block_of (pipe_sharing mBb nthr) =
+      pipe_sharing_sendable bn bk skew (if it % 2 = 0 then sarB0 else sarB1) #_ nthr in
+    let sAo : is_send_across block_of (pipe_live mAo nthr tid) =
+      pipe_live_sendable bm bk skew (if it % 2 = 0 then sarA1 else sarA0) #_ nthr tid in
+    let sBo : is_send_across block_of (pipe_live mBo nthr tid) =
+      pipe_live_sendable bn bk skew (if it % 2 = 0 then sarB1 else sarB0) #_ nthr tid in
+    let sAoBo = is_send_across_star _ _ #sAo #sBo in
+    let sBbAoBo = is_send_across_star _ _ #sBb #sAoBo in
+    (is_send_across_star _ _ #sAb #sBbAoBo
+      <: is_send_across block_of
+           (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid))
+  end
+
+let shared_thread_final_sendable
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (#_ : squash (c_shmems_inv sh))
+  (ktiles : pos)
+  (tid : natlt (SZ.v nthr))
+  : is_send_across block_of (shared_thread_final bm bn bk wm wn skew sh nthr ktiles tid)
+=
+  let invs = shmem_inv_components bm bn bk wm wn skew sh #_ in
+  let sendQ =
+    pipe_q_sendable bm bn bk skew
+      (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
+      (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
+      #_ (SZ.v nthr) ktiles (ktiles - 1) tid in
+  let sendScratch =
+    scratch_tile_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
+  is_send_across_star _ _ #sendQ #sendScratch
+
 let output_lane_live_sendable
   (#et : Type0) {| scalar et, has_vec_cpy et |}
   (#m #n : szp)
-  (gD : array2 et (rm (SZ.v m) (SZ.v n)) { is_global gD })
+  (#lD : layout2 (SZ.v m) (SZ.v n))
+  (gD : array2 et lD { is_global gD })
   (bm bn tm tn wm wn : pos)
   (#_ : squash (bm /?+ SZ.v m /\ bn /?+ SZ.v n /\
                 wm * tm /?+ bm /\ wn * tn /?+ bn))
@@ -625,7 +852,7 @@ let output_lane_live_sendable
   (nthr : szp{SZ.v nthr == bm / (wm * tm) * (bn / (wn * tn)) * warp_size})
   (bid : natlt nblk)
   (tid : natlt nthr)
-  : is_send_across block_of (output_lane_live gD bm bn tm tn wm wn bid tid)
+  : is_send_across block_of (output_lane_live' gD bm bn tm tn wm wn bid tid)
 =
   let wid : natlt (bm / (wm * tm) * (bn / (wn * tn))) = tid / warp_size in
   let lane : natlt warp_size = tid % warp_size in
@@ -642,33 +869,37 @@ let output_lane_live_sendable
     reveal (warp_tile_idx_cols bm bn (wm * tm) (wn * tn) wid)
       == wid % (bn / (wn * tn)));
   assert (forall (mi : natlt wm) (nj : natlt wn).
-    is_global (output_fragment gD bm bn tm tn wm wn bid wid mi nj));
+    is_global (output_fragment' gD bm bn tm tn wm wn bid wid mi nj));
   solve
 
 let kpre1_sendable
-  (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)) { is_global gD })
-  (bm bn : szp) (tm tn wm wn : pos)
+  (gD : array2 et_d lD { is_global gD })
+  (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
-                wm * tm /?+ SZ.v bm /\ wn * tn /?+ SZ.v bn))
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
-  (nthr : szp{SZ.v nthr == SZ.v bm / (wm * tm) * (SZ.v bn / (wn * tn)) * warp_size})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of (
-      kpre1 gA eA gB eB gD bm bn tm tn wm wn fA fB nblk nthr bid tid)
+      kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
 =
   let output_send =
-    output_lane_live_sendable gD (SZ.v bm) (SZ.v bn) tm tn wm wn #_ nblk nthr bid tid in
+    output_lane_live_sendable gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 #_
+      nblk nthr bid tid in
   let pA = gA |-> Frac (fA /. (nblk * nthr)) eA in
   let pB = gB |-> Frac (fB /. (nblk * nthr)) eB in
-  let pOutput = output_lane_live gD (SZ.v bm) (SZ.v bn) tm tn wm wn bid tid in
+  let pOutput = output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid in
   let pAlignedA = pure (aligned 16 (core gA)) in
   let pAlignedB = pure (aligned 16 (core gB)) in
   let pAlignedD = pure (aligned 16 (core gD)) in
@@ -701,16 +932,17 @@ let kpre1_sendable
 let kpre_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)) { is_global gD })
+  (gD : array2 et_d lD { is_global gD })
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
@@ -719,33 +951,35 @@ let kpre_sendable
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpre gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      (kpre gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
 =
   let base_send =
-    kpre1_sendable gA eA gB eB gD bm bn tm tn wmf wnf #_
+    kpre1_sendable gA eA gB eB gD bm bn wm wn #_
       fA fB nblk nthr bid tid in
   let shared_send =
     shared_thread_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
   is_send_across_star
-    (kpre1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid)
+    (kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
     (shared_thread_live bm bn bk wm wn skew sh nthr tid)
     #base_send #shared_send
 
 let kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strided_row_major (vtlayout_of_tlayout lD) |}
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
-  (gD : array2 et_acc (rm (SZ.v m) (SZ.v n)) { is_global gD })
+  (gD : array2 et_d lD { is_global gD })
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (tm tn wmf wnf : pos)
-  (#_ : squash (wmf * tm == SZ.v wm /\ wnf * tn == SZ.v wn))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
@@ -753,15 +987,15 @@ let kpost_sendable
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gD bm bn bk wm wn skew tm tn wmf wnf
+      (kpost gA eA gB eB gD bm bn bk wm wn skew
         fA fB nblk nthr sh bid tid)
 =
   let base_send =
-    kpre1_sendable gA eA gB eB gD bm bn tm tn wmf wnf #_
+    kpre1_sendable gA eA gB eB gD bm bn wm wn #_
       fA fB nblk nthr bid tid in
   let shared_send =
-    shared_thread_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
+    shared_thread_final_sendable bm bn bk wm wn skew nthr sh #_ (SZ.v k / SZ.v bk) tid in
   is_send_across_star
-    (kpost1 gA eA gB eB gD bm bn tm tn wmf wnf fA fB nblk nthr bid tid)
-    (shared_thread_live bm bn bk wm wn skew sh nthr tid)
+    (kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
+    (shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
     #base_send #shared_send

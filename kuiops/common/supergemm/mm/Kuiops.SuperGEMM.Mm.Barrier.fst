@@ -213,3 +213,83 @@ fn pipe_p_to_q_transform
   }
 }
 #pop-options
+
+#push-options "--fuel 2 --split_queries no"
+ghost
+fn unfold_pipe_q_even
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (nthr : pos)
+  (ktiles : nat)
+  (it : nat)
+  (#_ : squash (it < ktiles /\ it % 2 = 0))
+  requires
+    forall+ (tid : natlt nthr).
+      pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
+  ensures
+    forall+ (tid : natlt nthr).
+      (pipe_sharing (skewed_view bm bk skew sarA0) nthr **
+       pipe_sharing (skewed_view bn bk skew sarB0) nthr **
+       pipe_live (skewed_view bm bk skew sarA1) nthr tid **
+       pipe_live (skewed_view bn bk skew sarB1) nthr tid)
+{
+  forevery_map #(natlt nthr)
+    (fun tid -> pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
+    (fun tid ->
+      pipe_sharing (skewed_view bm bk skew sarA0) nthr **
+      pipe_sharing (skewed_view bn bk skew sarB0) nthr **
+      pipe_live (skewed_view bm bk skew sarA1) nthr tid **
+      pipe_live (skewed_view bn bk skew sarB1) nthr tid)
+    fn tid {
+      rewrite
+        (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
+      as
+        (pipe_sharing (skewed_view bm bk skew sarA0) nthr **
+         pipe_sharing (skewed_view bn bk skew sarB0) nthr **
+         pipe_live (skewed_view bm bk skew sarA1) nthr tid **
+         pipe_live (skewed_view bn bk skew sarB1) nthr tid);
+    };
+}
+#pop-options
+
+#push-options "--fuel 2 --split_queries no"
+ghost
+fn unfold_pipe_q_odd
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (nthr : pos)
+  (ktiles : nat)
+  (it : nat)
+  (#_ : squash (it < ktiles /\ it % 2 = 1))
+  requires
+    forall+ (tid : natlt nthr).
+      pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
+  ensures
+    forall+ (tid : natlt nthr).
+      (pipe_sharing (skewed_view bm bk skew sarA1) nthr **
+       pipe_sharing (skewed_view bn bk skew sarB1) nthr **
+       pipe_live (skewed_view bm bk skew sarA0) nthr tid **
+       pipe_live (skewed_view bn bk skew sarB0) nthr tid)
+{
+  forevery_map #(natlt nthr)
+    (fun tid -> pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
+    (fun tid ->
+      pipe_sharing (skewed_view bm bk skew sarA1) nthr **
+      pipe_sharing (skewed_view bn bk skew sarB1) nthr **
+      pipe_live (skewed_view bm bk skew sarA0) nthr tid **
+      pipe_live (skewed_view bn bk skew sarB0) nthr tid)
+    fn tid {
+      rewrite
+        (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
+      as
+        (pipe_sharing (skewed_view bm bk skew sarA1) nthr **
+         pipe_sharing (skewed_view bn bk skew sarB1) nthr **
+         pipe_live (skewed_view bm bk skew sarA0) nthr tid **
+         pipe_live (skewed_view bn bk skew sarB0) nthr tid);
+    };
+}
+#pop-options
