@@ -27,6 +27,15 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
     auto Bc = B.contiguous();
 {% endif %}
     auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
+{% if backend == "supergemm" %}
+    // The pipelined kernel stages A through cp.async and drains D with 128-bit
+    // stores, so both need the same 16-byte alignment already checked for B.
+    // `torch::empty` is over-aligned, but `Ac` may still be an offset view.
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(Ac.data_ptr()) % 16 == 0,
+                "kuiops supergemm: A must be 16-byte aligned");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(C.data_ptr()) % 16 == 0,
+                "kuiops supergemm: D must be 16-byte aligned");
+{% endif %}
 
     at::cuda::CUDAGuard g(A.device());
 

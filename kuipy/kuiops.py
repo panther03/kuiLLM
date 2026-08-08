@@ -793,6 +793,30 @@ def _tn_filtered(backends, B, K, N):
     return tuple(b for b in backends if b not in _TN_BACKENDS)
 
 
+def _ptr_aligned16(t):
+    """Is `t`'s base pointer 16-byte aligned? Undecidable facts count as true.
+
+    Same provisional-claim convention as `_b_is_column_major`: a FakeTensor has
+    no data pointer at Inductor claim time, and the real call re-checks."""
+    try:
+        return int(t.data_ptr()) % 16 == 0
+    except RuntimeError:
+        return True
+
+
+def _a_aligned_filtered(backends, A):
+    """Drop SuperGEMM unless A is 16-byte aligned.
+
+    SuperGEMM stages A through cp.async, whose 16-byte granule the verified
+    kernel demands as `aligned 16 (core gA)`. The other backends copy A with
+    `.contiguous()` and do not. Filtering here (rather than only checking in
+    the wrapper) keeps a misaligned A a silent fallback instead of a hard
+    error under `KUIPY_JIT_STRICTNESS=0`."""
+    if _ptr_aligned16(A):
+        return tuple(backends)
+    return tuple(b for b in backends if b != "supergemm")
+
+
 def _tn_out_ok(backend, N, out_dtype):
     """The TN kernels need `chunk et_cd` to divide the output row length."""
     return backend not in _TN_BACKENDS or N % (16 // out_dtype.itemsize) == 0
@@ -848,7 +872,7 @@ class MmImpl(_MatmulFamily):
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
-        backends = _tn_filtered(self.backends, B, K, N)
+        backends = _a_aligned_filtered(_tn_filtered(self.backends, B, K, N), A)
         plans = self._plans(kwargs, A.dtype, A.device, backends)
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
