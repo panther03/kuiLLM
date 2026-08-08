@@ -12,15 +12,16 @@ open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
-  { output_lane_live, output_fragment, own_lane_cells, live_lane_cells, in_lane }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live' }
+  { own_lane_cells, live_lane_cells, in_lane }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
+open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueCell
-  { output_fragment_cell_convert_eq, tiled_cell }
+  { tiled_cell }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
   { lane_coincide, own_lane_cells_rw, lane_fade, lane_fade_start, lane_fade_done }
 
 open Kuiper.Array2.Vectorized { row_cells }
-open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout, c_subtile_layout }
+open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout, c_subtile_layout, cell_convert_eq }
 open Kuiper.Array2.Strided
   { strided_row_major, strided_row_major_l2_row_major, strided_row_major_subtile,
     cell_of_pos, aligned_strided_row_major }
@@ -47,19 +48,6 @@ open Pulse.Lib.Array { op_Array_Access }
 module P = Kuiops.SuperGEMM.Mm.Params
 module VG = Kuiper.Array2.Vectorized.Group
 module ML = FStar.Math.Lemmas
-
-(* [output_lane_live'] (layout-generic, from [Kuiops.SuperGEMM.Mm.Output], used by
-   [Shared.kpre]/[kpost]) and the row-major [output_lane_live] (from [KernelDesc],
-   used internally below) have identical bodies at [lD := rm m n], hence are the
-   same slprop.  This tactic delta-normalises both to a common term so the two
-   [forall+] slprops become syntactically equal, discharging the [slprop_equiv]
-   goal of the bridging [rewrite ... as ...]. *)
-let oll_equiv_tac () : FStar.Tactics.Tac unit =
-  FStar.Tactics.norm [delta_only [
-    `%output_lane_live'; `%output_lane_live;
-    `%Kuiops.SuperGEMM.Mm.Output.output_fragment';
-    `%output_fragment ]];
-  FStar.Tactics.mapply (`Pulse.Lib.Core.slprop_equiv_refl)
 
 (* ---------------------------------------------------------------------------
    Pure helper lemmas copied from
@@ -124,10 +112,70 @@ let global_col_divides
   Kuiper.Divides.lemma_divides_sum w
     (mcol * bn + warpCol * (wn * cols) + mi * cols) col
 
+(* Layout-generic counterpart of
+   [Kuiper...EpilogueCell.output_fragment_cell_convert_eq], stated for the
+   generic [output_fragment'] over an arbitrary [lD].  Same proof: three
+   [cell_convert_eq] steps down the block/warp/subtile chain, all of which are
+   already layout-generic.
+   TODO(upstream): fold into [EpilogueCell] alongside [output_fragment']. *)
+let output_fragment_cell_convert_eq'
+  (#et : Type0) {| scalar et |}
+  (#m #n : nat)
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ m /\ bn /?+ n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn /\
+                tm /?+ (wm * tm) /\ tn /?+ (wn * tn) /\
+                (wm * tm) / tm == wm /\ (wn * tn) / tn == wn))
+  (bid : natlt (m / bm * (n / bn)))
+  (wid : natlt (bm / (wm * tm) * (bn / (wn * tn))))
+  (mi : natlt wm)
+  (nj : natlt wn)
+  (i : natlt tm)
+  (j : natlt tn)
+  (f : perm)
+  (v : et)
+  : Lemma (
+      let blockRow = bid / (n / bn) in
+      let blockCol = bid % (n / bn) in
+      let warpRow = wid / (bn / (wn * tn)) in
+      let warpCol = wid % (bn / (wn * tn)) in
+      let fragRow = tiled_cell (wm * tm) tm mi i in
+      let fragCol = tiled_cell (wn * tn) tn nj j in
+      let blockCellRow = tiled_cell bm (wm * tm) warpRow fragRow in
+      let blockCellCol = tiled_cell bn (wn * tn) warpCol fragCol in
+      T.tensor_pts_to_cell
+        (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
+        #f (idx2 i j) v
+      ==
+      T.tensor_pts_to_cell gD #f
+        (idx2
+          (tiled_cell m bm blockRow blockCellRow)
+          (tiled_cell n bn blockCol blockCellCol))
+        v)
+= let blockRow = bid / (n / bn) in
+  let blockCol = bid % (n / bn) in
+  let warpRow = wid / (bn / (wn * tn)) in
+  let warpCol = wid % (bn / (wn * tn)) in
+  let fragRow = tiled_cell (wm * tm) tm mi i in
+  let fragCol = tiled_cell (wn * tn) tn nj j in
+  let blockCellRow = tiled_cell bm (wm * tm) warpRow fragRow in
+  let blockCellCol = tiled_cell bn (wn * tn) warpCol fragCol in
+  let dBlock = block_tile gD bm bn bid in
+  let dWarp = warp_tile dBlock (wm * tm) (wn * tn) wid in
+  cell_convert_eq dWarp tm tn mi nj i j f v;
+  cell_convert_eq dBlock (wm * tm) (wn * tn)
+    warpRow warpCol fragRow fragCol f v;
+  cell_convert_eq gD bm bn
+    blockRow blockCol blockCellRow blockCellCol f v;
+  ()
+
 let frag_global_cell_eq
   (#et : Type0) {| scalar et |}
   (#m #n : nat)
-  (gD : array2 et (rm m n))
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
   (bm bn tm tn wm wn : pos)
   (#_ : squash (bm /?+ m /\ bn /?+ n /\
                 wm * tm /?+ bm /\ wn * tn /?+ bn))
@@ -150,18 +198,23 @@ let frag_global_cell_eq
   (x : natlt w)
   : Lemma (
       T.tensor_pts_to_cell
-        (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+        (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
         #f (idx2 i (j + x)) (Seq.index v x)
       == T.tensor_pts_to_cell gD #f
            (idx2 globalRow (globalCol + x)) (Seq.index v x))
-= output_fragment_cell_convert_eq gD bm bn tm tn wm wn
+= ML.cancel_mul_div wm tm;
+  ML.cancel_mul_div wn tn;
+  ML.cancel_mul_mod wm tm;
+  ML.cancel_mul_mod wn tn;
+  output_fragment_cell_convert_eq' gD bm bn tm tn wm wn
     bid wid mi nj i (j + x) f (Seq.index v x)
 
 ghost
 fn row_cells_frag_to_global
   (#et : Type0) {| scalar et |}
   (#m #n : nat)
-  (gD : array2 et (rm m n))
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
   (bm bn tm tn wm wn : pos)
   (#_ : squash (bm /?+ m /\ bn /?+ n /\
                 wm * tm /?+ bm /\ wn * tn /?+ bn))
@@ -182,7 +235,7 @@ fn row_cells_frag_to_global
   (f : perm)
   (v : seq et { Seq.length v == w })
   requires
-    row_cells (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+    row_cells (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
       f i j w v
   ensures
     row_cells gD f globalRow globalCol w v
@@ -190,11 +243,11 @@ fn row_cells_frag_to_global
   FStar.Classical.forall_intro
     (frag_global_cell_eq gD bm bn tm tn wm wn bid wid mi nj
       i j w globalRow globalCol f v);
-  unfold row_cells (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+  unfold row_cells (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
     f i j w v;
   forevery_ext #(natlt w)
     (fun x -> T.tensor_pts_to_cell
-      (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+      (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
       #f (idx2 i (j + x)) (Seq.index v x))
     (fun x -> T.tensor_pts_to_cell gD #f
       (idx2 globalRow (globalCol + x)) (Seq.index v x));
@@ -205,7 +258,8 @@ ghost
 fn row_cells_global_to_frag
   (#et : Type0) {| scalar et |}
   (#m #n : nat)
-  (gD : array2 et (rm m n))
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
   (bm bn tm tn wm wn : pos)
   (#_ : squash (bm /?+ m /\ bn /?+ n /\
                 wm * tm /?+ bm /\ wn * tn /?+ bn))
@@ -228,7 +282,7 @@ fn row_cells_global_to_frag
   requires
     row_cells gD f globalRow globalCol w v
   ensures
-    row_cells (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+    row_cells (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
       f i j w v
 {
   FStar.Classical.forall_intro
@@ -239,9 +293,9 @@ fn row_cells_global_to_frag
     (fun x -> T.tensor_pts_to_cell gD #f
       (idx2 globalRow (globalCol + x)) (Seq.index v x))
     (fun x -> T.tensor_pts_to_cell
-      (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+      (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
       #f (idx2 i (j + x)) (Seq.index v x));
-  fold row_cells (output_fragment gD bm bn tm tn wm wn bid wid mi nj)
+  fold row_cells (output_fragment' gD bm bn tm tn wm wn bid wid mi nj)
     f i j w v;
 }
 
@@ -312,8 +366,9 @@ fn drain_group
   (#et_acc #et_d : Type0)
   {| scalar et_acc, scalar et_d, hvc : has_vec_cpy et_d |}
   (#m #n : szp)
-  {| strD : strided_row_major (vtlayout_of_tlayout (rm (SZ.v m) (SZ.v n))) |}
-  (gD : array2 et_d (rm (SZ.v m) (SZ.v n)))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
   (obuf : array et_d)
   (bm bn rows cols wm wn : szp)
@@ -360,7 +415,7 @@ fn drain_group
           A.length obuf == SZ.v (chunk et_d) /\ aligned 16 obuf)
   requires
     own_lane_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (lane_fade eD0 eTarget (SZ.v lane) (SZ.v vg))
       (SZ.v lane)
@@ -368,7 +423,7 @@ fn drain_group
     (exists* (bufv : seq et_d). obuf |-> bufv)
   ensures
     own_lane_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (lane_fade eD0 eTarget (SZ.v lane)
         (SZ.v vg + Kuiper.Barrier.Warp.warp_size))
@@ -387,11 +442,11 @@ fn drain_group
     (SZ.v vg + Kuiper.Barrier.Warp.warp_size);
 
   unfold own_lane_cells
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     em (SZ.v lane);
   VG.cells_extract_group
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (chunk et_d) em
     (fun ij -> in_lane (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v lane) ij)
@@ -403,19 +458,19 @@ fn drain_group
       in_lane (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v lane) ij /\
       VG.group_of (chunk et_d) (SZ.v cols) ij._1 ij._2 =!= SZ.v vg})
     (fun ij -> T.tensor_pts_to_cell
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (idx2 ij._1 ij._2)
       (acc2 em ij._1 ij._2))
     (fun ij -> T.tensor_pts_to_cell
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (idx2 ij._1 ij._2)
       (acc2 em' ij._1 ij._2));
 
   rewrite
     row_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       1.0R
       (VG.grow (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
@@ -424,7 +479,7 @@ fn drain_group
       (VG.group_seq (chunk et_d) em (SZ.v vg))
   as
     row_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       1.0R (SZ.v row) (SZ.v col) (chunk et_d)
       (VG.group_seq (chunk et_d) em (SZ.v vg));
@@ -479,20 +534,20 @@ fn drain_group
   assert pure (chunk et_d /? SZ.v globalCol);
   divides_helper
     (chunk et_d) strD_off strD_str (SZ.v globalRow) (SZ.v globalCol);
-  assert pure ((chunk et_d) /? cell_of_pos (rm (SZ.v m) (SZ.v n))
+  assert pure ((chunk et_d) /? cell_of_pos lD
     (SZ.v globalRow) (SZ.v globalCol));
   assert pure ((chunk et_d) * size #et_d == 16);
   scale_align (chunk et_d)
-    (cell_of_pos (rm (SZ.v m) (SZ.v n)) (SZ.v globalRow) (SZ.v globalCol))
+    (cell_of_pos lD (SZ.v globalRow) (SZ.v globalCol))
     (size #et_d);
   assert pure (
-    16 /?+ (cell_of_pos (rm (SZ.v m) (SZ.v n))
+    16 /?+ (cell_of_pos lD
               (SZ.v globalRow) (SZ.v globalCol) * size #et_d));
   Kuiper.Divides.lemma_divides_sum 16 (base_address (T.core gD))
-    (cell_of_pos (rm (SZ.v m) (SZ.v n))
+    (cell_of_pos lD
       (SZ.v globalRow) (SZ.v globalCol) * size #et_d);
   assert pure (aligned' 16 (T.core gD)
-    (cell_of_pos (rm (SZ.v m) (SZ.v n)) (SZ.v globalRow) (SZ.v globalCol)));
+    (cell_of_pos lD (SZ.v globalRow) (SZ.v globalCol)));
 
   // ---- Convert the run to global coordinates, store, convert back.
   row_cells_frag_to_global gD
@@ -542,13 +597,13 @@ fn drain_group
 
   rewrite
     row_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       1.0R (SZ.v row) (SZ.v col) (chunk et_d)
       (VG.group_seq (chunk et_d) em' (SZ.v vg))
   as
     row_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       1.0R
       (VG.grow (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
@@ -557,13 +612,13 @@ fn drain_group
       (VG.group_seq (chunk et_d) em' (SZ.v vg));
 
   VG.cells_restore_group
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (chunk et_d) em'
     (fun ij -> in_lane (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v lane) ij)
     (SZ.v vg) ();
   fold own_lane_cells
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     em' (SZ.v lane);
 }
@@ -581,8 +636,9 @@ fn drain_band
   (#et_acc #et_d : Type0)
   {| scalar et_acc, scalar et_d, hvc : has_vec_cpy et_d |}
   (#m #n : szp)
-  {| strD : strided_row_major (vtlayout_of_tlayout (rm (SZ.v m) (SZ.v n))) |}
-  (gD : array2 et_d (rm (SZ.v m) (SZ.v n)))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
   (obuf : array et_d)
   (bm bn rows cols wm wn : szp)
@@ -621,14 +677,14 @@ fn drain_band
           A.length obuf == SZ.v (chunk et_d) /\ aligned 16 obuf)
   requires
     live_lane_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (SZ.v lane)
   ensures
     (exists* (bufv : seq et_d). obuf |-> bufv)
   ensures
     live_lane_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       (SZ.v lane)
 {
@@ -637,17 +693,17 @@ fn drain_band
       (fun (a : natlt (SZ.v rows)) (b : natlt (SZ.v cols)) ->
         post_map (acc2 eAcc a b));
   unfold live_lane_cells
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (SZ.v lane);
   with (eD0 : chest2 _ _ _).
     assert own_lane_cells
-      (output_fragment gD bm bn rows cols wm wn
+      (output_fragment' gD bm bn rows cols wm wn
         (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
       eD0 (SZ.v lane);
   lane_fade_start eD0 eTarget (SZ.v lane);
   own_lane_cells_rw
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (SZ.v lane) eD0 (lane_fade eD0 eTarget (SZ.v lane) (SZ.v lane));
 
@@ -660,7 +716,7 @@ fn drain_band
     invariant (exists* (bufv : seq et_d). obuf |-> bufv)
     invariant
       own_lane_cells
-        (output_fragment gD bm bn rows cols wm wn
+        (output_fragment' gD bm bn rows cols wm wn
           (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
         (lane_fade eD0 eTarget (SZ.v lane) (SZ.v !vg))
         (SZ.v lane)
@@ -680,13 +736,13 @@ fn drain_band
 
   lane_fade_done eD0 eTarget (SZ.v lane) (SZ.v !vg);
   own_lane_cells_rw
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (SZ.v lane)
     (lane_fade eD0 eTarget (SZ.v lane) (SZ.v !vg))
     eTarget;
   fold live_lane_cells
-    (output_fragment gD bm bn rows cols wm wn
+    (output_fragment' gD bm bn rows cols wm wn
       (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
     (SZ.v lane);
 }
@@ -817,13 +873,15 @@ let epi_scratch_tile_ctlayout
 
 #push-options "--split_queries always --z3rlimit 15"
 inline_for_extraction noextract
-fn epilogue_core
+fn epilogue
   (#et_ab #et_acc #et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab,
      scalar et_acc, has_vec_cpy et_acc,
      scalar et_d, has_vec_cpy et_d |}
   (#m #n : szp)
-  (gD : array2 et_d (rm (SZ.v m) (SZ.v n)))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
@@ -842,9 +900,10 @@ fn epilogue_core
   preserves gpu
   preserves thread_id nthr tid
   preserves array_fragment_pts_to accFrags #fAcc ems
-  preserves output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
   preserves scratch_tile_live bm bn bk wm wn skew sh nthr tid
   preserves pure (aligned 16 (T.core gD))
+  preserves pure (aligned_strided_row_major (SZ.v (chunk et_d)) strD)
 {
   P.nthr_le_max_threads et_ab et_acc bm bn bk wm wn skew;
   assert pure (SZ.fits tid);
@@ -863,13 +922,6 @@ fn epilogue_core
   assert pure (chunk et_d /? SZ.v n);
   assert pure (chunk et_d /?+ SZ.v n);
   assert pure (chunk et_d /?+ SZ.v wn);
-
-  // ---- the global row-major output stride witness (offset 0, stride n)
-  let strD : strided_row_major (vtlayout_of_tlayout (rm (SZ.v m) (SZ.v n)))
-    = strided_row_major_l2_row_major #(SZ.v m) #(SZ.v n) #() #(concrete_sz_sz n);
-  Kuiper.Array2.Strided.lemma_aligned_strided_row_major_l2_row_major
-    #(SZ.v m) #(SZ.v n) #() #(concrete_sz_sz n) (chunk et_d);
-  assert pure (aligned_strided_row_major (chunk et_d) strD);
 
   // ---- warp/block coordinates (loop-invariant)
   let blocksN : SZ.t = n /^ bn;
@@ -892,16 +944,18 @@ fn epilogue_core
     #(gpu **
       thread_id nthr tid **
       array_fragment_pts_to accFrags #fAcc ems **
-      output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
+      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
       scratch_tile_live bm bn bk wm wn skew sh nthr tid **
-      pure (aligned 16 (T.core gD)))
+      pure (aligned 16 (T.core gD) /\
+            aligned_strided_row_major (SZ.v (chunk et_d)) strD))
     unit
     #(fun _ -> gpu **
       thread_id nthr tid **
       array_fragment_pts_to accFrags #fAcc ems **
-      output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
+      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
       scratch_tile_live bm bn bk wm wn skew sh nthr tid **
-      pure (aligned 16 (T.core gD)))
+      pure (aligned 16 (T.core gD) /\
+            aligned_strided_row_major (SZ.v (chunk et_d)) strD))
   fn obuf {
     let mut i : sz = 0sz;
       while (!i <^ mfrag_wm_sz)
@@ -910,10 +964,11 @@ fn epilogue_core
           gpu **
           thread_id nthr tid **
           array_fragment_pts_to accFrags #fAcc ems **
-          output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
+          output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
           scratch_tile_live bm bn bk wm wn skew sh nthr tid **
           (exists* (bufv : seq et_d). obuf |-> bufv)
         invariant pure (aligned 16 (T.core gD) /\ SZ.v !i <= mfrag wm /\
+                        aligned_strided_row_major (SZ.v (chunk et_d)) strD /\
                         A.length obuf == SZ.v (chunk et_d) /\ aligned 16 obuf)
         decreases (mfrag wm - SZ.v !i)
       {
@@ -931,13 +986,13 @@ fn epilogue_core
           #(SZ.v nthr) #tid;
     
         // extract this band's [live_lane_cells] instance (mi = iv, nj = 0)
-        unfold output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
+        unfold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
         Kuiper.ForEvery.forevery_extract_2
           #(natlt (mfrag wm)) #(natlt 1)
           (SZ.v iv <: natlt (mfrag wm)) (0 <: natlt 1)
           (fun (mi : natlt (mfrag wm)) (nj : natlt 1) ->
             live_lane_cells
-              (output_fragment gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
+              (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
                 bid (tid / Kuiper.Barrier.Warp.warp_size) mi nj)
               (tid % Kuiper.Barrier.Warp.warp_size));
     
@@ -965,12 +1020,12 @@ fn epilogue_core
 
         rewrite
           live_lane_cells
-            (output_fragment gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
+            (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
               bid (tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
             (tid % Kuiper.Barrier.Warp.warp_size)
         as
           live_lane_cells
-            (output_fragment gD bm bn frag_sz wn mfrag_wm_sz 1sz
+            (output_fragment' gD bm bn frag_sz wn mfrag_wm_sz 1sz
               (SZ.v bid_sz) (SZ.v wid_sz) (SZ.v iv / SZ.v 1sz) (SZ.v iv % SZ.v 1sz))
             (SZ.v lane_sz);
     
@@ -1045,8 +1100,7 @@ fn epilogue_core
         assert pure (SZ.v warpCol < SZ.v bn / SZ.v wn);
         assert pure (SZ.v iv < SZ.v mfrag_wm_sz * SZ.v 1sz);
 
-        drain_band #et_acc #et_d #_ #_ #_
-          #m #n #strD
+        drain_band #et_acc #et_d
           gD post_map obuf
           bm bn frag_sz wn mfrag_wm_sz 1sz
           mrow mcol warpRow warpCol bid_sz wid_sz
@@ -1061,12 +1115,12 @@ fn epilogue_core
     
         rewrite
           live_lane_cells
-            (output_fragment gD bm bn frag_sz wn mfrag_wm_sz 1sz
+            (output_fragment' gD bm bn frag_sz wn mfrag_wm_sz 1sz
               (SZ.v bid_sz) (SZ.v wid_sz) (SZ.v iv / SZ.v 1sz) (SZ.v iv % SZ.v 1sz))
             (SZ.v lane_sz)
         as
           live_lane_cells
-            (output_fragment gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
+            (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
               bid (tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
             (tid % Kuiper.Barrier.Warp.warp_size);
     
@@ -1077,7 +1131,7 @@ fn epilogue_core
     
         // re-insert this band's cells into the [forall+], re-fold output_lane_live
         Pulse.Lib.Trade.elim_trade _ _;
-        fold output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
+        fold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
     
         i := iv +^ 1sz;
       }
@@ -1086,46 +1140,3 @@ fn epilogue_core
 
 #pop-options
 
-(* Public entry point.  Identical to [epilogue_core] except that it speaks the
-   layout-generic [output_lane_live'] (the predicate [Shared.kpre]/[kpost] carry)
-   instead of the row-major [output_lane_live].  The two are the same slprop at
-   [lD := rm m n] ([oll_equiv_tac]); bridging in this thin wrapper keeps the
-   heavy core proof isolated from the [slprop_equiv] rewrites. *)
-inline_for_extraction noextract
-fn epilogue
-  (#et_ab #et_acc #et_d : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab,
-     scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
-  (#m #n : szp)
-  (gD : array2 et_d (rm (SZ.v m) (SZ.v n)))
-  (post_map : et_acc -> et_d)
-  (bm bn bk wm wn skew : szp)
-  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
-  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
-  (#_ : squash (mfrag wm * frag == SZ.v wm))
-  (nblk : szp { SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn) })
-  (nthr : szp { SZ.v nthr == P.nthr bm bn wm wn })
-  (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
-  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
-  (#fAcc : perm)
-  (#ems : seq (value_for et_acc FragAcc frag frag frag))
-  (bid : natlt (SZ.v nblk))
-  (tid : natlt (SZ.v nthr))
-  (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
-  ()
-  preserves gpu
-  preserves thread_id nthr tid
-  preserves array_fragment_pts_to accFrags #fAcc ems
-  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-  preserves scratch_tile_live bm bn bk wm wn skew sh nthr tid
-  preserves pure (aligned 16 (T.core gD))
-{
-  rewrite output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-       as output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-       by (oll_equiv_tac ());
-  epilogue_core gD post_map bm bn bk wm wn skew nblk nthr sh accFrags bid tid ();
-  rewrite output_lane_live gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-       as output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-       by (oll_equiv_tac ());
-}

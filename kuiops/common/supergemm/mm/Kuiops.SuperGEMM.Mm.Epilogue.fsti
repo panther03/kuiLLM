@@ -29,14 +29,23 @@ module Kuiops.SuperGEMM.Mm.Epilogue
    BAND tiling [tm = frag, tn = wn, wm = mfrag, wn = 1], so the drain's vec-group
    lane partition coincides exactly with D's lane ownership.  The Kernel must
    instantiate [Shared.kpre]'s [(tm, tn, wmf, wnf)] with [(frag, wn, mfrag, 1)]
-   (reconciliation [mfrag * frag == wm], [1 * wn == wn]). *)
+   (reconciliation [mfrag * frag == wm], [1 * wn == wn]).
+
+   D is layout-generic: it carries [ctlayout] and [strided_row_major] witnesses
+   (like A and B) rather than being pinned to row-major.  The vectorized store's
+   alignment obligation for a general strided layout cannot be discharged from
+   [chunk et_d /?+ n] alone, so the caller supplies it as the precondition
+   [aligned_strided_row_major (chunk et_d) strD] (the same pattern A/B use in
+   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelBody.kf]). *)
 
 #lang-pulse
 
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor { array2, layout2 }
-open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
+open Kuiper.Array2.Strided
+  { strided_row_major, cell_of_pos, aligned_strided_row_major }
+open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live' }
 
@@ -54,7 +63,9 @@ fn epilogue
      scalar et_acc, has_vec_cpy et_acc,
      scalar et_d, has_vec_cpy et_d |}
   (#m #n : szp)
-  (gD : array2 et_d (rm (SZ.v m) (SZ.v n)))
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
@@ -76,3 +87,4 @@ fn epilogue
   preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
   preserves scratch_tile_live bm bn bk wm wn skew sh nthr tid
   preserves pure (aligned 16 (T.core gD))
+  preserves pure (aligned_strided_row_major (SZ.v (chunk et_d)) strD)
