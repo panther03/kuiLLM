@@ -495,6 +495,7 @@ _MAX_THREADS = 1024
 _PREFERRED_WARPS = 8
 _MAX_BLOCKS = 2097152
 _WARP = 32
+_FRAG = 16   # the sm_80/sm_86 WMMA shape, 16x16x16
 
 # The GEMM operands are copied through `has_vec_cpy`, which exists for these
 # element types only.
@@ -514,10 +515,11 @@ _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
 _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
                 "tc2d_to_bcast": "Tc2DToBcast",
-                "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D"}
+                "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D",
+                "supergemm": "SuperGEMM"}
 
 # Backends taking B column-major (K, N) with leading dimension K.
-_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast")
+_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm")
 
 
 def _tc_device_supported(dtype, device):
@@ -632,10 +634,70 @@ def _tc2d_tiles(dtype, M, N, K, tn=False):
     return tiles
 
 
-def _tiles(backend, dtype, batch, M, N, K):
+def _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K):
+    """Every legal SuperGEMM (software-pipelined tensor-core) parameterization.
+
+    The tuning parameters are ``bm bn bk wm wn skew``; ``wm``/``wn`` are the
+    warp tile in ELEMENTS (not fragment counts), and ``skew`` is the shared-tile
+    row padding. Everything else is derived, exactly as in
+    ``Kuiops.SuperGEMM.Mm.Params``, and the filters below are that module's
+    ``constraints`` predicate plus the staging partition's ``geo_ok`` and the
+    shared-memory budget. Nothing here is a heuristic restriction: a tiling is
+    listed iff the verified kernel accepts it."""
+    tiles = []
+    chunk = 16 // dtype.itemsize
+    chunk_acc = 16 // acc_dtype.itemsize
+    chunk_d = 16 // out_dtype.itemsize
+    # The epilogue's 128-bit stores run along D's rows and along the warp tile.
+    if N % chunk_d:
+        return tiles
+    for bm in (128, 64):
+        if M % bm:
+            continue
+        for bn in (128, 64):
+            if N % bn:
+                continue
+            for bk in (32, 64, 16):
+                if K % bk or bk % _FRAG or bk % chunk:
+                    continue
+                inner = []
+                for wm in (64, 32, 16, 128):
+                    if wm % _FRAG or bm % wm:
+                        continue
+                    for wn in (64, 32, 16, 128):
+                        if wn % _FRAG or bn % wn:
+                            continue
+                        warps = (bm // wm) * (bn // wn)
+                        nthr = warps * _WARP
+                        if nthr > _MAX_THREADS:
+                            continue
+                        fill = chunk * nthr
+                        # geo_ok: the staging sweep must partition both tiles.
+                        if (bm * bk) % fill or (bn * bk) % fill or fill % bk:
+                            continue
+                        skew = chunk  # smallest legal padding: chunk | skew
+                        ldt = bk + skew
+                        lde = wn + chunk_acc
+                        smem = (2 * (bm + bn) * ldt * dtype.itemsize
+                                + warps * _FRAG * lde * acc_dtype.itemsize)
+                        if smem > _SHMEM_BYTES:
+                            continue
+                        if _tc2d_frag_regs(wm // _FRAG, wn // _FRAG) > _REG_BUDGET:
+                            continue
+                        inner.append(
+                            ((abs(warps - _PREFERRED_WARPS), -wn),
+                             dict(bm=bm, bn=bn, bk=bk, wm=wm, wn=wn, skew=skew)))
+                inner.sort(key=lambda w: w[0])
+                tiles.extend(t for _, t in inner)
+    return tiles
+
+
+def _tiles(backend, dtype, batch, M, N, K, acc_dtype=None, out_dtype=None):
     """Legal tilings, in priority order, whose grid also fits in one launch."""
     if backend == "bt2d":
         candidates = _bt2d_tiles(dtype, M, N, K)
+    elif backend == "supergemm":
+        candidates = _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K)
     else:
         candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend in _TN_BACKENDS))
     return [
@@ -758,6 +820,9 @@ def _gemm_wrapper_ctx(spec, name):
 class MmImpl(_MatmulFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
+    # NOTE: "supergemm" is deliberately absent until the pipelined kernel's
+    # top-level launcher lands; the rest of its plumbing (tile enumeration,
+    # templates, wrapper) is already in place.
     backends = ("tc2d_tn", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.mm.default"
 
@@ -789,7 +854,8 @@ class MmImpl(_MatmulFamily):
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
             for backend, acc_dtype, out_dtype in plans
             if _tn_out_ok(backend, N, out_dtype)
-            for tile in _tiles(backend, A.dtype, 1, M, N, K)
+            for tile in _tiles(backend, A.dtype, 1, M, N, K,
+                               acc_dtype=acc_dtype, out_dtype=out_dtype)
         ]
         return self._select(args, kwargs, specs)
 
@@ -833,7 +899,8 @@ class BmmImpl(_MatmulFamily):
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
             for backend, acc_dtype, out_dtype in self._plans(kwargs, A.dtype, A.device)
-            for tile in _tiles(backend, A.dtype, batch, M, N, K)
+            for tile in _tiles(backend, A.dtype, batch, M, N, K,
+                               acc_dtype=acc_dtype, out_dtype=out_dtype)
         ]
         return self._select(args, kwargs, specs)
 
@@ -897,7 +964,8 @@ class AddmmImpl(_MatmulFamily):
             in self._plans(kwargs, A.dtype, A.device, backends)
             # C is the output buffer, so it already has to be the output type.
             if Cin.dtype == out_dtype and _tn_out_ok(backend, N, out_dtype)
-            for tile in _tiles(backend, A.dtype, 1, M, N, K)
+            for tile in _tiles(backend, A.dtype, 1, M, N, K,
+                               acc_dtype=acc_dtype, out_dtype=out_dtype)
         ]
         return self._select(args, kwargs, specs)
 
