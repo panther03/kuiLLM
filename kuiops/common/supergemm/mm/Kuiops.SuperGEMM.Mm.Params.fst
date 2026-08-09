@@ -35,6 +35,16 @@ let scratch_sz
     let wa = (bm /^ wm) *^ (bn /^ wn) in
     wa *^ frag_sz *^ (wn +^ chunk et_acc)
 
+let nthr_sz bm bn wm wn
+  (#_ : squash (wm /?+ SZ.v bm /\ wn /?+ SZ.v bn))
+  (#_ : squash (SZ.fits (nthr bm bn wm wn)))
+  : (x : szp { SZ.v x == nthr bm bn wm wn })
+  = warps_m_pos bm wm;
+    warps_m_pos bn wn;
+    ML.lemma_mult_le_right (SZ.v warp_size) 1 (warps bm bn wm wn);
+    let wa = (bm /^ wm) *^ (bn /^ wn) in
+    wa *^ warp_size
+
 let ldt_pos (bk skew : szp) = ()
 
 let chunk_divides_ldt et_ab et_acc bm bn bk wm wn skew =

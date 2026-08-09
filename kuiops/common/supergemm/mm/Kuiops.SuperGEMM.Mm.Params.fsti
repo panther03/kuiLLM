@@ -102,6 +102,15 @@ val scratch_sz
   (#_ : squash (SZ.fits (warps bm bn wm wn * frag * lde et_acc wn)))
   : (x : szp { SZ.v x == warps bm bn wm wn * frag * lde et_acc wn })
 
+(* Machine-width thread count, recomputed from the (compile-time) tiling so the
+   cp.async staging trip counts constant-fold, rather than being laundered
+   through the runtime [nthr] kernel argument. *)
+inline_for_extraction noextract
+val nthr_sz (bm bn wm wn : szp)
+  (#_ : squash (wm /?+ SZ.v bm /\ wn /?+ SZ.v bn))
+  (#_ : squash (SZ.fits (nthr bm bn wm wn)))
+  : (x : szp { SZ.v x == nthr bm bn wm wn })
+
 (* ---- consequences downstream modules need ---- *)
 
 val ldt_pos (bk skew : szp) : Lemma (ldt bk skew > 0)

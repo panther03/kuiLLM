@@ -337,13 +337,19 @@ fn kf
   let warp_m : szlt (SZ.v bm / SZ.v wm) = wid /^ wnn;
   let warp_n : szlt (SZ.v bn / SZ.v wn) = wid %^ wnn;
 
-  (* ---- hoisted staging addressing (computed ONCE) ---- *)
+  (* ---- hoisted staging addressing (computed ONCE) ----
+     [nthrc] recomputes the thread count from the (compile-time) tiling so the
+     staging trip counts / row step constant-fold at codegen, instead of being
+     laundered through the runtime [nthr] kernel argument.  [SZ.v nthrc ==
+     SZ.v nthr] definitionally (both reveal to [P.nthr bm bn wm wn]), so every
+     downstream [squash] stated on [SZ.v nthr] is unaffected. *)
+  let nthrc = P.nthr_sz bm bn wm wn;
   let ch : szp = chunk et_ab;
   let a_t_row   = (tid *^ ch) /^ bk;
   let a_t_col   = (tid *^ ch) %^ bk;
-  let a_row_step = (ch *^ nthr) /^ bk;
-  let a_iters   = (bm *^ bk) /^ (ch *^ nthr);
-  let b_iters   = (bn *^ bk) /^ (ch *^ nthr);
+  let a_row_step = (ch *^ nthrc) /^ bk;
+  let a_iters   = (bm *^ bk) /^ (ch *^ nthrc);
+  let b_iters   = (bn *^ bk) /^ (ch *^ nthrc);
 
   (* ---- allocate the per-warp accumulator fragment array ONCE ----
      Hoisted out of [kloop] into [kf] (repo convention: kernels take their
