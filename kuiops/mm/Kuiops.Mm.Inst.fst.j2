@@ -63,6 +63,7 @@ let {{ name }} (rows cols shared : szp)
     supergemm_mm_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz
         (fcast #({{ acc_et }}) #({{ out_et }}))
+        (fun (r:real) -> r)
         rows shared cols gA gB gD
 {% elif backend == "bt2d" %}
 // BlockTiling2D is batched; an [m, n] row-major buffer *is* a [1, m, n] batched

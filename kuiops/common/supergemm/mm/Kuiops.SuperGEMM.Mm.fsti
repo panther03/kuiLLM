@@ -7,11 +7,10 @@ module Kuiops.SuperGEMM.Mm
    [post_map : et_acc -> et_d] is applied elementwise to the accumulator on
    the way out (at the JIT instantiation this is [Kuiper.Float.Casts.fcast]).
 
-   Step 1: memory-safety only.  The pledge hands D back at some unspecified
-   value; A and B likewise come back existentially quantified (see the
-   [Kernel]/[Shared] note -- a global read share is re-materialised through the
-   cp.async pledge, which does not yet track content preservation).  The
-   functional specification ([eD' %~ ...]) is step 4.
+   A and B come back at their entry values: the kernel only ever reads them
+   (under a [Frac] share), so their contents are preserved.  D is pinned
+   cell-for-cell -- [%~] on a [chest2] is elementwise, so no implementation
+   can satisfy this while leaving part of D untouched.
 
    Specification.  Where the other GEMMs state
 
@@ -36,7 +35,16 @@ module Kuiops.SuperGEMM.Mm
    [post_map_r] is tied to [post_map] by [post_map %~ post_map_r], the unary
    analogue of the [approx2 comb comb_r] the other GEMMs use (via
    [Kuiper.Approximates.approx_function_can_approximate]).  At the JIT
-   instantiation [post_map] is [fcast] and [post_map_r] is the identity.
+   instantiation [post_map] is [fcast] and [post_map_r] is the identity;
+   [Kuiper.Float.Casts.fcast_approx] discharges the refinement by SMTPat.
+
+   Step 6 note: the tiling lemmas ([matmul_decompose_lemma],
+   [matmul_tiles_lemma]) decompose along the second operand's natural index,
+   which here is [mtranspose rB] -- the transpose of B's physical layout.
+   Bridge that ONCE at this launcher with [Kuiper.Ghost.TensorTranspose], which
+   reinterprets a row-major [(cols, shared)] array as a column-major
+   [(shared, cols)] one holding [mtranspose m], rather than threading the
+   transpose through every tile lemma.
 
    This interface deliberately declares exactly ONE [fn] and nothing else: it
    is imported by every JIT'd operator, so anything extra costs compile time on

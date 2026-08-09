@@ -9,6 +9,8 @@ module Kuiops.SuperGEMM.Mm
 open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Tensor
+open Kuiper.EMatrix
+open Kuiper.Chest { chest_map }
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.TensorCore
 open Kuiper.Array2.Strided
@@ -16,6 +18,7 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Kernel { mk_kernel }
 
+module MS = Kuiper.Spec.GEMM
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
@@ -25,9 +28,9 @@ module P = Kuiops.SuperGEMM.Mm.Params
 inline_for_extraction noextract
 fn supergemm_mm_async
   (et_ab et_acc et_d : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab |}
-  {| scalar et_acc, has_vec_cpy et_acc |}
-  {| scalar et_d,  has_vec_cpy et_d |}
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
+  {| scalar et_acc, has_vec_cpy et_acc, real_like et_acc |}
+  {| scalar et_d,  has_vec_cpy et_d,  real_like et_d |}
   (bm bn bk wm wn skew : szp)
   (#sqc : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_vf : squash (valid_frag_et_dims et_ab FragA frag frag frag /\
@@ -36,6 +39,7 @@ fn supergemm_mm_async
                 valid_frag_et_comb et_ab et_acc /\
                 SZ.fits (SZ.v wm / frag * (SZ.v wn / frag))))
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (rows shared cols : szp)
   (#lA : layout2 (SZ.v rows) (SZ.v shared)) {| T.ctlayout lA |}
        {| strA : strided_row_major (vtlayout_of_tlayout lA) |}
