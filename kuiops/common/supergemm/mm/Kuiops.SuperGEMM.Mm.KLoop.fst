@@ -37,6 +37,14 @@ module P = Kuiops.SuperGEMM.Mm.Params
 
 let acc_len_reveal wm wn = reveal_opaque (`%acc_len) acc_len
 
+(* Parity-flip buffer selection: the buffer holding k-tile [r+1] under the
+   double-buffer scheme is the opposite of the one holding k-tile [r].  Proven
+   once as a pure lemma so the k-loop body need not do fragile inline [ite]
+   arithmetic. *)
+let sel_flip (#a:Type0) (r:nat) (x y:a)
+  : Lemma ((if (r + 1) % 2 = 0 then x else y) == (if r % 2 = 0 then y else x))
+  = FStar.Math.Lemmas.lemma_mod_add_distr 1 r 2
+
 let acc_len_alloc wm wn = reveal_opaque (`%acc_len) acc_len
 
 (* [warp_m * mfrag + i] indexes a 16-row band of the [bm x bk] A tile. *)
@@ -314,172 +322,6 @@ let lemma_subtile_aligned
   ()
 #pop-options
 
-(* ---- parity fold/unfold of the pipe contract ---- *)
-#push-options "--fuel 2 --ifuel 1"
-ghost
-fn fold_pipe_p_even
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 0 /\ it < ktiles) **
-    pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB0) nthr tid **
-    (if it = 0 then
-       pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-       pipe_live (skewed_view bn bk skew sarB1) nthr tid
-     else
-       pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-       pipe_sharing (skewed_view bn bk skew sarB1) nthr)
-  ensures
-    pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-{
-  rewrite
-    (pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB0) nthr tid **
-     (if it = 0 then
-        pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-        pipe_live (skewed_view bn bk skew sarB1) nthr tid
-      else
-        pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-        pipe_sharing (skewed_view bn bk skew sarB1) nthr))
-  as
-    (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid);
-}
-
-ghost
-fn fold_pipe_p_odd
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 1 /\ it < ktiles) **
-    pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB1) nthr tid **
-    pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-    pipe_sharing (skewed_view bn bk skew sarB0) nthr
-  ensures
-    pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-{
-  rewrite
-    (pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB1) nthr tid **
-     pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-     pipe_sharing (skewed_view bn bk skew sarB0) nthr)
-  as
-    (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid);
-}
-
-ghost
-fn unfold_pipe_q_even
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 0 /\ it < ktiles) **
-    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-  ensures
-    pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-    pipe_sharing (skewed_view bn bk skew sarB0) nthr **
-    pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB1) nthr tid
-{
-  rewrite
-    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
-  as
-    (pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-     pipe_sharing (skewed_view bn bk skew sarB0) nthr **
-     pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB1) nthr tid);
-}
-
-ghost
-fn unfold_pipe_q_odd
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 1 /\ it < ktiles) **
-    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-  ensures
-    pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-    pipe_sharing (skewed_view bn bk skew sarB1) nthr **
-    pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB0) nthr tid
-{
-  rewrite
-    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid)
-  as
-    (pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-     pipe_sharing (skewed_view bn bk skew sarB1) nthr **
-     pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB0) nthr tid);
-}
-
-ghost
-fn fold_pipe_q_even
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 0 /\ it < ktiles) **
-    pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-    pipe_sharing (skewed_view bn bk skew sarB0) nthr **
-    pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB1) nthr tid
-  ensures
-    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-{
-  rewrite
-    (pipe_sharing (skewed_view bm bk skew sarA0) nthr **
-     pipe_sharing (skewed_view bn bk skew sarB0) nthr **
-     pipe_live (skewed_view bm bk skew sarA1) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB1) nthr tid)
-  as
-    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid);
-}
-
-ghost
-fn fold_pipe_q_odd
-  (#et : Type0) {| sized et, has_vec_cpy et |}
-  (bm bn bk skew : szp)
-  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
-  (it : nat) (tid : natlt nthr)
-  requires
-    pure (it % 2 == 1 /\ it < ktiles) **
-    pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-    pipe_sharing (skewed_view bn bk skew sarB1) nthr **
-    pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-    pipe_live (skewed_view bn bk skew sarB0) nthr tid
-  ensures
-    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid
-{
-  rewrite
-    (pipe_sharing (skewed_view bm bk skew sarA1) nthr **
-     pipe_sharing (skewed_view bn bk skew sarB1) nthr **
-     pipe_live (skewed_view bm bk skew sarA0) nthr tid **
-     pipe_live (skewed_view bn bk skew sarB0) nthr tid)
-  as
-    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles it tid);
-}
-#pop-options
 
 
 (* ---- carry predicate: the parity/k-tile-dependent tail of the k-loop
@@ -600,169 +442,81 @@ fn fold_pending_even
   as
     (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
 }
-
-ghost
-fn fold_pending_even_pos
-  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
-  (#m #n #k : szp)
-  (bm bn bk skew : szp)
-  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
-  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
-  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
-  (fA fB : perm)
-  (nthr : pos) (tid : natlt nthr)
-  (block_row : nat { block_row < SZ.v m / SZ.v bm })
-  (block_col : nat { block_col < SZ.v n / SZ.v bn })
-  (b_c : PC.pipeline_batch_t)
-  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
-                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
-  (vkt : nat { vkt < SZ.v k / SZ.v bk })
-  requires
-    pure (vkt % 2 = 0 /\ vkt <> 0) **
-    pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
-      b_c sq false vkt
-  ensures
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
-{
-  rewrite
-    (pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
-      b_c sq false vkt)
-  as
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
-}
-
-ghost
-fn fold_pending_odd
-  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
-  (#m #n #k : szp)
-  (bm bn bk skew : szp)
-  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
-  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
-  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
-  (fA fB : perm)
-  (nthr : pos) (tid : natlt nthr)
-  (block_row : nat { block_row < SZ.v m / SZ.v bm })
-  (block_col : nat { block_col < SZ.v n / SZ.v bn })
-  (b_c : PC.pipeline_batch_t)
-  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
-                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
-  (vkt : nat { vkt < SZ.v k / SZ.v bk })
-  requires
-    pure (vkt % 2 = 1) **
-    pending_body bm bn bk skew gA gB sarA1 sarA0 sarB1 sarB0 fA fB nthr tid block_row block_col
-      b_c sq false vkt
-  ensures
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
-{
-  rewrite
-    (pending_body bm bn bk skew gA gB sarA1 sarA0 sarB1 sarB0 fA fB nthr tid block_row block_col
-      b_c sq false vkt)
-  as
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
-}
-
-ghost
-fn unfold_pending_even
-  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
-  (#m #n #k : szp)
-  (bm bn bk skew : szp)
-  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
-  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
-  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
-  (fA fB : perm)
-  (nthr : pos) (tid : natlt nthr)
-  (block_row : nat { block_row < SZ.v m / SZ.v bm })
-  (block_col : nat { block_col < SZ.v n / SZ.v bn })
-  (b_c : PC.pipeline_batch_t)
-  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
-                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
-  (vkt : nat { vkt < SZ.v k / SZ.v bk })
-  requires
-    pure (vkt % 2 = 0) **
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
-  ensures
-    pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
-      b_c sq (vkt = 0) vkt
-{
-  rewrite
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
-  as
-    (pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
-      b_c sq (vkt = 0) vkt);
-}
-
-ghost
-fn unfold_pending_odd
-  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
-  (#m #n #k : szp)
-  (bm bn bk skew : szp)
-  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
-  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
-  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
-  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
-  (fA fB : perm)
-  (nthr : pos) (tid : natlt nthr)
-  (block_row : nat { block_row < SZ.v m / SZ.v bm })
-  (block_col : nat { block_col < SZ.v n / SZ.v bn })
-  (b_c : PC.pipeline_batch_t)
-  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
-                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
-  (vkt : nat { vkt < SZ.v k / SZ.v bk })
-  requires
-    pure (vkt % 2 = 1) **
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
-  ensures
-    pending_body bm bn bk skew gA gB sarA1 sarA0 sarB1 sarB0 fA fB nthr tid block_row block_col
-      b_c sq false vkt
-{
-  rewrite
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
-  as
-    (pending_body bm bn bk skew gA gB sarA1 sarA0 sarB1 sarB0 fA fB nthr tid block_row block_col
-      b_c sq false vkt);
-}
 #pop-options
 
 (* ---- parity-independent per-k-tile compute + next-tile staging ----
    [cur*] are the buffers just read (held read-shared, consumed only by
    [subproducts]); [oth*] are the now-writable buffers into which k-tile
    [kt1 = kt+1] is staged. *)
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 15"
+(* ---- the "cur-buffer pledge + global-restore wands" half of [pending],
+   named so [stage_next] can produce it and the k-loop can recombine it with
+   the read-share of the just-consumed buffer.  [pending_body cur oth false]
+   is exactly [staged_half cur ** pipe_sharing oth]. ---- *)
+let staged_half
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (curA : larray et_ab (SZ.v bm * ldt bk skew))
+  (curB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (b_c : PC.pipeline_batch_t)
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  : slprop
+= pledge0 (PC.batch_done b_c)
+    (FB.live_strided_chunks (skewed_view bm bk skew curA) nthr tid **
+     FB.live_strided_chunks (skewed_view bn bk skew curB) nthr tid **
+     (exists* eA eB.
+        (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eA) **
+        (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eB))) **
+  (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
+     forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
+       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
+         @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
+  (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
+     forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
+       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
+         @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
+#pop-options
+
+(* ---- stage one k-tile [kt] of the globals into the writable buffers
+   [dstA]/[dstB], leaving [staged_half] (the pledge + global-restore wands)
+   plus the committed/successor batches.  This is the ONLY copy of the
+   cp.async staging wrapper: it is called both by the prologue (k-tile 0 into
+   buffer 0) and by the single k-loop body (k-tile kt+1 into the opposite
+   buffer). ---- *)
 #push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 inline_for_extraction noextract
-fn body_compute
-  (#et_ab #et_acc : Type0)
+fn stage_next
+  (#et_ab : Type0)
   {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
-  {| _sac : scalar et_acc |} {| _vac : has_vec_cpy et_acc |}
   (#m #n #k : szp)
-  (bm bn bk wm wn skew : szp)
+  (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| _clA : T.ctlayout lA |}
        {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
   (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) {| _clB : T.ctlayout lB |}
        {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB)
-  (curbufA othbufA : larray et_ab (SZ.v bm * ldt bk skew))
-  (curbufB othbufB : larray et_ab (SZ.v bn * ldt bk skew))
-  (fmap : et_ab -> et_ab)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
-  (nthr : szp { SZ.v nthr == P.nthr bm bn wm wn })
+  (nthr : szp)
   (tid : szlt nthr)
   (block_row : szlt (SZ.v m / SZ.v bm))
   (block_col : szlt (SZ.v n / SZ.v bn))
-  (warp_m : szlt (SZ.v bm / SZ.v wm))
-  (warp_n : szlt (SZ.v bn / SZ.v wn))
   (a_t_row a_t_col a_row_step a_iters : SZ.t)
   (b_t_row b_t_col b_row_step b_iters : SZ.t)
   (ldsz : szp { SZ.v ldsz == ldt bk skew })
-  (kt1 : szlt (SZ.v k / SZ.v bk))
-  (b_l : PC.pipeline_batch_t)
-  (aFrags  : array (fragment et_ab  FragA   frag frag frag FragLRM))
-  (bFrags  : array (fragment et_ab  FragB   frag frag frag FragLCM))
-  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
-  (sq_c : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
+  (kt : SZ.t)
+  (b : PC.pipeline_batch_t)
   (sq_g : squash (geo_ok (SZ.v bm) (SZ.v bk) (SZ.v (chunk et_ab)) (SZ.v nthr) /\
                   geo_ok (SZ.v bn) (SZ.v bk) (SZ.v (chunk et_ab)) (SZ.v nthr)))
   (sq_d : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\ SZ.v bk /?+ SZ.v k /\
@@ -781,120 +535,67 @@ fn body_compute
      aligned_strided_row_major (SZ.v (chunk et_ab)) str_A /\
      aligned_strided_row_major (SZ.v (chunk et_ab)) str_B /\
      is_global gA /\ is_global gB /\
-     aligned 16 (T.core (skewed_view bm bk skew othbufA)) /\
-     aligned 16 (T.core (skewed_view bn bk skew othbufB))))
-  (sq_v : squash (
-     valid_frag_et_dims et_ab FragA frag frag frag /\
-     valid_frag_et_dims et_ab FragB frag frag frag /\
-     valid_frag_et_dims et_acc FragAcc frag frag frag /\
-     valid_frag_et_comb et_ab et_acc /\
-     length aFrags == SZ.v wm / frag /\ length bFrags == SZ.v wn / frag /\
-     length accFrags == acc_len wm wn))
+     aligned 16 (T.core (skewed_view bm bk skew dstA)) /\
+     aligned 16 (T.core (skewed_view bn bk skew dstB))))
+  (sq_dd : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                   SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (sq_ch : squash (SZ.v (chunk et_ab) /?+ SZ.v bk /\ SZ.v (chunk et_ab) /?+ SZ.v skew /\
+                   SZ.v kt < SZ.v k / SZ.v bk))
   ()
+  preserves gpu
   requires
-    gpu **
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
-    pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr) **
-    pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr) **
-    pipe_live (skewed_view bm bk skew othbufA) (SZ.v nthr) (SZ.v tid) **
-    pipe_live (skewed_view bn bk skew othbufB) (SZ.v nthr) (SZ.v tid) **
-    live aFrags ** live bFrags ** live accFrags **
-    PC.batch_live b_l
-  returns b_l' : PC.pipeline_batch_t
+    pipe_live (skewed_view bm bk skew dstA) (SZ.v nthr) (SZ.v tid) **
+    pipe_live (skewed_view bn bk skew dstB) (SZ.v nthr) (SZ.v tid) **
+    PC.batch_live b
+  returns b' : PC.pipeline_batch_t
   ensures
-    gpu **
-    pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr) **
-    pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr) **
-    PC.batch_committed b_l ** PC.batch_live b_l' **
-    pledge0 (PC.batch_done b_l)
-      (FB.live_strided_chunks (skewed_view bm bk skew othbufA) (SZ.v nthr) (SZ.v tid) **
-       FB.live_strided_chunks (skewed_view bn bk skew othbufB) (SZ.v nthr) (SZ.v tid) **
-       (exists* eA eB.
-          (array2_subtile gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1) |-> Frac fA eA) **
-          (array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1) |-> Frac fB eB))) **
-    (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
-       forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-         (array2_subtile gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1) |-> Frac fA tm')
-           @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1) tm')) **
-    (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
-       forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-         (array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1) |-> Frac fB tm')
-           @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1) tm')) **
-    live aFrags ** live bFrags ** live accFrags
+    staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+      (SZ.v block_row) (SZ.v block_col) b () (SZ.v kt) **
+    PC.batch_committed b ** PC.batch_live b'
 {
-  (* ---- 6. extract next k-tile subviews of global A/B ---- *)
   with egA. assert (gA |-> Frac fA egA);
-  let tileA1 = array2_extract_tile_st gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1);
+  let tileA1 = array2_extract_tile_st gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt);
   with egB. assert (gB |-> Frac fB egB);
-  let tileB1 = array2_extract_tile_st gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1);
+  let tileB1 = array2_extract_tile_st gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt);
 
-  (* ---- 7. stage k-tile [kt1] into the now-writable OTHER buffer ---- *)
-  unfold (pipe_live (skewed_view bm bk skew othbufA) (SZ.v nthr) (SZ.v tid));
-  unfold (FB.live_strided_chunks (skewed_view bm bk skew othbufA) (SZ.v nthr) (SZ.v tid));
-  with emAd. assert (FB.own_strided_chunks (skewed_view bm bk skew othbufA) emAd (SZ.v nthr) (SZ.v tid));
-  unfold (pipe_live (skewed_view bn bk skew othbufB) (SZ.v nthr) (SZ.v tid));
-  unfold (FB.live_strided_chunks (skewed_view bn bk skew othbufB) (SZ.v nthr) (SZ.v tid));
-  with emBd. assert (FB.own_strided_chunks (skewed_view bn bk skew othbufB) emBd (SZ.v nthr) (SZ.v tid));
+  unfold (pipe_live (skewed_view bm bk skew dstA) (SZ.v nthr) (SZ.v tid));
+  unfold (FB.live_strided_chunks (skewed_view bm bk skew dstA) (SZ.v nthr) (SZ.v tid));
+  with emAd. assert (FB.own_strided_chunks (skewed_view bm bk skew dstA) emAd (SZ.v nthr) (SZ.v tid));
+  unfold (pipe_live (skewed_view bn bk skew dstB) (SZ.v nthr) (SZ.v tid));
+  unfold (FB.live_strided_chunks (skewed_view bn bk skew dstB) (SZ.v nthr) (SZ.v tid));
+  with emBd. assert (FB.own_strided_chunks (skewed_view bn bk skew dstB) emBd (SZ.v nthr) (SZ.v tid));
 
-  lemma_subtile_aligned lA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1) (SZ.v (chunk et_ab));
-  lemma_subtile_aligned lB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1) (SZ.v (chunk et_ab));
+  lemma_subtile_aligned lA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt) (SZ.v (chunk et_ab));
+  lemma_subtile_aligned lB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt) (SZ.v (chunk et_ab));
   lemma_aligned_srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz (SZ.v (chunk et_ab));
   lemma_aligned_srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz (SZ.v (chunk et_ab));
 
-  let b_l' = stage_tiles
+  let b' = stage_tiles
     #et_ab #_ #_ #_ #_
     #(l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew))
     #(c_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
     #(srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
-    (skewed_view bm bk skew othbufA)
+    (skewed_view bm bk skew dstA)
     tileA1
     #_
     #(l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew))
     #(c_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz)
     #(srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz)
-    (skewed_view bn bk skew othbufB)
+    (skewed_view bn bk skew dstB)
     tileB1
     (SZ.v nthr) (SZ.v tid) () ()
     fA fB
     a_t_row a_t_col a_row_step a_iters
     b_t_row b_t_col b_row_step b_iters
-    b_l () ();
+    b () ();
 
-  rewrite each tileA1 as array2_subtile gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt1);
-  rewrite each tileB1 as array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt1);
+  rewrite each tileA1 as array2_subtile gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt);
+  rewrite each tileB1 as array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt);
 
-  (* ---- 8. fragment math on the CURRENT (read-shared) buffer ---- *)
-  unfold (pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr));
-  with emCA. assert (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  unfold (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  unfold (pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr));
-  with emCB. assert (FB.bp_sharing (skewed_view bn bk skew curbufB) emCB (SZ.v nthr));
-  unfold (FB.bp_sharing (skewed_view bn bk skew curbufB) emCB (SZ.v nthr));
-
-  TR.atranspose_fwd (skewed_view bn bk skew curbufB);
-
-  subproducts bm bn bk wm wn fmap aFrags bFrags accFrags
-    #(l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew))
-    #(c_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
-    #(srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
-    (skewed_view bm bk skew curbufA)
-    #(TR.ltranspose (l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew)))
-    #(TR.ctlayout_ltranspose_inst
-        #(SZ.v bn) #(SZ.v bk)
-        #(l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew))
-        #(c_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz) #())
-    #(TR.scm_of_srm (srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz))
-    (TR.atranspose (skewed_view bn bk skew curbufB))
-    warp_m warp_n ();
-
-  TR.atranspose_back (skewed_view bn bk skew curbufB);
-
-  fold (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  fold (pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr));
-  fold (FB.bp_sharing (skewed_view bn bk skew curbufB) (TR.ctranspose (TR.ctranspose emCB)) (SZ.v nthr));
-  fold (pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr));
-
-  b_l'
+  fold (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+          (SZ.v block_row) (SZ.v block_col) b () (SZ.v kt));
+  b'
 }
 #pop-options
 
@@ -1014,7 +715,507 @@ fn restore_globals
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
+(* =====================================================================
+   Single-body k-loop scaffolding.
+
+   The k-loop runs ONE concrete body [ktiles] times; buffer parity and the
+   last-tile case are handled in ghost steps.  [srcA]/[srcB] name the buffer
+   read this iteration (= [buf]), [dstA]/[dstB] the opposite buffer staged into
+   (= [buf ^ 1]); they are selected by a runtime [if] (a value-select => a CUDA
+   ternary, not duplicated code).  The generic reconciliation helpers below
+   fold/unfold the parity-generic [pending]/[pipe_p]/[pipe_q] predicates against
+   [src*]/[dst*] using the pure equations [srcA == (if vkt%2=0 then sarA0 else
+   sarA1)] etc., so no even/odd branching is needed. ===================== *)
+
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 15"
+
+(* [pending vkt] (over the physical buffers) -> [pending_body] over the
+   parity-selected [src*]/[dst*] (uniform). *)
+ghost
+fn unfold_pending_g
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (srcA dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (srcB dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (b_c : PC.pipeline_batch_t)
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  (sq_sel : squash (
+     srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
+     dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
+     srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
+     dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
+  requires
+    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+  ensures
+    pending_body bm bn bk skew gA gB srcA dstA srcB dstB fA fB nthr tid block_row block_col
+      b_c sq (vkt = 0) vkt
+{
+  rewrite
+    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
+  as
+    (pending_body bm bn bk skew gA gB srcA dstA srcB dstB fA fB nthr tid block_row block_col
+      b_c sq (vkt = 0) vkt);
+}
+
+(* [live src ** (ite oth)] over [src*]/[dst*] -> [pipe_p vkt]. *)
+ghost
+fn fold_pipe_p_g
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (srcA dstA : larray et (SZ.v bm * ldt bk skew))
+  (srcB dstB : larray et (SZ.v bn * ldt bk skew))
+  (nthr : pos) (ktiles : nat)
+  (vkt : nat) (tid : natlt nthr)
+  (sq_sel : squash (
+     srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
+     dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
+     srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
+     dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
+  requires
+    pure (vkt < ktiles) **
+    pipe_live (skewed_view bm bk skew srcA) nthr tid **
+    pipe_live (skewed_view bn bk skew srcB) nthr tid **
+    (if vkt = 0 then
+       pipe_live (skewed_view bm bk skew dstA) nthr tid **
+       pipe_live (skewed_view bn bk skew dstB) nthr tid
+     else
+       pipe_sharing (skewed_view bm bk skew dstA) nthr **
+       pipe_sharing (skewed_view bn bk skew dstB) nthr)
+  ensures
+    pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid
+{
+  rewrite
+    (pipe_live (skewed_view bm bk skew srcA) nthr tid **
+     pipe_live (skewed_view bn bk skew srcB) nthr tid **
+     (if vkt = 0 then
+        pipe_live (skewed_view bm bk skew dstA) nthr tid **
+        pipe_live (skewed_view bn bk skew dstB) nthr tid
+      else
+        pipe_sharing (skewed_view bm bk skew dstA) nthr **
+        pipe_sharing (skewed_view bn bk skew dstB) nthr))
+  as
+    (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid);
+}
+
+(* [pipe_q vkt] -> [sharing src ** live dst] over [src*]/[dst*]. *)
+ghost
+fn unfold_pipe_q_g
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (srcA dstA : larray et (SZ.v bm * ldt bk skew))
+  (srcB dstB : larray et (SZ.v bn * ldt bk skew))
+  (nthr : pos) (ktiles : nat)
+  (vkt : nat) (tid : natlt nthr)
+  (sq_sel : squash (
+     srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
+     dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
+     srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
+     dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
+  requires
+    pure (vkt < ktiles) **
+    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid
+  ensures
+    pipe_sharing (skewed_view bm bk skew srcA) nthr **
+    pipe_sharing (skewed_view bn bk skew srcB) nthr **
+    pipe_live (skewed_view bm bk skew dstA) nthr tid **
+    pipe_live (skewed_view bn bk skew dstB) nthr tid
+{
+  rewrite
+    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid)
+  as
+    (pipe_sharing (skewed_view bm bk skew srcA) nthr **
+     pipe_sharing (skewed_view bn bk skew srcB) nthr **
+     pipe_live (skewed_view bm bk skew dstA) nthr tid **
+     pipe_live (skewed_view bn bk skew dstB) nthr tid);
+}
+
+(* [sharing src ** live dst] over [src*]/[dst*] -> [pipe_q vkt] (terminal). *)
+ghost
+fn fold_pipe_q_g
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (bm bn bk skew : szp)
+  (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
+  (srcA dstA : larray et (SZ.v bm * ldt bk skew))
+  (srcB dstB : larray et (SZ.v bn * ldt bk skew))
+  (nthr : pos) (ktiles : nat)
+  (vkt : nat) (tid : natlt nthr)
+  (sq_sel : squash (
+     srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
+     dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
+     srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
+     dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
+  requires
+    pure (vkt < ktiles) **
+    pipe_sharing (skewed_view bm bk skew srcA) nthr **
+    pipe_sharing (skewed_view bn bk skew srcB) nthr **
+    pipe_live (skewed_view bm bk skew dstA) nthr tid **
+    pipe_live (skewed_view bn bk skew dstB) nthr tid
+  ensures
+    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid
+{
+  rewrite
+    (pipe_sharing (skewed_view bm bk skew srcA) nthr **
+     pipe_sharing (skewed_view bn bk skew srcB) nthr **
+     pipe_live (skewed_view bm bk skew dstA) nthr tid **
+     pipe_live (skewed_view bn bk skew dstB) nthr tid)
+  as
+    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid);
+}
+
+(* [staged_half dst kt1 ** sharing src] -> [pending kt1] (kt1 = vkt+1, kt1<>0). *)
+ghost
+fn fold_pending_g
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (srcA dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (srcB dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (b_c : PC.pipeline_batch_t)
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (kt1 : nat { kt1 < SZ.v k / SZ.v bk })
+  (sq_sel : squash (
+     kt1 <> 0 /\
+     dstA == (if kt1 % 2 = 0 then sarA0 else sarA1) /\
+     srcA == (if kt1 % 2 = 0 then sarA1 else sarA0) /\
+     dstB == (if kt1 % 2 = 0 then sarB0 else sarB1) /\
+     srcB == (if kt1 % 2 = 0 then sarB1 else sarB0)))
+  requires
+    pending_body bm bn bk skew gA gB dstA srcA dstB srcB fA fB nthr tid block_row block_col
+      b_c sq false kt1
+  ensures
+    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1
+{
+  rewrite
+    (pending_body bm bn bk skew gA gB dstA srcA dstB srcB fA fB nthr tid block_row block_col
+      b_c sq false kt1)
+  as
+    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1);
+}
+#pop-options
+
+(* ---- the k-loop invariant tail: [pending vkt] while staging, [pipe_q] once
+   done ([vkt == ktiles]).  A single conditional slprop keyed on [vkt < ktiles]
+   so ONE loop over [ktiles] iterations subsumes the (old) peeled last tile. --*)
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 15"
+let kcarry
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt <= SZ.v k / SZ.v bk })
+  : slprop
+= if vkt < SZ.v k / SZ.v bk then
+    (exists* (b_c b_l : PC.pipeline_batch_t).
+      PC.batch_committed b_c ** PC.batch_live b_l **
+      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
+  else
+    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
+           (SZ.v k / SZ.v bk - 1) tid
+
+ghost
+fn unfold_kcarry_live
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt <= SZ.v k / SZ.v bk })
+  (sq_lt : squash (vkt < SZ.v k / SZ.v bk))
+  requires
+    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+  ensures
+    exists* (b_c b_l : PC.pipeline_batch_t).
+      PC.batch_committed b_c ** PC.batch_live b_l **
+      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+{
+  rewrite
+    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt)
+  as
+    (exists* (b_c b_l : PC.pipeline_batch_t).
+      PC.batch_committed b_c ** PC.batch_live b_l **
+      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
+}
+
+ghost
+fn fold_kcarry_live
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt <= SZ.v k / SZ.v bk })
+  (b_c : PC.pipeline_batch_t)
+  (sq_lt : squash (vkt < SZ.v k / SZ.v bk))
+  requires
+    PC.batch_committed b_c ** (exists* (bl : PC.pipeline_batch_t). PC.batch_live bl) **
+    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+  ensures
+    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+{
+  with (b_l : PC.pipeline_batch_t). assert (PC.batch_live b_l);
+  introduce
+    exists* (c l : PC.pipeline_batch_t).
+      PC.batch_committed c ** PC.batch_live l **
+      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt
+  with b_c b_l;
+  rewrite
+    (exists* (c l : PC.pipeline_batch_t).
+      PC.batch_committed c ** PC.batch_live l **
+      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt)
+  as
+    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
+}
+
+ghost
+fn fold_kcarry_done
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
+  (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (vkt : nat { vkt <= SZ.v k / SZ.v bk })
+  (sq_ge : squash (~(vkt < SZ.v k / SZ.v bk)))
+  requires
+    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
+           (SZ.v k / SZ.v bk - 1) tid
+  ensures
+    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+{
+  rewrite
+    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
+            (SZ.v k / SZ.v bk - 1) tid)
+  as
+    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
+}
+#pop-options
+
+(* ---- the guard output: the "dst-side" resource produced by the single
+   staging guard, carried across the [subproducts] math (which round-trips only
+   [pipe_sharing src]).  [stg = kt1 < ktiles]. ---- *)
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 15"
+let cstage
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (b_l : PC.pipeline_batch_t)
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  : slprop
+= if vkt + 1 < SZ.v k / SZ.v bk then
+    PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
+    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+  else
+    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    pipe_live (skewed_view bm bk skew dstA) nthr tid **
+    pipe_live (skewed_view bn bk skew dstB) nthr tid **
+    PC.batch_live b_l
+
+ghost
+fn fold_cstage_stage
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (b_l b_l' : PC.pipeline_batch_t)
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  (sq_stg : squash (vkt + 1 < SZ.v k / SZ.v bk))
+  requires
+    PC.batch_committed b_l ** PC.batch_live b_l' **
+    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+  ensures
+    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+{
+  introduce exists* (bl : PC.pipeline_batch_t). PC.batch_live bl with b_l';
+  rewrite
+    (PC.batch_committed b_l ** (exists* (bl : PC.pipeline_batch_t). PC.batch_live bl) **
+     staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1))
+  as
+    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt);
+}
+
+ghost
+fn fold_cstage_nostage
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (b_l : PC.pipeline_batch_t)
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  (sq_nostg : squash (~(vkt + 1 < SZ.v k / SZ.v bk)))
+  requires
+    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    pipe_live (skewed_view bm bk skew dstA) nthr tid **
+    pipe_live (skewed_view bn bk skew dstB) nthr tid **
+    PC.batch_live b_l
+  ensures
+    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+{
+  rewrite
+    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+     pipe_live (skewed_view bm bk skew dstA) nthr tid **
+     pipe_live (skewed_view bn bk skew dstB) nthr tid **
+     PC.batch_live b_l)
+  as
+    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt);
+}
+
+ghost
+fn unfold_cstage_stage
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (b_l : PC.pipeline_batch_t)
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  (sq_stg : squash (vkt + 1 < SZ.v k / SZ.v bk))
+  requires
+    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+  ensures
+    PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
+    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+{
+  rewrite
+    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt)
+  as
+    (PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
+     staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1));
+}
+
+ghost
+fn unfold_cstage_nostage
+  (#et_ab : Type0) {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
+  (#m #n #k : szp)
+  (bm bn bk skew : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
+  (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (dstA : larray et_ab (SZ.v bm * ldt bk skew))
+  (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (fA fB : perm)
+  (nthr : pos) (tid : natlt nthr)
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
+  (sq : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (b_l : PC.pipeline_batch_t)
+  (vkt : nat { vkt < SZ.v k / SZ.v bk })
+  (sq_nostg : squash (~(vkt + 1 < SZ.v k / SZ.v bk)))
+  requires
+    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+  ensures
+    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    pipe_live (skewed_view bm bk skew dstA) nthr tid **
+    pipe_live (skewed_view bn bk skew dstB) nthr tid **
+    PC.batch_live b_l
+{
+  rewrite
+    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt)
+  as
+    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+     pipe_live (skewed_view bm bk skew dstA) nthr tid **
+     pipe_live (skewed_view bn bk skew dstB) nthr tid **
+     PC.batch_live b_l);
+}
+#pop-options
+
+
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 2"
 inline_for_extraction noextract
 fn kloop
   (#et_ab #et_acc : Type0)
@@ -1143,169 +1344,167 @@ fn kloop
   fold_pending_even bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
     (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) b0 () 0;
 
+  (* ---- fold the prologue's [pending 0] + batches into the loop carry ---- *)
+  fold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+    (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () 0 b0 ();
+
   let mut idx = 0sz;
   FStar.Math.Lemmas.lemma_div_le (SZ.v bk) (SZ.v k) (SZ.v bk);
   assert pure (SZ.v bk / SZ.v bk == 1);
   assert pure (1 <= SZ.v k / SZ.v bk);
-  while (!idx <^ (num_k_tiles -^ 1sz))
+
+  (* ---- single-body software-pipelined k-loop.  ONE concrete body runs
+     [ktiles] times; buffer parity and the last-tile (no-stage) case are
+     handled entirely in ghost steps.  [srcA]/[srcB] = buffer read this
+     iteration ([buf]); [dstA]/[dstB] = opposite buffer staged into
+     ([buf ^ 1]); they are runtime value-selects (=> CUDA ternaries, not
+     duplicated statements). ---- *)
+  while (!idx <^ num_k_tiles)
     invariant
-      exists* (vkt : SZ.t { SZ.v vkt <= SZ.v k / SZ.v bk - 1 }) (b_c b_l : PC.pipeline_batch_t).
+      exists* (vkt : SZ.t { SZ.v vkt <= SZ.v k / SZ.v bk }).
         (idx |-> vkt) **
         gpu ** thread_id (SZ.v nthr) (SZ.v tid) **
         B.barrier_tok
           (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)) **
         B.barrier_state (SZ.v vkt) **
         live aFrags ** live bFrags ** live accFrags **
-        PC.batch_committed b_c ** PC.batch_live b_l **
-        pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
-          (SZ.v block_row) (SZ.v block_col) b_c () (SZ.v vkt)
+        kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+          (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt)
     decreases (SZ.v num_k_tiles - SZ.v !idx)
   {
-    with vkt b_c b_l. _;
+    with vkt. _;
     let kti = !idx;
     let par = Kuiper.SizeT.sizet_and kti 1sz;
     Kuiper.SizeT.sizet_and_div_pow2 kti 2sz 1;
-    let kt1 : szlt (SZ.v k / SZ.v bk) = kti +^ 1sz;
-    (* discharge the parity conclusions once, in the light pre-branch context,
-       so the (heavy, post-body_compute) branch VCs only need modus ponens *)
-    assert pure ((SZ.v par = 0 ==> SZ.v kt1 % 2 = 1) /\
-                 (SZ.v par <> 0 ==> SZ.v kt1 % 2 = 0));
+    let kt1 = kti +^ 1sz;
 
-    if (par = 0sz) {
-      (* ---- EVEN: current = buffer 0, other = buffer 1 ---- *)
-      unfold_pending_even bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt);
-      with bd. assert (PC.batch_committed bd);
-      PC.pipeline_wait_all_prior #bd;
-      redeem_pledge emp_inames (PC.batch_done bd) _;
-      drop_ (PC.batch_done bd);
-      restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
-      fold (pipe_live (skewed_view bm bk skew sarA0) (SZ.v nthr) (SZ.v tid));
-      fold (pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid));
-      fold_pipe_p_even bm bn bk skew sarA0 sarA1 sarB0 sarB1
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-      rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-        as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
-      B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
-      rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
-        as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
-      unfold_pipe_q_even bm bn bk skew sarA0 sarA1 sarB0 sarB1
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-      let b_l2 = body_compute bm bn bk wm wn skew gA gB
-        sarA0 sarA1 sarB0 sarB1 fmap fA fB nthr tid block_row block_col warp_m warp_n
+    (* CONCRETE buffer value-selects: extract to CUDA ternaries. *)
+    let srcA = if (par = 0sz) { sarA0 } else { sarA1 };
+    let srcB = if (par = 0sz) { sarB0 } else { sarB1 };
+    let dstA = if (par = 0sz) { sarA1 } else { sarA0 };
+    let dstB = if (par = 0sz) { sarB1 } else { sarB0 };
+
+    (* the buffer-selection equations, keyed on [vkt % 2], feeding the generic
+       reconciliation helpers.  Established once in the light pre-body context. *)
+    assert pure (SZ.v kti == SZ.v vkt);
+    assert pure (SZ.v vkt < SZ.v k / SZ.v bk);
+    assert pure (SZ.v par == SZ.v vkt % 2);
+    assert pure (SZ.v kt1 == SZ.v vkt + 1 /\ SZ.v kt1 <= SZ.v k / SZ.v bk);
+    assert pure (
+      srcA == (if SZ.v vkt % 2 = 0 then sarA0 else sarA1) /\
+      dstA == (if SZ.v vkt % 2 = 0 then sarA1 else sarA0) /\
+      srcB == (if SZ.v vkt % 2 = 0 then sarB0 else sarB1) /\
+      dstB == (if SZ.v vkt % 2 = 0 then sarB1 else sarB0));
+
+    (* ---- ghost: expose the current-tile pledge over [src*]/[dst*] ---- *)
+    unfold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+      (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt) ();
+    with b_c b_l. _;
+    unfold_pending_g bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
+      (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt) ();
+
+    (* ---- CONCRETE: __pipeline_wait_prior(0) then redeem the staged pledge ---- *)
+    with bd. assert (PC.batch_committed bd);
+    PC.pipeline_wait_all_prior #bd;
+    redeem_pledge emp_inames (PC.batch_done bd) _;
+    drop_ (PC.batch_done bd);
+    restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
+    fold (pipe_live (skewed_view bm bk skew srcA) (SZ.v nthr) (SZ.v tid));
+    fold (pipe_live (skewed_view bn bk skew srcB) (SZ.v nthr) (SZ.v tid));
+
+    (* ---- CONCRETE: __syncthreads() (barrier) advancing the pipe contract ---- *)
+    fold_pipe_p_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
+      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
+    rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
+      as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
+    B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
+    rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
+      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
+    unfold_pipe_q_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
+      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
+
+    (* ---- the ONLY copy of the staging code: guarded on [kt+1 < ktiles] ---- *)
+    if (kt1 <^ num_k_tiles) {
+      let b_l2 = stage_next bm bn bk skew gA gB dstA dstB fA fB
+        nthr tid block_row block_col
         a_t_row a_t_col a_row_step a_iters b_t_row b_t_col b_row_step b_iters
-        ldsz kt1 (reveal b_l) aFrags bFrags accFrags () () () () () () ();
-      fold_pending_odd bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v kt1);
-      idx := kt1;
+        ldsz kt1 (reveal b_l) () () () () () () ();
+      rewrite (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+                (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v kt1))
+        as (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+                (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1));
+      fold_cstage_stage bm bn bk skew gA gB dstA dstB fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) b_l2 (SZ.v vkt) ();
     } else {
-      (* ---- ODD: current = buffer 1, other = buffer 0 ---- *)
-      unfold_pending_odd bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt);
-      with bd. assert (PC.batch_committed bd);
-      PC.pipeline_wait_all_prior #bd;
-      redeem_pledge emp_inames (PC.batch_done bd) _;
-      drop_ (PC.batch_done bd);
-      restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
-      fold (pipe_live (skewed_view bm bk skew sarA1) (SZ.v nthr) (SZ.v tid));
-      fold (pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid));
-      fold_pipe_p_odd bm bn bk skew sarA0 sarA1 sarB0 sarB1
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-      rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-        as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
-      B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
-      rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
-        as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
-      unfold_pipe_q_odd bm bn bk skew sarA0 sarA1 sarB0 sarB1
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-      let b_l2 = body_compute bm bn bk wm wn skew gA gB
-        sarA1 sarA0 sarB1 sarB0 fmap fA fB nthr tid block_row block_col warp_m warp_n
-        a_t_row a_t_col a_row_step a_iters b_t_row b_t_col b_row_step b_iters
-        ldsz kt1 (reveal b_l) aFrags bFrags accFrags () () () () () () ();
-      assert pure (SZ.v kt1 % 2 = 0);
-      assert pure (SZ.v kt1 <> 0);
-      fold_pending_even_pos bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v kt1);
-      idx := kt1;
-    }
+      fold_cstage_nostage bm bn bk skew gA gB dstA dstB fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
+    };
+
+    (* ---- the ONLY copy of the fragment math, over the read buffer [src*] ---- *)
+    subproducts_buf bm bn bk wm wn skew srcA srcB fmap nthr warp_m warp_n ldsz
+      aFrags bFrags accFrags () () ();
+
+    (* ---- ghost: reconcile the guard output back into the loop carry ---- *)
+    sel_flip (SZ.v vkt) sarA0 sarA1;
+    sel_flip (SZ.v vkt) sarA1 sarA0;
+    sel_flip (SZ.v vkt) sarB0 sarB1;
+    sel_flip (SZ.v vkt) sarB1 sarB0;
+    assert pure (
+      (SZ.v vkt + 1) <> 0 /\
+      dstA == (if (SZ.v vkt + 1) % 2 = 0 then sarA0 else sarA1) /\
+      srcA == (if (SZ.v vkt + 1) % 2 = 0 then sarA1 else sarA0) /\
+      dstB == (if (SZ.v vkt + 1) % 2 = 0 then sarB0 else sarB1) /\
+      srcB == (if (SZ.v vkt + 1) % 2 = 0 then sarB1 else sarB0));
+    if (kt1 <^ num_k_tiles) {
+      unfold_cstage_stage bm bn bk skew gA gB dstA dstB fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
+      unfold (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+                (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1));
+      fold_pending_g bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1) ();
+      fold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1) (reveal b_l) ();
+    } else {
+      assert pure (SZ.v num_k_tiles == SZ.v k / SZ.v bk);
+      assert pure (SZ.v kt1 == SZ.v vkt + 1 /\ SZ.v vkt < SZ.v k / SZ.v bk);
+      unfold_cstage_nostage bm bn bk skew gA gB dstA dstB fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
+      fold_pipe_q_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
+        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
+      assert pure (SZ.v vkt == SZ.v k / SZ.v bk - 1);
+      rewrite (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
+        as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) (SZ.v tid));
+      with lb. assert (PC.batch_live lb);
+      drop_ (PC.batch_live lb);
+      fold_kcarry_done bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+        (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1) ();
+    };
+    rewrite
+      (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+        (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1))
+    as
+      (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+        (SZ.v block_row) (SZ.v block_col) () (SZ.v kt1));
+    rewrite (B.barrier_state (SZ.v vkt + 1)) as (B.barrier_state (SZ.v kt1));
+    idx := kt1;
   };
 
-  (* ---- peeled tail: last k-tile [ktiles-1], math only, no staging ---- *)
-  with xtra vkt b_c b_l. _;
-  let ktL = !idx;
-  let parL = Kuiper.SizeT.sizet_and ktL 1sz;
-  Kuiper.SizeT.sizet_and_div_pow2 ktL 2sz 1;
-
-  if (parL = 0sz) {
-    unfold_pending_even bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-      (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt);
-    with bd. assert (PC.batch_committed bd);
-    PC.pipeline_wait_all_prior #bd;
-    redeem_pledge emp_inames (PC.batch_done bd) _;
-    drop_ (PC.batch_done bd);
-    restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
-    fold (pipe_live (skewed_view bm bk skew sarA0) (SZ.v nthr) (SZ.v tid));
-    fold (pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid));
-    fold_pipe_p_even bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-      as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
-    B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
-    rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
-      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
-    unfold_pipe_q_even bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    subproducts_buf bm bn bk wm wn skew sarA0 sarB0 fmap nthr warp_m warp_n ldsz
-      aFrags bFrags accFrags () () ();
-    fold_pipe_q_even bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    assert pure (SZ.v vkt == SZ.v k / SZ.v bk - 1);
-    rewrite (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) (SZ.v tid));
-    rewrite (B.barrier_state (SZ.v vkt + 1))
-      as (B.barrier_state (SZ.v k / SZ.v bk));
-    with lb. assert (PC.batch_live lb);
-    drop_ (PC.batch_live lb);
-    with va. assert (aFrags |-> va);
-    drop_ (aFrags |-> va);
-    with vb. assert (bFrags |-> vb);
-    drop_ (bFrags |-> vb);
-    ()
-  } else {
-    unfold_pending_odd bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
-      (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt);
-    with bd. assert (PC.batch_committed bd);
-    PC.pipeline_wait_all_prior #bd;
-    redeem_pledge emp_inames (PC.batch_done bd) _;
-    drop_ (PC.batch_done bd);
-    restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
-    fold (pipe_live (skewed_view bm bk skew sarA1) (SZ.v nthr) (SZ.v tid));
-    fold (pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid));
-    fold_pipe_p_odd bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-      as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
-    B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
-    rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
-      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
-    unfold_pipe_q_odd bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    subproducts_buf bm bn bk wm wn skew sarA1 sarB1 fmap nthr warp_m warp_n ldsz
-      aFrags bFrags accFrags () () ();
-    fold_pipe_q_odd bm bn bk skew sarA0 sarA1 sarB0 sarB1
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid);
-    assert pure (SZ.v vkt == SZ.v k / SZ.v bk - 1);
-    rewrite (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) (SZ.v tid));
-    rewrite (B.barrier_state (SZ.v vkt + 1))
-      as (B.barrier_state (SZ.v k / SZ.v bk));
-    with lb. assert (PC.batch_live lb);
-    drop_ (PC.batch_live lb);
-    with va. assert (aFrags |-> va);
-    drop_ (aFrags |-> va);
-    with vb. assert (bFrags |-> vb);
-    drop_ (bFrags |-> vb);
-    ()
-  }
+  (* ---- loop exit: [vkt == ktiles], so [kcarry] is its "done" branch ---- *)
+  with vkt. assert (idx |-> vkt);
+  assert pure (SZ.v vkt == SZ.v k / SZ.v bk);
+  rewrite
+    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+      (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt))
+  as
+    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
+            (SZ.v k / SZ.v bk - 1) (SZ.v tid));
+  rewrite (B.barrier_state (SZ.v vkt))
+    as (B.barrier_state (SZ.v k / SZ.v bk));
+  with va. assert (aFrags |-> va);
+  drop_ (aFrags |-> va);
+  with vb. assert (bFrags |-> vb);
+  drop_ (bFrags |-> vb);
+  ()
 }
 #pop-options
