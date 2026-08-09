@@ -367,7 +367,7 @@ fn kf
 
   (* ---- epilogue: drain accumulator into D ---- *)
   with ems. assert (accFrags |-> ems);
-  epilogue gD post_map bm bn bk wm wn skew nblk nthr sh accFrags (SZ.v bid) (SZ.v tid) ();
+  epilogue gD post_map bm bn bk wm wn skew nblk nthr sh accFrags bid tid ();
 
   (* dispose accumulator fragments *)
   with ems'. assert (accFrags |-> ems');
