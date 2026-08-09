@@ -128,8 +128,18 @@ ensures
 
 (* The col-major B loop needs the goal split: the invariant re-establishment
    is a three-way conjunction and Z3 does not find the combined proof.
-   Splitting keeps the rlimit at 30 rather than escalating it. *)
-#push-options "--z3rlimit 30 --split_queries always"
+   Splitting keeps the rlimit bounded rather than escalating it further.
+
+   The budget was 30 until `Kuiper.Kernel.Desc`'s `f` field gained a
+   `c_shmems_inv` refinement on its shmem binder (needed so a cp.async kernel
+   body can recover shared-buffer alignment; see `Kuiops.SuperGEMM.Mm`). That
+   refinement is unused here and changes nothing semantically -- this module
+   never mentions `kernel_desc` -- but `Kuiper.Kernel.Desc` is in scope of the
+   SMT encoding, so it perturbs term ordering and this already-marginal query
+   tipped over. The proof itself is unchanged; only the budget moved.
+   TODO: make the `Seq.upd` index split explicit (a pure lemma over the
+   invariant's `forall`) so the query stops being resource-marginal. *)
+#push-options "--z3rlimit 60 --split_queries always"
 inline_for_extraction noextract
 fn populate_fragments_b
   (#et : Type0)
