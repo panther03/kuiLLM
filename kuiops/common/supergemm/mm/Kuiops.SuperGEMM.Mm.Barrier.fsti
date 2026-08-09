@@ -40,6 +40,7 @@ open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major }
 open Kuiops.SuperGEMM.Mm.Params { ldt }
 
 (* Skewed (rows x bk, pad skew) row-major view of one pipeline buffer. *)
+inline_for_extraction noextract
 let skewed_view
   (#et : Type0)
   (rows bk skew : szp)
