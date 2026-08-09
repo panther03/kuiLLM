@@ -473,8 +473,8 @@ def _map_tag(entries):
 # Matmul family (mm / addmm / bmm)
 # ---------------------------------------------------------------------------
 #
-# Four Kuiper GEMM backends. All take A row-major; the first three take B
-# row-major, the last takes B column-major.
+# Five Kuiper GEMM backends. All take A row-major; bt2d/tc2d/tc2d_to take B
+# row-major, tc2d_tn and supergemm take B column-major.
 #   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at
 #            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one).
 #   tc2d     TensorCore2D, accumulates in `acc` and combines into `out` in place.
@@ -484,6 +484,11 @@ def _map_tag(entries):
 #            Same spec, but B is COLUMN-major with leading dimension K, so the
 #            `B.contiguous()` copy the other backends force is not needed.
 #            Divisibility lands on k/bk instead of n/bn.
+#   supergemm  Kuiops.SuperGEMM.Mm, cp.async double-buffered tensor cores. Same
+#            transposed B as tc2d_tn, but software-pipelined: the k-tile after
+#            next is staged into the alternate shared buffer while the current
+#            one feeds the MMAs. No C operand -- it writes `post_map acc` to D.
+#            Needs 16-byte aligned A and D on top of the usual divisibility.
 # The `_bcast` variants of tc2d_to and tc2d_tn read C through a broadcast
 # layout: it is a length-N row vector rather than an (M, N) matrix.
 
@@ -848,7 +853,7 @@ class MmImpl(_MatmulFamily):
     # still being brought up, so it is reachable only via an explicit
     # `impl="supergemm"`. Its position here should be decided by the Qwen-shape
     # benchmark once it is complete.
-    backends = ("tc2d_tn", "tc2d", "tc2d_to", "bt2d", "supergemm")
+    backends = ("supergemm", "tc2d_tn", "tc2d", "tc2d_to", "bt2d")
     operation = "aten.mm.default"
 
     @staticmethod
