@@ -844,10 +844,11 @@ def _gemm_wrapper_ctx(spec, name):
 class MmImpl(_MatmulFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
-    # SuperGEMM (cp.async software-pipelined) is tried first: it is the only
-    # backend that both takes B transposed without a copy and writes D in the
-    # input dtype, so bf16 in / bf16 out needs no f32 round trip.
-    backends = ("supergemm", "tc2d_tn", "tc2d", "tc2d_to", "bt2d")
+    # SuperGEMM (cp.async software-pipelined) is listed last for now: it is
+    # still being brought up, so it is reachable only via an explicit
+    # `impl="supergemm"`. Its position here should be decided by the Qwen-shape
+    # benchmark once it is complete.
+    backends = ("tc2d_tn", "tc2d", "tc2d_to", "bt2d", "supergemm")
     operation = "aten.mm.default"
 
     @staticmethod
