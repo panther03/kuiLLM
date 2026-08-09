@@ -29,7 +29,7 @@ open Kuiops.SuperGEMM.Mm.Output { output_lane_live', split_output_to_lanes', gat
 open Kuiops.SuperGEMM.Mm.Barrier
   { skewed_view, pipe_live, pipe_q, pipe_contract, pipe_p_to_q_transform }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_t_row, g_t_col, g_row_step, g_a_iters }
-open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal }
+open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
 open Kuiops.SuperGEMM.Mm.Epilogue { epilogue }
 
 module SZ = Kuiper.SizeT
@@ -323,32 +323,50 @@ fn kf
   let a_iters   = (bm *^ bk) /^ (ch *^ nthr);
   let b_iters   = (bn *^ bk) /^ (ch *^ nthr);
 
-  (* ---- pipelined main loop ---- *)
-  // Bind the four pipeline buffers to locals: KaRaMeL only inserts the
-  // `(et *) KPR_SHMEM_AT(..)` cast when the shared pointer is let-bound, not
-  // when it is passed directly as an argument.
-  let sA0 = SH.sar_a0 bm bn bk wm wn skew sh;
-  let sA1 = SH.sar_a1 bm bn bk wm wn skew sh;
-  let sB0 = SH.sar_b0 bm bn bk wm wn skew sh;
-  let sB1 = SH.sar_b1 bm bn bk wm wn skew sh;
+  (* ---- allocate the per-warp accumulator fragment array ONCE ----
+     Hoisted out of [kloop] into [kf] (repo convention: kernels take their
+     output buffers as arguments) so its KPR_INIT_ARR lands at this
+     unconditional declaration site instead of flowing out of kloop's parity
+     branch as an uninitialised C++ reference. *)
+  let accFrags = __alloc_array_fragment et_acc FragAcc frag_sz frag_sz frag_sz FragLAcc ((wm /^ frag_sz) *^ (wn /^ frag_sz));
+  acc_len_alloc wm wn;
+  acc_len_reveal wm wn;
+  assert pure (length accFrags == SZ.v wm / frag * (SZ.v wn / frag));
+
+  (* ---- pipeline buffers ----
+     Destructure [sh] as a tuple so KaRaMeL emits the cast
+     `(et * ) KPR_SHMEM_AT(..)` on each shared pointer; the [sar_*] accessors (fst/snd
+     projections) bypass that path and leave `void *` initialisers that nvcc
+     rejects.  The [rewrites_to] lines reconcile the destructured names with
+     the [sar_*] forms appearing in the pipe_live/pipe_q slprops. *)
+  let (sA0, (sA1, (sB0, (sB1, srest)))) = sh;
   assert rewrites_to sA0 (SH.sar_a0 bm bn bk wm wn skew sh);
   assert rewrites_to sA1 (SH.sar_a1 bm bn bk wm wn skew sh);
   assert rewrites_to sB0 (SH.sar_b0 bm bn bk wm wn skew sh);
   assert rewrites_to sB1 (SH.sar_b1 bm bn bk wm wn skew sh);
-  let accFrags =
-    kloop #et_ab #et_acc bm bn bk wm wn skew
-      gA #eA gB #eB
-      sA0 sA1 sB0 sB1
-      (fun x -> x)
-      (fA /. (nblk * nthr)) (fB /. (nblk * nthr))
-      nthr tid block_row block_col warp_m warp_n
-      a_t_row a_t_col a_row_step a_iters
-      a_t_row a_t_col a_row_step b_iters
-      () () () () () () ();
+
+  (* ---- pipelined main loop ---- *)
+  kloop #et_ab #et_acc bm bn bk wm wn skew
+    gA #eA gB #eB
+    sA0 sA1 sB0 sB1
+    accFrags
+    (fun x -> x)
+    (fA /. (nblk * nthr)) (fB /. (nblk * nthr))
+    nthr tid block_row block_col warp_m warp_n
+    a_t_row a_t_col a_row_step a_iters
+    a_t_row a_t_col a_row_step b_iters
+    () () () () () () ();
+
+  (* Reconcile [sh]: the [let]-pattern above substituted [sh] with the
+     destructured tuple in the ambient slprops (e.g. [scratch_tile_live]); the
+     epilogue's [preserves] are stated over the whole [sh].  Rewrite the tuple
+     back to [sh] (surjective pairing discharges the equality). *)
+  rewrite (SH.scratch_tile_live bm bn bk wm wn skew
+             (sA0, (sA1, (sB0, (sB1, srest)))) nthr (SZ.v tid))
+       as (SH.scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid));
 
   (* ---- epilogue: drain accumulator into D ---- *)
   with ems. assert (accFrags |-> ems);
-  acc_len_reveal wm wn;
   epilogue gD post_map bm bn bk wm wn skew nblk nthr sh accFrags (SZ.v bid) (SZ.v tid) ();
 
   (* dispose accumulator fragments *)
