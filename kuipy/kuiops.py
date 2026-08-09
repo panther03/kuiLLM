@@ -505,7 +505,7 @@ _WARP = 32
 # strips this many block-rows tall, so a scheduling wave reuses B columns out of
 # L2. It is a pure permutation -- legal for every value, and clamped internally
 # when it exceeds the grid's block-row count -- so it never constrains tiling.
-_SUPERGEMM_GROUP = 8
+_SUPERGEMM_GROUP = 1
 _FRAG = 16   # the sm_80/sm_86 WMMA shape, 16x16x16
 
 # The GEMM operands are copied through `has_vec_cpy`, which exists for these
