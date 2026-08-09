@@ -94,8 +94,8 @@ fn stage_tiles
   returns b' : Kuiper.PipelineCopy.pipeline_batch_t
   ensures
     pledge0 (Kuiper.PipelineCopy.batch_done b)
-      (FB.live_strided_chunks mAd nthr tid ** FB.live_strided_chunks mBd nthr tid **
-       (exists* eA eB. (mAs |-> Frac fA eA) ** (mBs |-> Frac fB eB))) **
+      (FB.own_strided_chunks mAd eAs nthr tid ** FB.own_strided_chunks mBd eBs nthr tid **
+       (mAs |-> Frac fA eAs) ** (mBs |-> Frac fB eBs)) **
     Kuiper.PipelineCopy.batch_committed b **
     Kuiper.PipelineCopy.batch_live b' **
     pure (fst b' == fst b /\ snd b' > snd b)

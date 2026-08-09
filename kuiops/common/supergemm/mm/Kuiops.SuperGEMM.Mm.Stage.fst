@@ -258,6 +258,63 @@ let cell_body
 = let ij = (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq).gg sx in
   T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 em ij._1 ij._2)
 
+(* Explicit per-copy value function: the chunk of [e]'s cells that copy-step
+   [s] reads (and, after cp.async, that the destination holds).  This is
+   exactly the [v] constructed inside [stage_rc_intro]. *)
+let esrc_cells
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (e : chest2 et rows cols)
+  (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
+  : GTot (v:seq et{Seq.length v == SZ.v (chunk et)})
+= let ck = SZ.v (chunk et) in
+  let _ = lemma_ff rows cols ck nthr tid s 0 in
+  let _ = lemma_tcol_bound cols ck nthr tid in
+  Seq.init_ghost ck
+    (fun (x:nat{x < ck}) ->
+       acc2 e (g_ff_row rows cols ck nthr tid s) (g_t_col cols ck nthr tid + x))
+
+(* Backward map of an in-chunk copy-step cell. *)
+let gg_eq
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
+  (x : natlt (SZ.v (chunk et)))
+  : Lemma
+      (let ij = (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq).gg (s, x) in
+       ij._1 == g_ff_row rows cols (SZ.v (chunk et)) nthr tid s /\
+       ij._2 == g_t_col cols (SZ.v (chunk et)) nthr tid + x)
+= lemma_ff rows cols (SZ.v (chunk et)) nthr tid s x
+
+(* The [x]-th cell of [esrc_cells] is the [e]-content of the in-chunk cell
+   that backward-maps from copy-step [s], lane [x]. *)
+let esrc_cells_index
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (e : chest2 et rows cols)
+  (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
+  : Lemma
+      (forall (x:natlt (SZ.v (chunk et))).
+         Seq.index (esrc_cells nthr tid sq e s) x
+         == (let ij = (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq).gg (s, x) in
+             acc2 e ij._1 ij._2))
+= let ck = SZ.v (chunk et) in
+  lemma_ff rows cols ck nthr tid s 0;
+  lemma_tcol_bound cols ck nthr tid;
+  Seq.init_ghost_index ck
+    (fun (x:nat{x < ck}) ->
+       acc2 e (g_ff_row rows cols ck nthr tid s) (g_t_col cols ck nthr tid + x));
+  introduce forall (x:natlt ck).
+     Seq.index (esrc_cells nthr tid sq e s) x
+     == (let ij = (chunk_bij rows cols ck nthr tid sq).gg (s, x) in acc2 e ij._1 ij._2)
+  with gg_eq nthr tid sq s x
+
 ghost
 fn stage_rc_intro
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -302,7 +359,47 @@ fn stage_rc_intro
        (SZ.v (chunk et)) v);
 }
 
-(* forall+ (in-chunk cells at perm [f]) -> per-copy-step row_cells. *)
+(* Content-carrying variant of [stage_rc_intro]: instead of existentialising
+   the staged value, it exposes the explicit [esrc_cells] value. *)
+ghost
+fn stage_rc_intro_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (em : chest2 et rows cols)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
+  requires
+    (forall+ (x : natlt (SZ.v (chunk et))).
+      cell_body m em nthr tid sq f (s, x))
+  ensures
+    stage_rc m nthr tid sq f s (esrc_cells nthr tid sq em s)
+{
+  lemma_ff rows cols (SZ.v (chunk et)) nthr tid s 0;
+  lemma_tcol_bound cols (SZ.v (chunk et)) nthr tid;
+  esrc_cells_index nthr tid sq em s;
+  let v : (v:seq et{Seq.length v == SZ.v (chunk et)}) = esrc_cells nthr tid sq em s;
+  forevery_ext
+    (fun (x : natlt (SZ.v (chunk et))) -> cell_body m em nthr tid sq f (s, x))
+    (fun (x : natlt (SZ.v (chunk et))) ->
+       T.tensor_pts_to_cell m #f
+         (idx2 (g_ff_row rows cols (SZ.v (chunk et)) nthr tid s)
+               (g_t_col cols (SZ.v (chunk et)) nthr tid + x))
+         (Seq.index v x));
+  rewrite
+    (forall+ (x : natlt (SZ.v (chunk et))).
+       T.tensor_pts_to_cell m #f
+         (idx2 (g_ff_row rows cols (SZ.v (chunk et)) nthr tid s)
+               (g_t_col cols (SZ.v (chunk et)) nthr tid + x))
+         (Seq.index v x))
+  as
+    (row_cells m f
+       (g_ff_row rows cols (SZ.v (chunk et)) nthr tid s)
+       (g_t_col cols (SZ.v (chunk et)) nthr tid)
+       (SZ.v (chunk et)) v);
+}
 ghost
 fn cells_to_rows
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -340,6 +437,44 @@ fn cells_to_rows
        (exists* (v : seq et { Seq.length v == SZ.v (chunk et) }).
          stage_rc m nthr tid sq f s v))
     (stage_rc_intro m em nthr tid sq f);
+}
+
+(* Content-carrying variant of [cells_to_rows]. *)
+ghost
+fn cells_to_rows_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (em : chest2 et rows cols)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  requires
+    (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 em ij._1 ij._2))
+  ensures
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+      stage_rc m nthr tid sq f s (esrc_cells nthr tid sq em s))
+{
+  forevery_iso (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq)
+    (fun (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 em ij._1 ij._2));
+  forevery_ext
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       (fun (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid) ->
+          T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 em ij._1 ij._2))
+         ((chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq).gg sx))
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       cell_body m em nthr tid sq f sx);
+  forevery_unflatten'
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       cell_body m em nthr tid sq f sx);
+  forevery_map
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       (forall+ (x : natlt (SZ.v (chunk et))). cell_body m em nthr tid sq f (s, x)))
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       stage_rc m nthr tid sq f s (esrc_cells nthr tid sq em s))
+    (stage_rc_intro_c m em nthr tid sq f);
 }
 
 (* own_strided_chunks (per-thread, 1.0R) -> per-copy-step row_cells. *)
@@ -434,6 +569,44 @@ fn stage_rc_elim
        (exists* (e : et). cell_at m nthr tid sq f (s, x) e))
     (fun (x : natlt (SZ.v (chunk et))) ->
        intro_ex_cell_at m nthr tid sq f (s, x) (Seq.index v x));
+}
+
+(* Content-carrying variant of [stage_rc_elim]: from the explicit-valued
+   copy-step rows recover the in-chunk cells carrying [e]'s content. *)
+ghost
+fn stage_rc_elim_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (e : chest2 et rows cols)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
+  requires stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s)
+  ensures
+    (forall+ (x : natlt (SZ.v (chunk et))).
+       cell_body m e nthr tid sq f (s, x))
+{
+  lemma_ff rows cols (SZ.v (chunk et)) nthr tid s 0;
+  lemma_tcol_bound cols (SZ.v (chunk et)) nthr tid;
+  esrc_cells_index nthr tid sq e s;
+  rewrite
+    (stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s))
+  as
+    (forall+ (x : natlt (SZ.v (chunk et))).
+       T.tensor_pts_to_cell m #f
+         (idx2 (g_ff_row rows cols (SZ.v (chunk et)) nthr tid s)
+               (g_t_col cols (SZ.v (chunk et)) nthr tid + x))
+         (Seq.index (esrc_cells nthr tid sq e s) x));
+  forevery_ext
+    (fun (x : natlt (SZ.v (chunk et))) ->
+       T.tensor_pts_to_cell m #f
+         (idx2 (g_ff_row rows cols (SZ.v (chunk et)) nthr tid s)
+               (g_t_col cols (SZ.v (chunk et)) nthr tid + x))
+         (Seq.index (esrc_cells nthr tid sq e s) x))
+    (fun (x : natlt (SZ.v (chunk et))) ->
+       cell_body m e nthr tid sq f (s, x));
 }
 
 (* clamp into range; off-chunk cells get an irrelevant in-range default. *)
@@ -550,6 +723,46 @@ fn rows_to_cells
   em_of nthr tid sq efun
 }
 
+(* Content-carrying variant of [rows_to_cells]: from the explicit-valued
+   copy-step rows recover the in-chunk cells carrying [e]'s content. *)
+ghost
+fn rows_to_cells_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (e : chest2 et rows cols)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  requires
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+       stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s))
+  ensures
+    (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+{
+  forevery_map
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s))
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       (forall+ (x : natlt (SZ.v (chunk et))). cell_body m e nthr tid sq f (s, x)))
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       stage_rc_elim_c m e nthr tid sq f s);
+  forevery_flatten'
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       cell_body m e nthr tid sq f sx);
+  forevery_ext
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       cell_body m e nthr tid sq f sx)
+    (fun (sx : chunkA rows cols (SZ.v (chunk et)) nthr) ->
+       (let ij = (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq).gg sx in
+        T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2)));
+  forevery_iso_back
+    (chunk_bij rows cols (SZ.v (chunk et)) nthr tid sq)
+    (fun (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+}
+
 (* per-copy-step row_cells (1.0R) -> live_strided_chunks (pipe_live). *)
 ghost
 fn rows_to_own_chunks
@@ -573,6 +786,31 @@ fn rows_to_own_chunks
        T.tensor_pts_to_cell m (idx2 ij._1 ij._2) (acc2 em ij._1 ij._2));
   fold (FB.own_strided_chunks m em nthr tid);
   fold (FB.live_strided_chunks m nthr tid);
+}
+
+(* Content-carrying variant of [rows_to_own_chunks]: the destination
+   provably holds [e]'s content on its chunks. *)
+ghost
+fn rows_to_own_chunks_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (e : chest2 et rows cols)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  requires
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+       stage_rc m nthr tid sq 1.0R s (esrc_cells nthr tid sq e s))
+  ensures FB.own_strided_chunks m e nthr tid
+{
+  rows_to_cells_c m e nthr tid sq 1.0R;
+  rewrite
+    (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
+       T.tensor_pts_to_cell m #1.0R (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+  as
+    (forall+ (ij : (natlt rows & natlt cols){CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij}).
+       T.tensor_pts_to_cell m (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  fold (FB.own_strided_chunks m e nthr tid);
 }
 
 (* ================================================================== *)
@@ -620,6 +858,48 @@ fn subtile_to_rows
     (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
        T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
   cells_to_rows m e nthr tid sq f;
+}
+
+(* Content-carrying variant of [subtile_to_rows]: the copy-step rows carry the
+   explicit [esrc_cells] value from the source subtile [e]. *)
+ghost
+fn subtile_to_rows_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  (#e : chest2 et rows cols)
+  requires m |-> Frac f e
+  ensures
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+        stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s))
+    **
+    (forall+ (ij : (natlt rows & natlt cols){~(CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij)}).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+{
+  T.tensor_ilower2 m;
+  forevery_flatten'
+    (fun (ij : (natlt rows & natlt cols)) ->
+       (Cell m (idx2 ij._1 ij._2) |-> Frac f (acc e (idx2 ij._1 ij._2))));
+  forevery_ext
+    (fun (ij : (natlt rows & natlt cols)) ->
+       (Cell m (idx2 ij._1 ij._2) |-> Frac f (acc e (idx2 ij._1 ij._2))))
+    (fun (ij : (natlt rows & natlt cols)) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  forevery_refine_split
+    (fun (ij : (natlt rows & natlt cols)) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+    (fun (ij : (natlt rows & natlt cols)) ->
+       CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij);
+  rewrite
+    (forall+ (ij : (natlt rows & natlt cols){CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij}).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+  as
+    (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  cells_to_rows_c m e nthr tid sq f;
 }
 
 (* Merge the reconstructed in-chunk chest [em] with the residual chest [e]. *)
@@ -697,6 +977,60 @@ fn rows_to_subtile
     (forall+ (r : natlt rows) (c : natlt cols).
        (Cell m (idx2 r c) |-> Frac f (acc e' (idx2 r c))));
   T.tensor_iraise2 m #f #e';
+}
+
+(* Content-carrying inverse of [subtile_to_rows_c] : re-assemble the whole
+   source tile at [Frac f] with its ORIGINAL content [e]. *)
+ghost
+fn rows_to_subtile_c
+  (#et : Type0) {| sized et, has_vec_cpy et |}
+  (#rows #cols : pos) (#l : layout2 rows cols)
+  {| T.ctlayout l, strided_row_major (vtlayout_of_tlayout l) |}
+  (m : array2 et l) (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  (e : chest2 et rows cols)
+  requires
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+       stage_rc m nthr tid sq f s (esrc_cells nthr tid sq e s))
+    **
+    (forall+ (ij : (natlt rows & natlt cols){~(CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij)}).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+  ensures
+    m |-> Frac f e
+{
+  rows_to_cells_c m e nthr tid sq f;
+  rewrite
+    (forall+ (ij : chunkB rows cols (SZ.v (chunk et)) nthr tid).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2))
+  as
+    (forall+ (ij : (natlt rows & natlt cols){CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij}).
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  forevery_refine_join'
+    (fun (ij : (natlt rows & natlt cols)) ->
+       CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij)
+    (fun (ij : (natlt rows & natlt cols)) ->
+       ~(CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij))
+    (fun (ij : (natlt rows & natlt cols){CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij
+                                          \/ ~(CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij)}) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  forevery_unrefine
+    #(natlt rows & natlt cols)
+    #(fun (ij : (natlt rows & natlt cols)) ->
+        CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij
+        \/ ~(CV.in_chunk (SZ.v (chunk et)) rows cols nthr tid ij))
+    (fun (ij : (natlt rows & natlt cols)) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  forevery_unflatten'
+    (fun (ij : (natlt rows & natlt cols)) ->
+       T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
+  rewrite
+    (forall+ (r : natlt rows) (c : natlt cols).
+       T.tensor_pts_to_cell m #f (idx2 r c) (acc2 e r c))
+  as
+    (forall+ (r : natlt rows) (c : natlt cols).
+       (Cell m (idx2 r c) |-> Frac f (acc e (idx2 r c))));
+  T.tensor_iraise2 m #f #e;
 }
 
 (* ================================================================== *)
@@ -937,6 +1271,66 @@ fn finish_stage
     };
 }
 
+(* Content-carrying variant of [finish_stage]: assemble the per-step
+   explicit-valued copy pledges (plus the source residual) into the pledge
+   that the destination holds [e_s]'s content and the source is returned with
+   its ORIGINAL content [e_s]. *)
+ghost
+fn finish_stage_c
+  (#et : Type0) {| _sz : sized et |} {| _vc : has_vec_cpy et |}
+  (#rows #cols : pos) (#ld : layout2 rows cols)
+  {| T.ctlayout ld, strided_row_major (vtlayout_of_tlayout ld) |}
+  (m_d : array2 et ld)
+  (#ls : layout2 rows cols)
+  {| T.ctlayout ls, strided_row_major (vtlayout_of_tlayout ls) |}
+  (m_s : array2 et ls)
+  (nthr : pos) (tid : natlt nthr)
+  (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
+  (f : perm)
+  (e_s : chest2 et rows cols)
+  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (sqg : squash (is_global m_s))
+  requires
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+       pledge0 (Kuiper.PipelineCopy.batch_done b)
+         (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+          stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)))
+    ** src_residual m_s nthr tid f e_s
+  ensures pledge0 (Kuiper.PipelineCopy.batch_done b)
+            (FB.own_strided_chunks m_d e_s nthr tid ** (m_s |-> Frac f e_s))
+{
+  collect_pledges (Kuiper.PipelineCopy.batch_done b) (g_a_iters rows cols (SZ.v (chunk et)) nthr)
+    (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+       stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+       stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s));
+
+  return_pledge (Kuiper.PipelineCopy.batch_done b) (src_residual m_s nthr tid f e_s)
+    #(src_residual_send m_s nthr tid f e_s ());
+
+  join_pledge
+    (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+       stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+       stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s))
+    (src_residual m_s nthr tid f e_s);
+
+  rewrite_pledge
+    ((forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
+        stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+        stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s))
+     ** src_residual m_s nthr tid f e_s)
+    (FB.own_strided_chunks m_d e_s nthr tid ** (m_s |-> Frac f e_s))
+    #emp_inames
+    fn _ {
+      forevery_unzip
+        (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+           stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s))
+        (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
+           stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s));
+      rows_to_own_chunks_c m_d e_s nthr tid sq;
+      rows_to_subtile_c m_s nthr tid sq f e_s;
+    };
+}
+
 inline_for_extraction noextract
 fn stage_one
   (#et : Type0) {| _sz : sized et |} {| _vc : has_vec_cpy et |}
@@ -967,31 +1361,31 @@ fn stage_one
   preserves Kuiper.PipelineCopy.batch_live b
   requires FB.own_strided_chunks m_d em_d nthr tid ** (m_s |-> Frac f e_s)
   ensures pledge0 (Kuiper.PipelineCopy.batch_done b)
-            (FB.live_strided_chunks m_d nthr tid ** (exists* e. m_s |-> Frac f e))
+            (FB.own_strided_chunks m_d e_s nthr tid ** (m_s |-> Frac f e_s))
 {
   own_chunks_to_rows m_d em_d nthr tid sq;
-  subtile_to_rows m_s nthr tid sq f;
+  subtile_to_rows_c m_s nthr tid sq f;
 
   forevery_zip
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
        exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_d nthr tid sq 1.0R s v)
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
-       exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_s nthr tid sq f s v);
+       stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s));
 
   natlt_is_between (g_a_iters rows cols (SZ.v (chunk et)) nthr);
   forevery_rw_type (natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) (between 0 (SZ.v a_iters))
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
        (exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_d nthr tid sq 1.0R s v) **
-       (exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_s nthr tid sq f s v));
+       stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s));
 
   Kuiper.For.for_loop' 0sz a_iters
     (fun (s : between 0 (SZ.v a_iters)) ->
        (exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_d nthr tid sq 1.0R s v) **
-       (exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_s nthr tid sq f s v))
+       stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s))
     (fun (s : between 0 (SZ.v a_iters)) ->
-       exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }).
-         pledge0 (Kuiper.PipelineCopy.batch_done b)
-           (stage_rc m_d nthr tid sq 1.0R s v ** stage_rc m_s nthr tid sq f s v))
+       pledge0 (Kuiper.PipelineCopy.batch_done b)
+         (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+          stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)))
     (gpu ** Kuiper.PipelineCopy.batch_live b)
     fn x {
        lemma_ff rows cols (SZ.v (chunk et)) nthr tid (SZ.v x) 0;
@@ -1010,11 +1404,11 @@ fn stage_one
 
   forevery_rw_type (between 0 (SZ.v a_iters)) (natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
-       exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }).
-         pledge0 (Kuiper.PipelineCopy.batch_done b)
-           (stage_rc m_d nthr tid sq 1.0R s v ** stage_rc m_s nthr tid sq f s v));
+       pledge0 (Kuiper.PipelineCopy.batch_done b)
+         (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
+          stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)));
 
-  finish_stage m_d m_s nthr tid sq f b ();
+  finish_stage_c m_d m_s nthr tid sq f e_s b ();
 }
 
 (* ================================================================== *)
@@ -1076,8 +1470,8 @@ fn stage_tiles
   returns b' : Kuiper.PipelineCopy.pipeline_batch_t
   ensures
     pledge0 (Kuiper.PipelineCopy.batch_done b)
-      (FB.live_strided_chunks mAd nthr tid ** FB.live_strided_chunks mBd nthr tid **
-       (exists* eA eB. (mAs |-> Frac fA eA) ** (mBs |-> Frac fB eB))) **
+      (FB.own_strided_chunks mAd eAs nthr tid ** FB.own_strided_chunks mBd eBs nthr tid **
+       (mAs |-> Frac fA eAs) ** (mBs |-> Frac fB eBs)) **
     Kuiper.PipelineCopy.batch_committed b **
     Kuiper.PipelineCopy.batch_live b' **
     pure (fst b' == fst b /\ snd b' > snd b)
@@ -1086,13 +1480,13 @@ fn stage_tiles
   stage_one mBd mBs nthr tid sqB fB b_t_row b_t_col b_row_step b_iters b () ();
   let b' = Kuiper.PipelineCopy.pipeline_commit #b;
   join_pledge
-    (FB.live_strided_chunks mAd nthr tid ** (exists* e. mAs |-> Frac fA e))
-    (FB.live_strided_chunks mBd nthr tid ** (exists* e. mBs |-> Frac fB e));
+    (FB.own_strided_chunks mAd eAs nthr tid ** (mAs |-> Frac fA eAs))
+    (FB.own_strided_chunks mBd eBs nthr tid ** (mBs |-> Frac fB eBs));
   rewrite_pledge
-    ((FB.live_strided_chunks mAd nthr tid ** (exists* e. mAs |-> Frac fA e)) **
-     (FB.live_strided_chunks mBd nthr tid ** (exists* e. mBs |-> Frac fB e)))
-    (FB.live_strided_chunks mAd nthr tid ** FB.live_strided_chunks mBd nthr tid **
-     (exists* eA eB. (mAs |-> Frac fA eA) ** (mBs |-> Frac fB eB)))
+    ((FB.own_strided_chunks mAd eAs nthr tid ** (mAs |-> Frac fA eAs)) **
+     (FB.own_strided_chunks mBd eBs nthr tid ** (mBs |-> Frac fB eBs)))
+    (FB.own_strided_chunks mAd eAs nthr tid ** FB.own_strided_chunks mBd eBs nthr tid **
+     (mAs |-> Frac fA eAs) ** (mBs |-> Frac fB eBs))
     #emp_inames
     fn _ { () };
   b'
