@@ -802,6 +802,14 @@ fn store_band
     let idx : szlt (mfrag wm * nfrag wn) = i_sz *^ nfrag_sz +^ jv;
     array_fragment_pts_to_ref accFrags;
     array_fragment_extract_ro accFrags idx;
+    // The extraction plugin appends a [__syncwarp()] to every overwrite-combiner
+    // [mma_store_comb] (overwrite branch of the [Kuiper.TensorCore.Base.mma_store_comb]
+    // case in [$KUIPER_HOME/extraction/dune/generated/ExtractKuiper.ml], ~L1308-1318
+    // and ~L1364-1374), so the generated code carries one extra warp barrier per
+    // fragment store vs. the reference. It is redundant here: the [j] stores hit
+    // disjoint 16-column slices of a warp-private band and [store_matrix_sync] is
+    // warp-collective. Removing it requires dropping the [__syncwarp] element from
+    // that overwrite branch upstream, out of scope for this module.
     mma_store accFrags.(idx) #_
       #(strided_row_major_subtile
           (subtile_layout
