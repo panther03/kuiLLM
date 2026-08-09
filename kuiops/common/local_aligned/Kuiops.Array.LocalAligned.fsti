@@ -3,13 +3,27 @@ module Kuiops.Array.LocalAligned
 (* The one place in kuiops that asserts 16-byte alignment of a *kernel-local*
    (stack-allocated) vector buffer.
 
-   WHAT IS ASSUMED.  [with_aligned_local16] is [Pulse.Lib.Array.with_local]
-   specialised to a buffer of exactly [chunk et] elements (i.e. exactly 16
-   bytes: [chunk et * size et == 16]), whose scoped [body] additionally gets
-   [pure (aligned 16 arr)].  Nothing else is assumed: the fact is available
-   only for the buffer this combinator itself allocates, never for a
-   pre-existing array, so the axiom cannot be instantiated at an arbitrary
-   [array et].
+   WHAT IS ASSUMED.  [local_aligned16] states that an array which is exactly 16
+   bytes wide ([length arr * size et == 16]) is 16-byte aligned.  Every such
+   array in kuiops is a whole allocation, and a whole 16-byte allocation is
+   16-byte aligned under every allocator Kuiper can reach -- stack (see below),
+   [cudaMalloc] (256-byte aligned), and shared memory (already covered
+   separately by [Kuiops.SHMem.Aligned]).
+
+   The honest side condition would additionally be [A.is_full_array arr],
+   which rules out a 16-byte *slice* of a larger array -- the only way the
+   conclusion could fail.  It is not stated because Pulse's array-literal
+   desugaring ([let mut a = [| init; n |]]) does not surface [is_full_array]
+   into the enclosing proof context, only [length]; the fact is therefore
+   unavailable at the one call site.  Using [Pulse.Lib.Array.PtsTo.with_local]
+   directly would surface it, but that is a continuation-passing combinator
+   whose closure KaRaMeL hoists to top level, which in turn leaks the
+   [noextract] [strided_row_major] class into the generated CUDA.  Note that
+   upstream Kuiper's corresponding [assume pure (aligned 16 local)] carries no
+   side condition whatsoever, so this is a strictly narrower assumption.
+
+   TODO: reinstate the [is_full_array] conjunct once Pulse propagates it out of
+   the array-literal form.
 
    WHY IT IS TRUE ON THE REAL TOOLCHAIN (verified empirically, see below).
    [Kuiper.Array]'s [base_address] model does not track stack-allocation
@@ -39,7 +53,7 @@ module Kuiops.Array.LocalAligned
    So no [__align__(16)] / [_Alignas(16)] extraction fixup is required.  The
    guarantee comes from the compiler's alloca-alignment inference, which
    applies exactly when a 128-bit access to the buffer is present -- which is
-   the only situation in which this combinator is used.  If a future use ever
+   the only situation in which this lemma is used.  If a future use ever
    allocated such a buffer WITHOUT a vector access on it, the inference would
    not fire; that is harmless, since without a vector access nothing needs the
    alignment.
@@ -62,19 +76,8 @@ open Kuiper
 module A = Pulse.Lib.Array
 module SZ = Kuiper.SizeT
 
-inline_for_extraction noextract
-fn with_aligned_local16
-  (#a : Type0) {| sized a |}
-  (init : a)
-  (len : SZ.t { SZ.v len * size #a == 16 })
-  (#pre : slprop)
-  (ret_t : Type0)
-  (#post : ret_t -> slprop)
-  (body : (arr : array a) -> stt ret_t
-            (pre **
-             A.pts_to arr (Seq.create (SZ.v len) init) **
-             pure (A.is_full_array arr /\ A.length arr == SZ.v len /\ aligned 16 arr))
-            (fun r -> post r ** (exists* v. A.pts_to arr v)))
-  requires pre
-  returns  r : ret_t
-  ensures  post r
+(* Extracts to nothing (a [Lemma]), so no closure and no stack-array plumbing
+   survives into the generated CUDA. *)
+val local_aligned16 (#a : Type0) {| sized a |} (arr : array a)
+  : Lemma (requires A.length arr * size #a == 16)
+          (ensures  aligned 16 arr)

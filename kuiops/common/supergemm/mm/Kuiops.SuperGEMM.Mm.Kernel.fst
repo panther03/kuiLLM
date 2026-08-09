@@ -218,7 +218,7 @@ let div_ub (a b c : nat)
 
 #push-options "--split_queries no --z3rlimit 15"
 
-
+inline_for_extraction noextract
 fn kf
   (#et_ab #et_acc #et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
@@ -316,7 +316,7 @@ fn kf
   let warp_n : szlt (SZ.v bn / SZ.v wn) = wid %^ wnn;
 
   (* ---- hoisted staging addressing (computed ONCE) ---- *)
-  let ch = chunk et_ab;
+  let ch : szp = chunk et_ab;
   let a_t_row   = (tid *^ ch) /^ bk;
   let a_t_col   = (tid *^ ch) %^ bk;
   let a_row_step = (ch *^ nthr) /^ bk;
@@ -324,11 +324,21 @@ fn kf
   let b_iters   = (bn *^ bk) /^ (ch *^ nthr);
 
   (* ---- pipelined main loop ---- *)
+  // Bind the four pipeline buffers to locals: KaRaMeL only inserts the
+  // `(et *) KPR_SHMEM_AT(..)` cast when the shared pointer is let-bound, not
+  // when it is passed directly as an argument.
+  let sA0 = SH.sar_a0 bm bn bk wm wn skew sh;
+  let sA1 = SH.sar_a1 bm bn bk wm wn skew sh;
+  let sB0 = SH.sar_b0 bm bn bk wm wn skew sh;
+  let sB1 = SH.sar_b1 bm bn bk wm wn skew sh;
+  assert rewrites_to sA0 (SH.sar_a0 bm bn bk wm wn skew sh);
+  assert rewrites_to sA1 (SH.sar_a1 bm bn bk wm wn skew sh);
+  assert rewrites_to sB0 (SH.sar_b0 bm bn bk wm wn skew sh);
+  assert rewrites_to sB1 (SH.sar_b1 bm bn bk wm wn skew sh);
   let accFrags =
     kloop #et_ab #et_acc bm bn bk wm wn skew
       gA #eA gB #eB
-      (SH.sar_a0 bm bn bk wm wn skew sh) (SH.sar_a1 bm bn bk wm wn skew sh)
-      (SH.sar_b0 bm bn bk wm wn skew sh) (SH.sar_b1 bm bn bk wm wn skew sh)
+      sA0 sA1 sB0 sB1
       (fun x -> x)
       (fA /. (nblk * nthr)) (fB /. (nblk * nthr))
       nthr tid block_row block_col warp_m warp_n

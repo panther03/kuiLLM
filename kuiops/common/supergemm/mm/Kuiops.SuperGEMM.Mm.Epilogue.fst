@@ -32,7 +32,7 @@ open Kuiper.Concrete { concrete_sz, concrete_sz_sz }
 open Pulse.Lib.Trade
 
 open Kuiops.Vec.MapRun { vec_map_run_write }
-open Kuiops.Array.LocalAligned { with_aligned_local16 }
+open Kuiops.Array.LocalAligned { local_aligned16 }
 open Kuiper.Barrier.Warp { warp_barrier_wait }
 open Kuiops.SuperGEMM.Mm.Shared
   { scratch_tile_live, scratch_tile, scratch_matrix, sar_scratch, shmems_desc }
@@ -769,12 +769,6 @@ fn store_band
 {
   let ld_sz : SZ.t = wn `SZ.add` chunk et_acc;
   assert pure (SZ.v ld_sz == lde et_acc wn);
-  let base_srm : strided_row_major
-      (vtlayout_of_tlayout
-        (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc)))
-    = srm_l2_skewed_row_major
-        #(warps bm bn wm wn * frag) #(SZ.v wn) #(eskew et_acc) ld_sz;
-
   with eIn. unfold scratch_tile_live bm bn bk wm wn skew sh nthr tid;
   let band = scratch_tile bm bn bk wm wn skew sh (SZ.v wid_sz);
   rewrite each scratch_tile bm bn bk wm wn skew sh (tid / SZ.v warp_size)
@@ -803,7 +797,9 @@ fn store_band
             frag (SZ.v wn) (SZ.v wid_sz) 0)
           #_ #(strided_row_major_subtile
             (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc))
-            #_ #base_srm frag (SZ.v wn) (SZ.v wid_sz) 0)
+            #_ #(srm_l2_skewed_row_major
+                   #(warps bm bn wm wn * frag) #(SZ.v wn) #(eskew et_acc) ld_sz)
+            frag (SZ.v wn) (SZ.v wid_sz) 0)
           frag frag 0 (SZ.v jv))
       sTile;
     with vf. assert (sTile |-> Frac (1.0R /. warp_size) vf);
@@ -940,23 +936,14 @@ fn epilogue
   let ld_sz : SZ.t = wn `SZ.add` chunk et_acc;
   assert pure (SZ.v ld_sz == lde et_acc wn);
 
-  with_aligned_local16 #et_d #_ (zero #et_d) (chunk et_d)
-    #(gpu **
-      thread_id nthr tid **
-      array_fragment_pts_to accFrags #fAcc ems **
-      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
-      scratch_tile_live bm bn bk wm wn skew sh nthr tid **
-      pure (aligned 16 (T.core gD) /\
-            aligned_strided_row_major (SZ.v (chunk et_d)) strD))
-    unit
-    #(fun _ -> gpu **
-      thread_id nthr tid **
-      array_fragment_pts_to accFrags #fAcc ems **
-      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
-      scratch_tile_live bm bn bk wm wn skew sh nthr tid **
-      pure (aligned 16 (T.core gD) /\
-            aligned_strided_row_major (SZ.v (chunk et_d)) strD))
-  fn obuf {
+  let zd : et_d = zero #et_d;
+  // NOTE: the length must be written inline, not via a `let`-bound size: a
+  // let-bound length extracts as a non-constant stack-array bound, which
+  // KaRaMeL rejects.
+  let mut obuf = [| zd; chunk et_d |];
+  A.pts_to_len obuf;
+  local_aligned16 #et_d obuf;
+  {
     let mut i : sz = 0sz;
       while (!i <^ mfrag_wm_sz)
         invariant live i
@@ -1052,11 +1039,10 @@ fn epilogue
         assert pure (0 < SZ.v wn);
         FStar.Math.Lemmas.cancel_mul_div (warps bm bn wm wn) frag;
         assert pure (SZ.v wid_sz < (warps bm bn wm wn * frag) / frag);
-        let tile_c = epi_scratch_tile_ctlayout et_acc (warps bm bn wm wn * frag) wn wid_sz ld_sz2;
 
         // Recompute the block/warp coordinates *inside* the closure: the outer
         // let-bound coordinate equations do not survive across the
-        // [with_aligned_local16] closure boundary, so we rebuild them here where
+        // block boundary, so we rebuild them here where
         // their defining equations are in scope for drain_band's coord squash.
         assert pure (SZ.v bid_sz < SZ.v nblk);
         assert pure (SZ.v nblk == (SZ.v m / SZ.v bm) * (SZ.v n / SZ.v bn));
@@ -1109,7 +1095,7 @@ fn epilogue
               (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn)
                 (eskew et_acc #(Kuiper.Scalars.Base.is_sized #et_acc) #_))
               frag (SZ.v wn) (SZ.v wid_sz) 0)
-          #tile_c
+          #(epi_scratch_tile_ctlayout et_acc (warps bm bn wm wn * frag) wn wid_sz ld_sz2)
           band
           iv lane_sz ();
     

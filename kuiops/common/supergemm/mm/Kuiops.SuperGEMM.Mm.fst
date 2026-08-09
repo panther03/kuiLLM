@@ -22,6 +22,7 @@ module P = Kuiops.SuperGEMM.Mm.Params
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
+inline_for_extraction noextract
 fn supergemm_mm_async
   (et_ab et_acc et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab |}
