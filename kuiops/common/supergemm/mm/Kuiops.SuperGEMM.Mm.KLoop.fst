@@ -254,7 +254,7 @@ fn subproducts
   (warp_n : szlt (SZ.v bn / SZ.v wn))
   (#_ : squash (length aFrags == SZ.v wm / frag))
   (#_ : squash (length bFrags == SZ.v wn / frag))
-  (#_ : squash (length accFrags == SZ.v wm / frag * (SZ.v wn / frag)))
+  (#_ : squash (length accFrags == acc_len wm wn))
   (#_ : squash (valid_frag_et_dims et_ab FragA frag frag frag))
   (#_ : squash (valid_frag_et_dims et_ab FragB frag frag frag))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc frag frag frag))
@@ -267,6 +267,7 @@ fn subproducts
   preserves
     live aFrags ** live bFrags ** live accFrags
 {
+  acc_len_reveal wm wn;
   let kstep = bk /^ frag_sz;
   let mut ks = 0sz;
   while (!ks <^ kstep)
@@ -788,7 +789,7 @@ fn body_compute
      valid_frag_et_dims et_acc FragAcc frag frag frag /\
      valid_frag_et_comb et_ab et_acc /\
      length aFrags == SZ.v wm / frag /\ length bFrags == SZ.v wn / frag /\
-     length accFrags == SZ.v wm / frag * (SZ.v wn / frag)))
+     length accFrags == acc_len wm wn))
   ()
   requires
     gpu **
@@ -923,7 +924,7 @@ fn subproducts_buf
      valid_frag_et_dims et_acc FragAcc frag frag frag /\
      valid_frag_et_comb et_ab et_acc /\
      length aFrags == SZ.v wm / frag /\ length bFrags == SZ.v wn / frag /\
-     length accFrags == SZ.v wm / frag * (SZ.v wn / frag)))
+     length accFrags == acc_len wm wn))
   ()
   requires
     gpu **
@@ -1031,6 +1032,7 @@ fn kloop
   (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (fmap : et_ab -> et_ab)
   (fA fB : perm)
   (nthr : szp { SZ.v nthr == P.nthr bm bn wm wn })
@@ -1069,10 +1071,12 @@ fn kloop
      valid_frag_et_dims et_ab FragB frag frag frag /\
      valid_frag_et_dims et_acc FragAcc frag frag frag /\
      valid_frag_et_comb et_ab et_acc /\
-     SZ.fits (SZ.v wm / frag * (SZ.v wn / frag))))
+     SZ.fits (SZ.v wm / frag * (SZ.v wn / frag)) /\
+     length accFrags == acc_len wm wn))
   ()
   preserves gpu
   preserves thread_id (SZ.v nthr) (SZ.v tid)
+  preserves live accFrags
   preserves B.barrier_tok
     (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk))
   requires
@@ -1082,14 +1086,11 @@ fn kloop
     pipe_live (skewed_view bm bk skew sarA1) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid)
-  returns accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc)
   ensures
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
-           (SZ.v k / SZ.v bk - 1) (SZ.v tid) **
-    live accFrags **
-    pure (length accFrags == acc_len wm wn)
+           (SZ.v k / SZ.v bk - 1) (SZ.v tid)
 {
   let num_k_tiles = k /^ bk;
   FStar.Math.Lemmas.lemma_mult_le_right (ldt bk skew) 1 (SZ.v bm);
@@ -1098,8 +1099,6 @@ fn kloop
 
   let aFrags   = __alloc_array_fragment et_ab  FragA   frag_sz frag_sz frag_sz FragLRM  (wm /^ frag_sz);
   let bFrags   = __alloc_array_fragment et_ab  FragB   frag_sz frag_sz frag_sz FragLCM  (wn /^ frag_sz);
-  let accFrags = __alloc_array_fragment et_acc FragAcc frag_sz frag_sz frag_sz FragLAcc ((wm /^ frag_sz) *^ (wn /^ frag_sz));
-  acc_len_alloc wm wn;
 
   (* ---- prologue: stage k-tile 0 into buffer 0 ---- *)
   let b0 = PC.get_batch ();
@@ -1167,6 +1166,10 @@ fn kloop
     let par = Kuiper.SizeT.sizet_and kti 1sz;
     Kuiper.SizeT.sizet_and_div_pow2 kti 2sz 1;
     let kt1 : szlt (SZ.v k / SZ.v bk) = kti +^ 1sz;
+    (* discharge the parity conclusions once, in the light pre-branch context,
+       so the (heavy, post-body_compute) branch VCs only need modus ponens *)
+    assert pure ((SZ.v par = 0 ==> SZ.v kt1 % 2 = 1) /\
+                 (SZ.v par <> 0 ==> SZ.v kt1 % 2 = 0));
 
     if (par = 0sz) {
       (* ---- EVEN: current = buffer 0, other = buffer 1 ---- *)
@@ -1267,7 +1270,7 @@ fn kloop
     drop_ (aFrags |-> va);
     with vb. assert (bFrags |-> vb);
     drop_ (bFrags |-> vb);
-    accFrags
+    ()
   } else {
     unfold_pending_odd bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
       (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt);
@@ -1302,7 +1305,7 @@ fn kloop
     drop_ (aFrags |-> va);
     with vb. assert (bFrags |-> vb);
     drop_ (bFrags |-> vb);
-    accFrags
+    ()
   }
 }
 #pop-options

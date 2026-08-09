@@ -69,7 +69,7 @@ fn subproducts
   (warp_n : szlt (SZ.v bn / SZ.v wn))
   (#_ : squash (length aFrags == SZ.v wm / frag))
   (#_ : squash (length bFrags == SZ.v wn / frag))
-  (#_ : squash (length accFrags == SZ.v wm / frag * (SZ.v wn / frag)))
+  (#_ : squash (length accFrags == acc_len wm wn))
   (#_ : squash (valid_frag_et_dims et_ab FragA frag frag frag))
   (#_ : squash (valid_frag_et_dims et_ab FragB frag frag frag))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc frag frag frag))
@@ -124,6 +124,7 @@ fn kloop
   (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (fmap : et_ab -> et_ab)
   (fA fB : perm)
   (nthr : szp { SZ.v nthr == P.nthr bm bn wm wn })
@@ -162,10 +163,12 @@ fn kloop
      valid_frag_et_dims et_ab FragB frag frag frag /\
      valid_frag_et_dims et_acc FragAcc frag frag frag /\
      valid_frag_et_comb et_ab et_acc /\
-     SZ.fits (SZ.v wm / frag * (SZ.v wn / frag))))
+     SZ.fits (SZ.v wm / frag * (SZ.v wn / frag)) /\
+     length accFrags == acc_len wm wn))
   ()
   preserves gpu
   preserves thread_id (SZ.v nthr) (SZ.v tid)
+  preserves live accFrags
   preserves B.barrier_tok
     (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk))
   requires
@@ -175,11 +178,8 @@ fn kloop
     pipe_live (skewed_view bm bk skew sarA1) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid)
-  returns accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc)
   ensures
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
-           (SZ.v k / SZ.v bk - 1) (SZ.v tid) **
-    live accFrags **
-    pure (length accFrags == acc_len wm wn)
+           (SZ.v k / SZ.v bk - 1) (SZ.v tid)
