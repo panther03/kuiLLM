@@ -32,6 +32,26 @@ val sw_col (nm nn g : pos) (bid : natlt (nm * nn)) : natlt nn
 inline_for_extraction noextract
 val sw_inv (nm nn g : pos) (r : natlt nm) (c : natlt nn) : natlt (nm * nn)
 
+(* The controlled window onto [sw_row]/[sw_col] for the kernel: it computes the
+   decode in machine arithmetic ([bid /^ pg], [bid -^ gid *^ pg], ...) and this
+   lemma discharges every resulting refinement while tying the machine values
+   to the abstract [sw_row]/[sw_col].  [rem] is stated as [bid - gid*pg] (equal
+   to [bid % pg]) and [rows] as [if d < g then d else g] to mirror a SizeT
+   computation exactly. *)
+val sw_decode_spec (nm nn g : pos) (bid : natlt (nm * nn))
+  : Lemma (let pg   = g * nn in
+           let gid  = bid / pg in
+           let rem  = bid - gid * pg in
+           let d    = nm - gid * g in
+           let rows = if d < g then d else g in
+           rows > 0 /\
+           gid * g < nm /\
+           gid * (g * nn) <= bid /\
+           gid * g + rem % rows < nm /\
+           rem / rows < nn /\
+           sw_row nm nn g bid == gid * g + rem % rows /\
+           sw_col nm nn g bid == rem / rows)
+
 val sw_inv_correct (nm nn g : pos) (bid : natlt (nm * nn))
   : Lemma (sw_inv nm nn g (sw_row nm nn g bid) (sw_col nm nn g bid) == bid)
 

@@ -37,6 +37,7 @@ module T = Kuiper.Tensor
 module B = Kuiper.Barrier
 module P = Kuiops.SuperGEMM.Mm.Params
 module SH = Kuiops.SuperGEMM.Mm.Shared
+module SW = Kuiops.SuperGEMM.Mm.Swizzle
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
@@ -216,6 +217,10 @@ let div_ub (a b c : nat)
   FStar.Math.Lemmas.lemma_div_mod a c;
   FStar.Math.Lemmas.lemma_mult_lt_left c (a / c) b
 
+inline_for_extraction noextract
+let sz_min (a b : SZ.t) : (r : SZ.t { SZ.v r == (if SZ.v a < SZ.v b then SZ.v a else SZ.v b) }) =
+  if a <^ b then a else b
+
 #push-options "--split_queries no --z3rlimit 15"
 
 inline_for_extraction noextract
@@ -234,7 +239,7 @@ fn kf
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
-  (bm bn bk wm wn skew : szp)
+  (bm bn bk wm wn skew group : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
@@ -291,19 +296,36 @@ fn kf
   (* frag divides wm/wn *)
   assert pure (mfrag wm * frag == SZ.v wm);
 
-  (* ---- index decode ----
-     TODO(perf): the reference applies a GROUP-based L2 swizzle here -- a pure
-     bijection on the linear block index `bid` (regrouping blocks so that
-     concurrently-resident CTAs share L2 working sets) before the div/mod
-     decode below. It is a bijection on block indices, so it changes neither
-     the ownership partition nor any proof obligation, and can be slotted in
-     at exactly this point (rewrite `bid` -> `swizzle bid`) without touching
-     anything downstream. Deliberately omitted for step 1. *)
+  (* ---- index decode (GROUP-based L2 swizzle) ----
+     Permute the linear block index into a [group]-tall, [num_n]-wide
+     column-major strip so concurrently-resident CTAs share L2 working sets: a
+     scheduling wave then reuses A rows / B columns out of L2 instead of
+     streaming a whole row of B per block row.  This is a pure bijection on
+     block indices ([Swizzle]) -- it changes neither the ownership partition
+     (kpre/kpost are indexed by [bid], not by the tile coordinates) nor any
+     proof obligation, only which (row,col) tile a block loads.
+
+     [sw_decode_spec] discharges the in-range refinements and every no-overflow
+     side condition of the SizeT decode.  [gid] is computed as
+     [(bid / num_n) / group] so we never form [group * num_n] (which carries no
+     fits bound); the largest intermediate is [(gid*group) * num_n], which is
+     [<= bid < nblk] and hence fits. *)
   let num_n = n /^ bn;
   assert pure (SZ.v num_n == SZ.v n / SZ.v bn /\ SZ.v num_n > 0);
-  div_ub (SZ.v bid) (SZ.v m / SZ.v bm) (SZ.v num_n);
-  let block_row : szlt (SZ.v m / SZ.v bm) = bid /^ num_n;
-  let block_col : szlt (SZ.v n / SZ.v bn) = bid %^ num_n;
+  let num_m = m /^ bm;
+  assert pure (SZ.v num_m == SZ.v m / SZ.v bm /\ SZ.v num_m > 0);
+  SW.sw_decode_spec (SZ.v num_m) (SZ.v num_n) (SZ.v group) (SZ.v bid);
+  FStar.Math.Lemmas.division_multiplication_lemma (SZ.v bid) (SZ.v num_n) (SZ.v group);
+  FStar.Math.Lemmas.paren_mul_right (SZ.v bid / (SZ.v group * SZ.v num_n)) (SZ.v group) (SZ.v num_n);
+  let gid  = (bid /^ num_n) /^ group;
+  assert pure (SZ.v gid == SZ.v bid / (SZ.v group * SZ.v num_n));
+  let gidg = gid *^ group;
+  let rem  = bid -^ gidg *^ num_n;
+  let d    = num_m -^ gidg;
+  let rows = sz_min d group;
+  assert pure (SZ.v rows > 0);
+  let block_row : szlt (SZ.v m / SZ.v bm) = gidg +^ rem %^ rows;
+  let block_col : szlt (SZ.v n / SZ.v bn) = rem /^ rows;
 
   let wid = tid /^ warp_size;
   assert pure (SZ.v nthr == warps bm bn wm wn * SZ.v warp_size);
@@ -478,7 +500,7 @@ let mk_kernel
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD { is_global gD })
   (post_map : et_acc -> et_d)
-  (bm bn bk wm wn skew : szp)
+  (bm bn bk wm wn skew group : szp)
   (#sqc : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_bmnk : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
@@ -564,7 +586,7 @@ let mk_kernel
     block_teardown = (fun sh bid ->
       SH.block_teardown gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmnk fA fB nblk nthr sh bid);
 
-    f = kf gA #eA gB #eB gD post_map bm bn bk wm wn skew
+    f = kf gA #eA gB #eB gD post_map bm bn bk wm wn skew group
           #sqc #sq_bmnk #sq_fits #sq_glob #sq_asAB #sq_asD #sq_geo #sq_vf
           fA fB nblk nthr;
 

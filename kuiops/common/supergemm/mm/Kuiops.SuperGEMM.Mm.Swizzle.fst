@@ -133,6 +133,33 @@ let sw_inv_eq (nm nn g : pos) (r : natlt nm) (c : natlt nn)
 
 (* ---- bijectivity ---- *)
 
+let sw_decode_spec (nm nn g : pos) (bid : natlt (nm * nn))
+  : Lemma (let pg   = g * nn in
+           let gid  = bid / pg in
+           let rem  = bid - gid * pg in
+           let d    = nm - gid * g in
+           let rows = if d < g then d else g in
+           rows > 0 /\
+           gid * g < nm /\
+           gid * (g * nn) <= bid /\
+           gid * g + rem % rows < nm /\
+           rem / rows < nn /\
+           sw_row nm nn g bid == gid * g + rem % rows /\
+           sw_col nm nn g bid == rem / rows)
+  = let pg = g * nn in
+    let gid = bid / pg in
+    gid_g_lt nm nn g bid;
+    sw_rows_spec nm g gid;
+    let rows = sw_rows nm g gid in
+    (* [rem = bid - gid*pg = bid % pg] and, since [d >= 1], the caller's
+       [if d < g then d else g] coincides with [sw_rows]. *)
+    ML.euclidean_division_definition bid pg;
+    assert (bid - gid * pg == bid % pg);
+    assert (rows == (let d = nm - gid * g in if d < g then d else g));
+    ML.modulo_range_lemma (bid % pg) rows;
+    rem_lt_rows nm nn g bid;
+    div_lt_mul (bid % pg) rows nn
+
 let sw_inv_correct (nm nn g : pos) (bid : natlt (nm * nn))
   : Lemma (sw_inv nm nn g (sw_row nm nn g bid) (sw_col nm nn g bid) == bid)
   = let gg = g * nn in
