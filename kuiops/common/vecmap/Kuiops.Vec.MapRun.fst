@@ -82,7 +82,7 @@ fn vec_map_run_write
     let sv = tensor_read src (sr, (scc, ()));
     with so. assert obuf |-> so;
     A.op_Array_Assignment obuf ve (post_map sv) #so;
-    e := ve +^ 1sz;
+    e := !e +^ 1sz;
   };
   with so. assert obuf |-> so;
   assert pure (Seq.equal so

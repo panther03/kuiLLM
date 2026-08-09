@@ -729,9 +729,9 @@ fn drain_band
       mrow mcol warpRow warpCol bid wid acc idx lane eD0 eTarget vvg ();
     FStar.Math.Lemmas.add_div_mod_1 (SZ.v vvg) Kuiper.Barrier.Warp.warp_size;
     assert pure (SZ.v vvg < SZ.v vvg + Kuiper.Barrier.Warp.warp_size);
-    assert pure (SZ.v (vvg +^ Kuiper.warp_size)
+    assert pure (SZ.v (!vg +^ Kuiper.warp_size)
       == SZ.v vvg + Kuiper.Barrier.Warp.warp_size);
-    vg := vvg +^ Kuiper.warp_size;
+    vg := !vg +^ Kuiper.warp_size;
   };
 
   lane_fade_done eD0 eTarget (SZ.v lane) (SZ.v !vg);
@@ -769,8 +769,20 @@ fn store_band
 {
   let ld_sz : SZ.t = wn `SZ.add` chunk et_acc;
   assert pure (SZ.v ld_sz == lde et_acc wn);
+  (* Destructure [sh] concretely so the scratch band pointer is obtained by a
+     tuple projection of the shared-memory tuple; KaRaMeL only emits the
+     [(et * ) KPR_SHMEM_AT(..)] C++ cast on that path, not via the [sar_scratch]
+     accessor (which leaves a [void *] initialiser nvcc rejects). *)
+  let (sA0, (sA1, (sB0, (sB1, (sScratch, su))))) = sh;
+  assert rewrites_to sScratch (sar_scratch bm bn bk wm wn skew sh);
+  rewrite (scratch_tile_live bm bn bk wm wn skew
+             (sA0, (sA1, (sB0, (sB1, (sScratch, su))))) nthr tid)
+       as (scratch_tile_live bm bn bk wm wn skew sh nthr tid);
   with eIn. unfold scratch_tile_live bm bn bk wm wn skew sh nthr tid;
-  let band = scratch_tile bm bn bk wm wn skew sh (SZ.v wid_sz);
+  let band = array2_subtile
+    (T.from_array
+      (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc)) sScratch)
+    frag (SZ.v wn) (SZ.v wid_sz) 0;
   rewrite each scratch_tile bm bn bk wm wn skew sh (tid / SZ.v warp_size)
     as band;
 
@@ -806,7 +818,7 @@ fn store_band
     Pulse.Lib.Forall.elim_forall #_ vf;
     ambig_trade_elim ();
     ambig_trade_elim ();
-    j := jv +^ 1sz;
+    j := !j +^ 1sz;
   };
   rewrite each band
     as scratch_tile bm bn bk wm wn skew sh (tid / SZ.v warp_size);
@@ -889,24 +901,23 @@ fn epilogue
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#fAcc : perm)
   (#ems : erased (seq (value_for et_acc FragAcc frag frag frag)))
-  (bid : natlt (SZ.v nblk))
-  (tid : natlt (SZ.v nthr))
+  (bid : szlt (SZ.v nblk))
+  (tid : szlt (SZ.v nthr))
   (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
   ()
   preserves gpu
-  preserves thread_id nthr tid
+  preserves thread_id nthr (SZ.v tid)
   preserves array_fragment_pts_to accFrags #fAcc ems
-  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-  preserves scratch_tile_live bm bn bk wm wn skew sh nthr tid
+  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid)
+  preserves scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid)
   preserves pure (aligned 16 (T.core gD))
   preserves pure (aligned_strided_row_major (SZ.v (chunk et_d)) strD)
 {
   P.nthr_le_max_threads et_ab et_acc bm bn bk wm wn skew;
-  assert pure (SZ.fits tid);
-  let tid_sz : SZ.t = SZ.uint_to_t tid;
+  let tid_sz : SZ.t = tid;
   let wid_sz : SZ.t = tid_sz /^ Kuiper.warp_size;
   let lane_sz : SZ.t = tid_sz %^ Kuiper.warp_size;
-  let bid_sz : SZ.t = SZ.uint_to_t bid;
+  let bid_sz : SZ.t = bid;
 
   // ---- divisibility of the output stride: chunk et_d | 16 | wn | bn | n
   chunk_div16 et_d #_ #_;
@@ -949,10 +960,10 @@ fn epilogue
         invariant live i
         invariant
           gpu **
-          thread_id nthr tid **
+          thread_id nthr (SZ.v tid) **
           array_fragment_pts_to accFrags #fAcc ems **
-          output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
-          scratch_tile_live bm bn bk wm wn skew sh nthr tid **
+          output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid) **
+          scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid) **
           (exists* (bufv : seq et_d). obuf |-> bufv)
         invariant pure (aligned 16 (T.core gD) /\ SZ.v !i <= mfrag wm /\
                         aligned_strided_row_major (SZ.v (chunk et_d)) strD /\
@@ -963,38 +974,47 @@ fn epilogue
     
         // barrier 1: __syncwarp before overwriting the shared band
         warp_barrier_wait () warp_emp_pred warp_emp_pred warp_emp_proof
-          #(SZ.v nthr) #tid;
+          #(SZ.v nthr) #(SZ.v tid);
     
         // store all nfrag accumulator fragments of band [iv] into the band
-        store_band bm bn bk wm wn skew nthr sh accFrags tid wid_sz iv ();
+        store_band bm bn bk wm wn skew nthr sh accFrags (SZ.v tid) wid_sz iv ();
     
         // barrier 2: __syncwarp before reading the band back
         warp_barrier_wait () warp_emp_pred warp_emp_pred warp_emp_proof
-          #(SZ.v nthr) #tid;
+          #(SZ.v nthr) #(SZ.v tid);
     
         // extract this band's [live_lane_cells] instance (mi = iv, nj = 0)
-        unfold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
+        unfold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid);
         Kuiper.ForEvery.forevery_extract_2
           #(natlt (mfrag wm)) #(natlt 1)
           (SZ.v iv <: natlt (mfrag wm)) (0 <: natlt 1)
           (fun (mi : natlt (mfrag wm)) (nj : natlt 1) ->
             live_lane_cells
               (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
-                bid (tid / Kuiper.Barrier.Warp.warp_size) mi nj)
-              (tid % Kuiper.Barrier.Warp.warp_size));
+                (SZ.v bid) (SZ.v tid / Kuiper.Barrier.Warp.warp_size) mi nj)
+              (SZ.v tid % Kuiper.Barrier.Warp.warp_size));
     
-        // expose the shared band as an array2 [acc]
-        with eAcc0. unfold scratch_tile_live bm bn bk wm wn skew sh nthr tid;
-        let band = scratch_tile bm bn bk wm wn skew sh (SZ.v wid_sz);
-        rewrite each scratch_tile bm bn bk wm wn skew sh (tid / SZ.v warp_size)
+        // expose the shared band as an array2 [acc]; destructure [sh] concretely
+        // so the band pointer is a tuple projection (emits the C++ cast).
+        let (sA0, (sA1, (sB0, (sB1, (sScratch, su))))) = sh;
+        assert rewrites_to sScratch (sar_scratch bm bn bk wm wn skew sh);
+        rewrite (scratch_tile_live bm bn bk wm wn skew
+                   (sA0, (sA1, (sB0, (sB1, (sScratch, su))))) nthr (SZ.v tid))
+             as (scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid));
+        with eAcc0. unfold scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid);
+        let band = array2_subtile
+          (T.from_array
+            (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc)) sScratch)
+          frag (SZ.v wn) (SZ.v wid_sz) 0;
+        rewrite each scratch_tile bm bn bk wm wn skew sh (SZ.v tid / SZ.v warp_size)
           as band;
 
         assert pure (SZ.sizet_to_nat frag_sz == frag);
         assert pure (SZ.sizet_to_nat mfrag_wm_sz == mfrag wm);
         assert pure (SZ.sizet_to_nat 1sz == 1);
-        assert pure (SZ.v bid_sz == bid);
-        assert pure (SZ.v wid_sz == tid / Kuiper.Barrier.Warp.warp_size);
-        assert pure (SZ.v lane_sz == tid % Kuiper.Barrier.Warp.warp_size);
+        assert pure (SZ.v bid_sz == SZ.v bid);
+        assert pure (SZ.v wid_sz == SZ.v tid / Kuiper.Barrier.Warp.warp_size);
+        assert pure (SZ.v lane_sz == SZ.v tid % Kuiper.Barrier.Warp.warp_size);
         assert pure (SZ.v 1sz == 1);
         div_rem_one (SZ.v iv);
         assert pure (SZ.v iv / SZ.v 1sz == SZ.v iv);
@@ -1008,8 +1028,8 @@ fn epilogue
         rewrite
           live_lane_cells
             (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
-              bid (tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
-            (tid % Kuiper.Barrier.Warp.warp_size)
+              (SZ.v bid) (SZ.v tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
+            (SZ.v tid % Kuiper.Barrier.Warp.warp_size)
         as
           live_lane_cells
             (output_fragment' gD bm bn frag_sz wn mfrag_wm_sz 1sz
@@ -1107,19 +1127,19 @@ fn epilogue
         as
           live_lane_cells
             (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
-              bid (tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
-            (tid % Kuiper.Barrier.Warp.warp_size);
+              (SZ.v bid) (SZ.v tid / Kuiper.Barrier.Warp.warp_size) (SZ.v iv) 0)
+            (SZ.v tid % Kuiper.Barrier.Warp.warp_size);
     
         // re-fold the shared band
         rewrite each band
-          as scratch_tile bm bn bk wm wn skew sh (tid / SZ.v warp_size);
-        fold scratch_tile_live bm bn bk wm wn skew sh nthr tid;
+          as scratch_tile bm bn bk wm wn skew sh (SZ.v tid / SZ.v warp_size);
+        fold scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid);
     
         // re-insert this band's cells into the [forall+], re-fold output_lane_live
         Pulse.Lib.Trade.elim_trade _ _;
-        fold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid;
+        fold output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid);
     
-        i := iv +^ 1sz;
+        i := !i +^ 1sz;
       }
   };
 }

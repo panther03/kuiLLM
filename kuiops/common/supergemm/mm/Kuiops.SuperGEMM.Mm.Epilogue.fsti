@@ -77,14 +77,14 @@ fn epilogue
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#fAcc : perm)
   (#ems : erased (seq (value_for et_acc FragAcc frag frag frag)))
-  (bid : natlt (SZ.v nblk))
-  (tid : natlt (SZ.v nthr))
+  (bid : szlt (SZ.v nblk))
+  (tid : szlt (SZ.v nthr))
   (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
   ()
   preserves gpu
-  preserves thread_id nthr tid
+  preserves thread_id nthr (SZ.v tid)
   preserves array_fragment_pts_to accFrags #fAcc ems
-  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-  preserves scratch_tile_live bm bn bk wm wn skew sh nthr tid
+  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid)
+  preserves scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid)
   preserves pure (aligned 16 (T.core gD))
   preserves pure (aligned_strided_row_major (SZ.v (chunk et_d)) strD)
