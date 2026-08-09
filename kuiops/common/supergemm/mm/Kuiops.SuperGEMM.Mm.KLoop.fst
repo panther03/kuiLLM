@@ -1362,21 +1362,23 @@ fn kloop
   while (!idx <^ num_k_tiles)
     invariant
       exists* (vkt : SZ.t { SZ.v vkt <= SZ.v k / SZ.v bk }).
-        (idx |-> vkt) **
         gpu ** thread_id (SZ.v nthr) (SZ.v tid) **
         B.barrier_tok
           (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)) **
         B.barrier_state (SZ.v vkt) **
         live aFrags ** live bFrags ** live accFrags **
         kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
-          (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt)
+          (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt) **
+        (idx |-> vkt)
     decreases (SZ.v num_k_tiles - SZ.v !idx)
   {
     with vkt. _;
     let kti = !idx;
     let par = Kuiper.SizeT.sizet_and kti 1sz;
     Kuiper.SizeT.sizet_and_div_pow2 kti 2sz 1;
-    let kt1 = kti +^ 1sz;
+    assert pure (SZ.v num_k_tiles == SZ.v k / SZ.v bk);
+    assert pure (SZ.v kti < SZ.v k / SZ.v bk);
+    let kt1 : (x:SZ.t{SZ.v x <= SZ.v k / SZ.v bk}) = kti +^ 1sz;
 
     (* CONCRETE buffer value-selects: extract to CUDA ternaries. *)
     let srcA = if (par = 0sz) { sarA0 } else { sarA1 };
@@ -1486,7 +1488,7 @@ fn kloop
       (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
         (SZ.v block_row) (SZ.v block_col) () (SZ.v kt1));
     rewrite (B.barrier_state (SZ.v vkt + 1)) as (B.barrier_state (SZ.v kt1));
-    idx := kt1;
+    idx := !idx +^ 1sz;
   };
 
   (* ---- loop exit: [vkt == ktiles], so [kcarry] is its "done" branch ---- *)
