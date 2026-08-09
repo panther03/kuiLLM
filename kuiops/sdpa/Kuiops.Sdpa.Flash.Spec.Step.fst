@@ -293,6 +293,20 @@ let ml_step_tile
     with introduce _ ==> _
     with _. masked_score_approx emask has_mask row_active causal bi qh qpos
               k0 cbound scale eQ eKg rQ rK rbias rscale i u;
+    introduce forall (u : natlt 16). not_nan (acc1 es' u)
+    with (if SF.key_ok row_active causal sk cbound (k0 + u)
+          then () else SB.ninf_not_nan #et_acc ());
+    SB.corr_weight_step es' vm m' cw';
+    assert (SO.disjoint p t);
+    assert (forall (j : natlt sk). SO.por p t j == (p j || t j));
+    assert (forall (j : natlt sk). t j ==> (k0 <= j /\ j < k0 + 16));
+    assert (forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u));
+    assert (forall (u : natlt 16). k0 + u >= sk ==> ~(q u));
+    assert (forall (u : natlt 16). q u ==> (k0 + u < sk /\ xt u == x (k0 + u)));
+    assert (forall (u : natlt 16). ~(q u) ==> acc1 es' u == neg infinity);
+    assert (forall (u : natlt 16). q u ==>
+              (Finite? (kind (acc1 es' u)) /\ acc1 es' u %~ xt u));
+    assert (not_nan vm);
     SB.ml_step x p t (SO.por p t) q xt k0 es' vm vl m' l' cw'
 
 #pop-options
@@ -692,7 +706,7 @@ let step_ml
   = let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
                 k0 cbound scale (tile_score_row #et_ab #et_acc eQ eKg k0 i) in
     let m' = fmax vm (SF.row_max es' 16) in
-    (m', (vl `mul` fexp (vm `sub` m')) `add` SF.row_sum es' m' 16)
+    (m', (vl `mul` SF.corr_weight vm m') `add` SF.row_sum es' m' 16)
 
 (* The registers after the warp's first [t] tiles: it owns tile [w], then
    every [nw]-th one after it. *)
@@ -770,7 +784,7 @@ let softmax_upd_det
         (let ts = SF.tile_scores emask has_mask row_active causal bi qh qpos
                     k0 cbound scale es in
          m' == fmax vm (SF.row_max ts bn) /\
-         l' == (vl `mul` fexp (vm `sub` m')) `add` SF.row_sum ts m' bn))
+         l' == (vl `mul` SF.corr_weight vm m') `add` SF.row_sum ts m' bn))
   = FStar.Classical.forall_intro
       (FStar.Classical.move_requires
          (SF.scores_post_det #et_acc #et_ab #_f #_r #_s #_rb #_c1
@@ -1297,16 +1311,15 @@ let cw_at
   (cbound : nat) (scale : et_acc)
   (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
   (nw w t : nat) : GTot et_acc
-  = fexp (fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
-                 eQ eKg i nw w t)
-          `sub`
-          fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
-                 eQ eKg i nw w (t + 1)))
+  = SF.corr_weight
+      (fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w t))
+      (fst (run_ml emask has_mask row_active causal bi qh qpos cbound scale
+              eQ eKg i nw w (t + 1)))
 
-(* Every correction weight of the first [t] steps is finite.  Like [all_finite]
-   this is an overflow hypothesis and is not derivable from the [floating]
-   laws; the kernel exports it (see the [kind cw' == Finite] conjunct of
-   [Kuiops.Sdpa.Flash.KfSub.sdpa_flash_softmax_upd]'s postcondition). *)
+(* Every correction weight is finite: the kernel clamps it
+   (flash_attn_fa1.cu l.173), so this holds by construction.  Consumed by
+   [Spec.Bridge.step_fresh] for [mul_zero]'s [Finite?] side condition. *)
 let cw_upto
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
@@ -1327,6 +1340,23 @@ let cw_upto
       Finite? (kind (cw_at #et_ab #et_acc #_f #_r #_s #_rb #_c1
                        #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
                        bi qh qpos cbound scale eQ eKg i nw w u))
+
+let cw_upto_holds
+  (#et_ab #et_acc : Type0)
+  {| _f : floating et_acc |} {| _r : real_like et_acc |}
+  {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
+  {| _c1 : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#sq16 : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (nw w t : nat)
+  : Lemma (cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1
+             #b #hq #sq #sk #d #sq16 emask has_mask row_active causal
+             bi qh qpos cbound scale eQ eKg i nw w t)
+  = ()
 
 #push-options "--fuel 1 --ifuel 2"
 
@@ -1355,8 +1385,8 @@ let softmax_upd_canon
            k0 cbound scale es vm vl es'
            (mk1 (fun j -> FC.fcast (SF.sel_prob (acc1 es' j) m')))
            m'
-           ((vl `mul` fexp (vm `sub` m')) `add` SF.row_sum es' m' bn)
-           (fexp (vm `sub` m'))))
+           ((vl `mul` SF.corr_weight vm m') `add` SF.row_sum es' m' bn)
+           (SF.corr_weight vm m')))
   = ()
 
 let run_ml_zero
@@ -1466,7 +1496,7 @@ let rec run_ml_state
     let es' = SF.tile_scores emask has_mask row_active causal bi qh qpos
                 (vjt * 16) cbound scale es in
     let m' = fmax vm (SF.row_max es' 16) in
-    let cw' = fexp (vm `sub` m') in
+    let cw' = SF.corr_weight vm m' in
     let l' = (vl `mul` cw') `add` SF.row_sum es' m' 16 in
     let ep' : chest1 et_ab 16 =
       mk1 (fun j -> FC.fcast (SF.sel_prob (acc1 es' j) m')) in
@@ -2106,6 +2136,20 @@ let mlo_step_tile
     with introduce _ ==> _
     with _. pv_cell_ok emask has_mask row_active causal bi qh qpos k0 cbound
               scale eQ eKg eVg rQ rK rV rbias rscale i p eP m' mr' c;
+    introduce forall (u : natlt 16). not_nan (acc1 es' u)
+    with (if SF.key_ok row_active causal sk cbound (k0 + u)
+          then () else SB.ninf_not_nan #et_acc ());
+    SB.corr_weight_step es' vm m' cw';
+    assert (SO.disjoint p t);
+    assert (forall (j : natlt sk). SO.por p t j == (p j || t j));
+    assert (forall (j : natlt sk). t j ==> (k0 <= j /\ j < k0 + 16));
+    assert (forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u));
+    assert (forall (u : natlt 16). k0 + u >= sk ==> ~(q u));
+    assert (forall (u : natlt 16). q u ==> (k0 + u < sk /\ xt u == x (k0 + u)));
+    assert (forall (u : natlt 16). ~(q u) ==> acc1 es' u == neg infinity);
+    assert (forall (u : natlt 16). q u ==>
+              (Finite? (kind (acc1 es' u)) /\ acc1 es' u %~ xt u));
+    assert (not_nan vm);
     SB.mlo_step x y p t (SO.por p t) q xt k0 es' vm vl m' l' cw' vo pv o'
 
 #pop-options
@@ -2324,9 +2368,9 @@ let cw_vec_acc
   (eS : chest2 et_acc 16 16) (evm : chest1 et_acc 16) (i : natlt 16)
   : Lemma (acc1 (SF.cw_vec emask has_mask row_active causal bi qh qpos k0
                    cbound scale eS evm) i
-           == fexp (acc1 evm i `sub`
-                    acc1 (SF.m_vec emask has_mask row_active causal bi qh qpos
-                            k0 cbound scale eS evm) i))
+           == SF.corr_weight (acc1 evm i)
+                (acc1 (SF.m_vec emask has_mask row_active causal bi qh qpos
+                         k0 cbound scale eS evm) i))
   = ()
 
 #pop-options

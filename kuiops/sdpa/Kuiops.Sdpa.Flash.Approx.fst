@@ -1,11 +1,8 @@
-module Kuiops.Sdpa.Flash.Spec.Top
+module Kuiops.Sdpa.Flash.Approx
 
-(* The top of the functional-correctness tower: the chest the kernel leaves in
-   the output tensor approximates [Kuiops.Sdpa.Flash.Spec.sdpa_flash_real].
-
-   The overflow side conditions the float computation cannot itself rule out
-   are collected in [flash_no_overflow] and carried as a hypothesis, in the
-   same spirit as [Kuiops.Sdpa.Flash.Spec.Step.all_finite]. *)
+(* The top of the functional-correctness tower: under
+   [Kuiops.Sdpa.Flash.Spec.sdpa_flash_finite], the chest the kernel leaves in
+   the output tensor approximates [Kuiops.Sdpa.Flash.Spec.sdpa_flash_real]. *)
 
 open Kuiper
 open Kuiper.Common
@@ -23,6 +20,7 @@ module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SS = Kuiops.Sdpa.Flash.Spec.Step
 module SV = Kuiops.Sdpa.Flash.Vals
+module SD = Kuiops.Sdpa.Flash.Denom
 module FSpec = Kuiops.Sdpa.Flash.Spec
 module FSp = Kuiops.Sdpa.Flash.Split
 
@@ -32,12 +30,12 @@ module FSp = Kuiops.Sdpa.Flash.Split
 
 (* The kernel narrows K and V by slicing the batch axis and then the head
    axis; the spec slices the head axis first.  Both land on the same page. *)
-let page_kv
+unfold let page_kv
   (#et : Type0) (#b #hkv #sk #d : nat)
   (eK : chest (b @| hkv @| sk @| d @| INil) et)
   (bi : natlt b) (kvh : natlt hkv)
   : chest2 et sk d
-  = chest_slice 0 kvh (chest_slice 0 bi eK)
+  = FSpec.page_kv eK bi kvh
 
 let page_kv_real
   (#et : Type0) {| scalar et |} {| real_like et |}
@@ -127,11 +125,10 @@ let eO_at_cell
 (* The overflow side conditions, per output row.                       *)
 (* ------------------------------------------------------------------ *)
 
-(* What the float computation of one query row must avoid for the kernel to
-   track the real spec: every admitted score and every online-softmax
-   correction weight stays finite, and the block-wide denominator the epilogue
-   divides by is strictly positive.  Compare
-   [Kuiops.Sdpa.Flash.Spec.Step.all_finite]. *)
+(* [Spec.sdpa_flash_finite] specialised to one query row: every score the
+   lane computes for a key it attends to is finite.  Everything else the
+   float level needs -- finiteness of the correction weights and positivity
+   of the epilogue denominator -- follows from this ([Flash.Denom]). *)
 let row_no_overflow
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
@@ -150,19 +147,12 @@ let row_no_overflow
     let sqv : pos = SZ.v sq in
     let skv : pos = SZ.v sk in
     let rowsv : pos = SZ.v rows in
-    let nwv : pos = SZ.v nw in
     let qh = SF.lane_qh hqv sqv kvh group rowsv r0 i in
     let qpos = SF.lane_qpos sqv rowsv r0 i in
     let cbound = SF.lane_cbound sqv skv rowsv r0 i in
     let eQt = SF.q_tile 16 rowsv group eQ bi kvh r0 in
-    let nkt = SF.key_tiles 16 16 sqv skv rowsv r0 causal in
     SS.all_finite emask has_mask true causal bi qh qpos cbound scale
-      eQt eKg i /\
-    (forall (w : natlt nwv).
-       SS.cw_upto emask has_mask true causal bi qh qpos cbound scale
-         eQt eKg i nwv w (SF.warp_iters nwv nkt w)) /\
-    acc1 (SV.flash_egl_at nw d b hq sq rows sk eQ eKg emask has_mask causal
-            scale bi kvh group r0) i `gt` zero
+      eQt eKg i
 
 #push-options "--z3rlimit 40 --fuel 1 --ifuel 2 --split_queries always"
 
@@ -251,6 +241,19 @@ let out_vfun_cell
       causal scale bi kvh g r0 i;
     assert (SF.lane_params_ok hqv sqv skv kvh g rowsv r0 i true qh qpos cbound);
     assert (SF.key_ok true causal skv cbound 0);
+    introduce forall (w : natlt nwv).
+      SS.cw_upto #et_ab #et_acc #_f #_r #_s #_rb #_c1
+        #(SZ.v b) #hqv #sqv #skv #dv #()
+        emask has_mask true causal bi qh qpos cbound scale
+        (SF.q_tile 16 rowsv g eQ bi kvh r0) eKg i nwv w
+        (SF.warp_iters nwv nkt w)
+    with SS.cw_upto_holds #et_ab #et_acc #_f #_r #_s #_rb #_c1
+           #(SZ.v b) #hqv #sqv #skv #dv #()
+           emask has_mask true causal bi qh qpos cbound scale
+           (SF.q_tile 16 rowsv g eQ bi kvh r0) eKg i nwv w
+           (SF.warp_iters nwv nkt w);
+    SD.flash_denom_pos nw d b hq sq rows sk #() eQ eKg emask has_mask causal
+      scale bi kvh g r0 i;
     SS.page_out_cell #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
       #(SZ.v b) #hqv #sqv #skv #dv #()
       eQ emask has_mask causal bi qh qpos kvh g r0 cbound rowsv scale
@@ -264,8 +267,11 @@ let out_vfun_cell
 (* Chest-level assembly.                                               *)
 (* ------------------------------------------------------------------ *)
 
-(* [row_no_overflow] for every row of every block the kernel launches. *)
-let flash_no_overflow
+#push-options "--z3rlimit 30 --fuel 1 --ifuel 2"
+
+(* The input-level precondition gives [row_no_overflow] for every row of
+   every block the kernel launches. *)
+let pre_row
   (#et_ab #et_acc : Type0)
   {| _f : floating et_acc |} {| _r : real_like et_acc |}
   {| _s : scalar et_ab |} {| _rb : real_like et_ab |}
@@ -279,11 +285,48 @@ let flash_no_overflow
   (eK : chest (SZ.v b @| SZ.v hkv @| SZ.v sk @| SZ.v d @| INil) et_ab)
   (emask : chest (SZ.v b @| SZ.v hq @| SZ.v sq @| SZ.v sk @| INil) et_ab)
   (has_mask causal : bool) (scale : et_acc)
-  : prop
-  = forall (bi : natlt (SZ.v b)) (kvh : natlt (SZ.v hkv))
-      (r : natlt (SZ.v rows)).
-      row_no_overflow nw d b hq sq rows sk #() eQ (page_kv eK bi kvh) emask
-        has_mask causal scale bi kvh (SZ.v group) (r / 16 * 16) (r % 16)
+  (bi : natlt (SZ.v b)) (kvh : natlt (SZ.v hkv)) (r : natlt (SZ.v rows))
+  : Lemma
+      (requires
+        FSpec.sdpa_flash_finite #et_ab #et_acc (SZ.v group) #(SZ.v sq)
+          #(SZ.v sk) #(SZ.v d) #() (SZ.v rows) eQ eK emask has_mask causal
+          scale)
+      (ensures
+        row_no_overflow nw d b hq sq rows sk #() eQ (page_kv eK bi kvh) emask
+          has_mask causal scale bi kvh (SZ.v group) (r / 16 * 16) (r % 16))
+  = let hqv : pos = SZ.v hq in
+    let sqv : pos = SZ.v sq in
+    let skv : pos = SZ.v sk in
+    let rowsv : pos = SZ.v rows in
+    let dv : pos = SZ.v d in
+    let g : pos = SZ.v group in
+    let r0 : nat = r / 16 * 16 in
+    let i : natlt 16 = r % 16 in
+    FStar.Math.Lemmas.euclidean_division_definition r 16;
+    assert (SF.lane_rr rowsv r0 i == r);
+    let qh = SF.lane_qh hqv sqv kvh g rowsv r0 i in
+    let qpos = SF.lane_qpos sqv rowsv r0 i in
+    let cbound = SF.lane_cbound sqv skv rowsv r0 i in
+    let eQt = SF.q_tile 16 rowsv g eQ bi kvh r0 in
+    let eKg = page_kv eK bi kvh in
+    assert (qh == FSpec.query_head #hqv #(SZ.v hkv) #sqv g rowsv kvh r);
+    assert (qpos == r % sqv /\ cbound == qpos + (skv - sqv));
+    introduce forall (k0 : nat) (t : natlt 16).
+      k0 <= skv /\ SF.key_ok true causal skv cbound (k0 + t) ==>
+      Finite? (kind (acc1 (SF.tile_scores #et_acc #et_ab #_f #_r #_s #_rb #_c1
+                             emask has_mask true causal bi qh qpos k0 cbound
+                             scale (SS.tile_score_row #et_ab #et_acc #_s #_
+                                      #skv #dv #() eQt eKg k0 i)) t))
+    with introduce _ ==> _
+    with _. assert (acc1 (SF.tile_scores #et_acc #et_ab #_f #_r #_s #_rb #_c1
+                            emask has_mask true causal bi qh qpos k0 cbound
+                            scale (SS.tile_score_row #et_ab #et_acc #_s #_
+                                     #skv #dv #() eQt eKg k0 i)) t
+                    == FSpec.flash_score #et_ab #et_acc #_f #_r #_s #_rb #_c1
+                         #(SZ.v b) #hqv #sqv #skv #dv #() emask has_mask bi
+                         qh qpos scale eQt eKg i k0 t)
+
+#pop-options
 
 #push-options "--z3rlimit 60 --fuel 1 --ifuel 1 --split_queries always"
 
@@ -307,8 +350,9 @@ let out_idx_cell
   (qpos : natlt (SZ.v sq)) (dd : natlt (SZ.v d))
   : Lemma
       (requires
-        flash_no_overflow nw d b hq hkv group sq rows sk #() eQ eK emask
-          has_mask causal scale)
+        FSpec.sdpa_flash_finite #et_ab #et_acc (SZ.v group) #(SZ.v sq)
+          #(SZ.v sk) #(SZ.v d) #() (SZ.v rows) eQ eK emask has_mask causal
+          scale)
       (ensures
         acc (FSp.flash_out_chest b hq hkv group sq rows d
                (flash_out_vfun #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2
@@ -348,6 +392,9 @@ let out_idx_cell
     assert (out_qh hqv sqv y._2 g y._3 == qh);
     assert (out_qpos sqv y._3 == qpos);
     assert (FSpec.kv_head #hkvv g qh == y._2);
+    pre_row #et_ab #et_acc #_f #_r #_s #_rb #_c1
+      nw d b hq hkv group sq rows sk #() eQ eK emask
+      has_mask causal scale bi y._2 y._3;
     out_vfun_cell #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
       nw d b hq hkv group sq rows sk #() eQ eK eV emask
       has_mask causal scale bi y._2 y._3 dd
@@ -375,8 +422,9 @@ let flash_out_approx
   (has_mask causal : bool) (scale : et_acc)
   : Lemma
       (requires
-        flash_no_overflow nw d b hq hkv group sq rows sk #() eQ eK emask
-          has_mask causal scale)
+        FSpec.sdpa_flash_finite #et_ab #et_acc (SZ.v group) #(SZ.v sq)
+          #(SZ.v sk) #(SZ.v d) #() (SZ.v rows) eQ eK emask has_mask causal
+          scale)
       (ensures
         FSp.flash_out_chest b hq hkv group sq rows d
           (flash_out_vfun #et_ab #et_acc #_f #_r #_s #_rb #_c1 #_c2

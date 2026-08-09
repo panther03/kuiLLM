@@ -32,7 +32,7 @@ module FC = Kuiper.Float.Casts
 module FD = Kuiops.Sdpa.Flash.KernelDesc
 module FSp = Kuiops.Sdpa.Flash.Split
 module FSpec = Kuiops.Sdpa.Flash.Spec
-module FTop = Kuiops.Sdpa.Flash.Spec.Top
+module FApprox = Kuiops.Sdpa.Flash.Approx
 module FB = Kuiops.Sdpa.Flash.Barrier
 module Trade = Pulse.Lib.Trade
 
@@ -270,7 +270,7 @@ fn sdpa_flash_async
       (gV |-> Frac fV eV) **
       (gmask |-> Frac fmask emask) **
       live gout) **
-    pure (FTop.flash_no_overflow nw d b hq hkv group sq rows sk
+    pure (FSpec.sdpa_flash_finite (SZ.v group) (SZ.v rows)
             eQ eK emask has_mask causal scale)
   ensures
     pledge0 (epoch_done s e)
@@ -288,7 +288,7 @@ fn sdpa_flash_async
                (to_real_chest eQ) (to_real_chest eK) (to_real_chest eV)
                (to_real_chest emask) (to_real scale) causal has_mask)
 {
-  FTop.flash_out_approx nw d b hq hkv group sq rows sk
+  FApprox.flash_out_approx nw d b hq hkv group sq rows sk
     eQ eK eV emask has_mask causal scale;
   launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
