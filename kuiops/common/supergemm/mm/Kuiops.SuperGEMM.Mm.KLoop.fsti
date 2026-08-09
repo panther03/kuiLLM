@@ -23,8 +23,15 @@ open Kuiper.TensorCore
 open Pulse.Lib.Array { length }
 
 open Kuiper.TensorRO { vtlayout_of_tlayout }
+open Kuiper.Tensor.Tiling
+open Kuiper.Chest
+open Kuiper.EMatrix
+open Kuiper.Spec.GEMM { matmul, matplus }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiops.SuperGEMM.Mm.Params { frag, ldt }
-open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_live, pipe_q, pipe_contract }
+open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_live, pipe_q, pipe_contract,
+                                    pipe_contract_c }
+open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_row_step, g_a_iters, g_t_row, g_t_col }
 
 module SZ = Kuiper.SizeT
@@ -48,7 +55,8 @@ val acc_len_alloc (wm wn : szp)
 inline_for_extraction noextract
 fn subproducts
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
+     real_like et_ab, real_like et_acc |}
   (bm bn bk wm wn : szp)
   (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn /\ frag /?+ SZ.v bk /\
                 SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
@@ -64,6 +72,9 @@ fn subproducts
   (gB : array2 et_ab lB)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))
+  (rA : chest2 real (SZ.v bm) (SZ.v bk) { eA %~ rA })
+  (rB : chest2 real (SZ.v bk) (SZ.v bn) { eB %~ rB })
+  (rAcc : chest2 real (SZ.v wm) (SZ.v wn))
   (#fA #fB : perm)
   (warp_m : szlt (SZ.v bm / SZ.v wm))
   (warp_n : szlt (SZ.v bn / SZ.v wn))
@@ -74,13 +85,21 @@ fn subproducts
   (#_ : squash (valid_frag_et_dims et_ab FragB frag frag frag))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc frag frag frag))
   (#_ : squash (valid_frag_et_comb et_ab et_acc))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves
     gpu **
     gA |-> Frac fA eA **
     gB |-> Frac fB eB
   preserves
-    live aFrags ** live bFrags ** live accFrags
+    live aFrags ** live bFrags
+  requires
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags rAcc
+  ensures
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (rAcc `matplus`
+        (matmul (ematrix_subtile rA (SZ.v wm) (SZ.v bk) (SZ.v warp_m) 0)
+                (ematrix_subtile rB (SZ.v bk) (SZ.v wn) 0 (SZ.v warp_n))))
 
 (* [kloop] is the software-pipelined main loop for one thread block: it stages
    k-tile 0 into buffer 0, then for each k-tile [kt] waits on the prior
@@ -112,6 +131,7 @@ fn kloop
   (#et_ab #et_acc : Type0)
   {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
   {| _sac : scalar et_acc |} {| _vac : has_vec_cpy et_acc |}
+  {| _rab : real_like et_ab |} {| _rac : real_like et_acc |}
   (#m #n #k : szp)
   (bm bn bk wm wn skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| _clA : T.ctlayout lA |}
@@ -133,6 +153,10 @@ fn kloop
   (block_col : szlt (SZ.v n / SZ.v bn))
   (warp_m : szlt (SZ.v bm / SZ.v wm))
   (warp_n : szlt (SZ.v bn / SZ.v wn))
+  (rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
+  (rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
+  (grow : erased nat { reveal grow < SZ.v m / SZ.v wm })
+  (gcol : erased nat { reveal gcol < SZ.v n / SZ.v wn })
   (a_t_row a_t_col a_row_step a_iters : SZ.t)
   (b_t_row b_t_col b_row_step b_iters : SZ.t)
   (sq_c : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
@@ -165,13 +189,22 @@ fn kloop
      valid_frag_et_comb et_ab et_acc /\
      SZ.fits (SZ.v wm / frag * (SZ.v wn / frag)) /\
      length accFrags == acc_len wm wn))
+  (sq_bc : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                   SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (sq_gc : squash (
+     reveal grow == SZ.v block_row * (SZ.v bm / SZ.v wm) + SZ.v warp_m /\
+     reveal gcol == SZ.v block_col * (SZ.v bn / SZ.v wn) + SZ.v warp_n))
+  (sq_pc : squash (SZ.v k > 0 /\ frag /?+ SZ.v wm /\ frag /?+ SZ.v wn /\
+                   SZ.v wm /?+ SZ.v m /\ SZ.v wn /?+ SZ.v n))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves gpu
   preserves thread_id (SZ.v nthr) (SZ.v tid)
-  preserves live accFrags
   preserves B.barrier_tok
-    (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk))
+    (pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+       sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc)
   requires
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags (const _ 0.0R) **
     (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     B.barrier_state 0 **
     pipe_live (skewed_view bm bk skew sarA0) (SZ.v nthr) (SZ.v tid) **
@@ -179,6 +212,8 @@ fn kloop
     pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid)
   ensures
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (warp_matmul rA rB (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)) **
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)

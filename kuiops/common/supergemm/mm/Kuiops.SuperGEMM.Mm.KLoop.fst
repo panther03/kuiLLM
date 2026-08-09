@@ -12,7 +12,13 @@ open Kuiper.Tensor.Layout
 open Kuiper.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiper.TensorCore
-open Kuiper.Chest { chest_map }
+open Kuiper.Chest { chest_map, equal, chest2, acc2, const }
+open Kuiper.EMatrix { mtranspose }
+open Kuiper.EMatrix.Tiling { update_tile_self }
+open Kuiper.Spec.GEMM { matmul, matplus, __gmatmul_single, __gmatmul_single_lemma,
+                        gmatmul_single, matmul_tiles_lemma }
+open Kuiops.SuperGEMM.Mm.Spec { warp_matmul, mtranspose_subtile }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Pulse.Lib.Array { length }
 open Pulse.Lib.Array.PtsTo { op_Array_Access }
 open Pulse.Lib.Trade
@@ -21,7 +27,11 @@ open Pulse.Lib.Pledge
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params { frag, frag_sz, ldt }
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_live, pipe_sharing, pipe_p, pipe_q,
-                                    pipe_contract }
+                                    pipe_contract,
+                                    pipe_live_c, pipe_sharing_c, pipe_p_c, pipe_q_c,
+                                    pipe_contract_c, pipe_p_to_q_transform_c, pipe_q_c_forget,
+                                    unfold_pipe_q_c_even, unfold_pipe_q_c_odd,
+                                    fold_pipe_p_c_even, fold_pipe_p_c_odd }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, srm_l2_skewed_row_major,
                                     c_l2_skewed_row_major, lemma_aligned_srm_l2_skewed_row_major }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_row_step, g_a_iters, g_t_row, g_t_col, stage_tiles }
@@ -65,10 +75,268 @@ let a_tile_bound (bm wm : pos) (warp_m i : nat)
   FStar.Math.Lemmas.multiple_division_lemma (q1 * q2) frag;
   ()
 
+(* ----------------------------------------------------------------------------
+   Functional (real-approximation) layer for one warp's k-tile of fragment
+   math.  Mirrors Kuiper.Kernel.GEMM.TensorCore2D.To.Fragments, specialized to
+   the constant 16x16x16 fragment dims and to B's FragLCM tag (B consumed
+   transposed for free by the tensor core).  Everything here is ghost/spec;
+   the executable structure of [sp_load_a]/[sp_load_b]/[sp_mma] is unchanged.
+   ---------------------------------------------------------------------------- *)
+
+(* [frag] divides [w] -> the fragment count times [frag] recovers [w]. *)
+let frag_div_mul (w : pos)
+  : Lemma (requires frag /?+ w)
+          (ensures (w / frag) * frag == w /\ frag * (w / frag) == w)
+= D.lemma_nat_divides_pos_divides frag w;
+  let g = D.get_factor frag w in
+  FStar.Math.Lemmas.multiple_division_lemma g frag
+
+(* Applying a pointwise-identity elementwise map to a chest is the identity. *)
+let chest2_map_id (#et:Type) (#rows #cols : nat)
+  (f : et -> et)
+  (m0 : chest2 et rows cols)
+  : Lemma (requires forall (x:et). f x == x)
+          (ensures chest_map f m0 == m0)
+= assert (equal (chest_map f m0) m0)
+
+(* Elementwise elimination of a chest approximation at a single index. *)
+let elim_approx (#et:Type0) {| scalar et, real_like et |} (#rows #cols:nat)
+  (m1 : chest2 et rows cols) (m2 : chest2 real rows cols)
+  (i:natlt rows) (j:natlt cols)
+  : Lemma (requires m1 %~ m2) (ensures acc2 m1 i j %~ acc2 m2 i j)
+= ()
+
+(* The [i]-th 16x16 A row-fragment loaded from the global tile approximates the
+   [i]-th sub-fragment of the per-warp A tile of [rA]. *)
+let sp_a_tile_approx
+  (#et:Type0) {| scalar et, real_like et |}
+  (bm bk wm : pos)
+  (eA : chest2 et bm bk) (rA : chest2 real bm bk)
+  (warp_m ks i : nat)
+  (_ : squash (frag /?+ wm /\ frag /?+ bk /\ frag /?+ bm /\ wm /?+ bm /\
+               warp_m < bm/wm /\ ks < bk/frag /\ i < wm/frag /\ eA %~ rA))
+  : Lemma (ensures
+      ematrix_subtile eA frag frag (warp_m*(wm/frag)+i) ks
+        %~ ematrix_subtile (ematrix_subtile rA wm frag warp_m ks) frag frag i 0)
+= frag_div_mul wm; frag_div_mul bm; frag_div_mul bk;
+  D.lemma_nat_divides_pos_divides frag wm;
+  D.lemma_nat_divides_pos_divides frag bk;
+  D.lemma_nat_divides_pos_divides frag bm;
+  D.lemma_nat_divides_pos_divides wm bm;
+  a_tile_bound bm wm warp_m i;
+  let lhs = ematrix_subtile eA frag frag (warp_m*(wm/frag)+i) ks in
+  let rhs = ematrix_subtile (ematrix_subtile rA wm frag warp_m ks) frag frag i 0 in
+  introduce forall (i':natlt frag) (j':natlt frag). acc2 lhs i' j' %~ acc2 rhs i' j'
+  with (
+    FStar.Math.Lemmas.paren_mul_right warp_m (wm/frag) frag;
+    let r = (warp_m*(wm/frag)+i)*frag + i' in
+    let c = ks*frag + j' in
+    FStar.Math.Lemmas.lemma_mult_le_right frag (warp_m*(wm/frag)+i+1) (bm/frag);
+    FStar.Math.Lemmas.lemma_mult_le_right frag (ks+1) (bk/frag);
+    elim_approx eA rA r c
+  );
+  lemma_approximates_intro lhs rhs
+
+(* The [j]-th 16x16 B col-fragment (FragLCM) loaded from the global tile
+   approximates the [j]-th sub-fragment of the per-warp B tile of [rB]. *)
+let sp_b_tile_approx
+  (#et:Type0) {| scalar et, real_like et |}
+  (bn bk wn : pos)
+  (eB : chest2 et bk bn) (rB : chest2 real bk bn)
+  (warp_n ks j : nat)
+  (_ : squash (frag /?+ wn /\ frag /?+ bk /\ frag /?+ bn /\ wn /?+ bn /\
+               warp_n < bn/wn /\ ks < bk/frag /\ j < wn/frag /\ eB %~ rB))
+  : Lemma (ensures
+      ematrix_subtile eB frag frag ks (warp_n*(wn/frag)+j)
+        %~ ematrix_subtile (ematrix_subtile rB frag wn ks warp_n) frag frag 0 j)
+= frag_div_mul wn; frag_div_mul bn; frag_div_mul bk;
+  D.lemma_nat_divides_pos_divides frag wn;
+  D.lemma_nat_divides_pos_divides frag bk;
+  D.lemma_nat_divides_pos_divides frag bn;
+  D.lemma_nat_divides_pos_divides wn bn;
+  a_tile_bound bn wn warp_n j;
+  let lhs = ematrix_subtile eB frag frag ks (warp_n*(wn/frag)+j) in
+  let rhs = ematrix_subtile (ematrix_subtile rB frag wn ks warp_n) frag frag 0 j in
+  introduce forall (i':natlt frag) (j':natlt frag). acc2 lhs i' j' %~ acc2 rhs i' j'
+  with (
+    FStar.Math.Lemmas.paren_mul_right warp_n (wn/frag) frag;
+    let r = ks*frag + i' in
+    let c = (warp_n*(wn/frag)+j)*frag + j' in
+    FStar.Math.Lemmas.lemma_mult_le_right frag (warp_n*(wn/frag)+j+1) (bn/frag);
+    FStar.Math.Lemmas.lemma_mult_le_right frag (ks+1) (bk/frag);
+    elim_approx eB rB r c
+  );
+  lemma_approximates_intro lhs rhs
+
+(* ---- nested-subtile composition + approximation lemmas (pure/ghost),
+   proven by chest2 cell extensionality.  Used to relate the block-warp matmul
+   [subproducts_buf] advances by to the [__gmatmul_single] step of the k-loop
+   accumulator invariant. ---- *)
+
+(* generic tile index bound: obr*(oR/iR)+ibr < R/iR *)
+let lemma_tile_index_bound (bigR oR iR : pos) (obr ibr : nat)
+  : Lemma (requires iR /?+ oR /\ oR /?+ bigR /\ obr < bigR/oR /\ ibr < oR/iR)
+          (ensures obr*(oR/iR)+ibr < bigR/iR)
+= let q1 = bigR / oR in
+  let q2 = oR / iR in
+  D.lemma_nat_divides_pos_divides oR bigR;
+  D.lemma_nat_divides_pos_divides iR oR;
+  let g1 = D.get_factor oR bigR in
+  let g2 = D.get_factor iR oR in
+  FStar.Math.Lemmas.multiple_division_lemma q1 oR;
+  FStar.Math.Lemmas.multiple_division_lemma q2 iR;
+  FStar.Math.Lemmas.paren_mul_right q1 q2 iR;
+  FStar.Math.Lemmas.multiple_division_lemma (q1 * q2) iR;
+  ()
+
+(* nested subtile composition (general): the inner tile of an outer tile is one
+   subtile at the fine granularity with a composed index. *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 30 --split_queries always"
+let ematrix_subtile_compose
+  (#et : Type) (#bigR #bigC : nat)
+  (m : chest2 et bigR bigC)
+  (oR oC iR iC : pos)
+  (obr : natlt (bigR/oR)) (obc : natlt (bigC/oC))
+  (ibr : natlt (oR/iR)) (ibc : natlt (oC/iC))
+  (tr : natlt (bigR/iR)) (tc : natlt (bigC/iC))
+  (sq : squash (oR /? bigR /\ oC /? bigC /\ iR /? oR /\ iC /? oC /\
+                tr == obr*(oR/iR)+ibr /\ tc == obc*(oC/iC)+ibc))
+  : Lemma (ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc
+           == ematrix_subtile m iR iC tr tc)
+= D.lemma_nat_divides_pos_divides iR oR;
+  D.lemma_nat_divides_pos_divides oR bigR;
+  let gr = D.get_factor iR oR in
+  let gc = D.get_factor iC oC in
+  FStar.Math.Lemmas.multiple_division_lemma gr iR;
+  FStar.Math.Lemmas.multiple_division_lemma gc iC;
+  let lhs = ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc in
+  let rhs = ematrix_subtile m iR iC tr tc in
+  introduce forall (i:natlt iR) (j:natlt iC). acc2 lhs i j == acc2 rhs i j
+  with (
+    FStar.Math.Lemmas.distributivity_add_left obr (oR/iR) iR;
+    FStar.Math.Lemmas.distributivity_add_left obc (oC/iC) iC;
+    FStar.Math.Lemmas.paren_mul_right obr (oR/iR) iR;
+    FStar.Math.Lemmas.paren_mul_right obc (oC/iC) iC;
+    ()
+  );
+  assert (equal lhs rhs)
+#pop-options
+
+(* a subtile of a constant chest is the constant chest at the tile shape; the
+   source dimensions are irrelevant.  Used to bridge the zeroed accumulator
+   across the [(wm/frag)*frag] vs [wm] shapes of [fragarrayAcc_approximates]. *)
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 30"
+let ematrix_subtile_const
+  (#rows #cols : nat) (v : real)
+  (tr : pos { tr /? rows }) (tc : pos { tc /? cols })
+  (i : natlt (rows / tr)) (j : natlt (cols / tc))
+  : Lemma
+      (ensures
+        ematrix_subtile #real #rows #cols (const _ v) tr tc i j
+        `equal` (const _ v <: chest2 real tr tc))
+      [SMTPat (ematrix_subtile #real #rows #cols (const _ v) tr tc i j)]
+= assert (equal (ematrix_subtile #real #rows #cols (const _ v) tr tc i j)
+                (const _ v <: chest2 real tr tc))
+#pop-options
+
+(* subtile of an approximation is an approximation *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let lemma_subtile_approx
+  (#et:Type0) {| scalar et, real_like et |} (#rows #cols:nat)
+  (m1 : chest2 et rows cols) (m2 : chest2 real rows cols)
+  (trows : pos {trows /? rows}) (tcols : pos {tcols /? cols})
+  (tr : natlt (rows/trows)) (tc : natlt (cols/tcols))
+  (_ : squash (m1 %~ m2))
+  : Lemma (ematrix_subtile m1 trows tcols tr tc %~ ematrix_subtile m2 trows tcols tr tc)
+= D.lemma_nat_divides_pos_divides trows rows;
+  D.lemma_nat_divides_pos_divides tcols cols;
+  let gr = D.get_factor trows rows in
+  let gc = D.get_factor tcols cols in
+  FStar.Math.Lemmas.multiple_division_lemma gr trows;
+  FStar.Math.Lemmas.multiple_division_lemma gc tcols;
+  let lhs = ematrix_subtile m1 trows tcols tr tc in
+  let rhs = ematrix_subtile m2 trows tcols tr tc in
+  introduce forall (i:natlt trows) (j:natlt tcols). acc2 lhs i j %~ acc2 rhs i j
+  with (
+    FStar.Math.Lemmas.lemma_mult_le_right trows (tr+1) (rows/trows);
+    FStar.Math.Lemmas.lemma_mult_le_right tcols (tc+1) (cols/tcols);
+    assert (tr*trows+i < rows);
+    assert (tc*tcols+j < cols);
+    elim_approx m1 m2 (tr*trows+i) (tc*tcols+j)
+  );
+  lemma_approximates_intro lhs rhs
+#pop-options
+
+(* ctranspose of an approximation approximates the mtranspose *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let lemma_ctranspose_approx
+  (#et:Type0) {| scalar et, real_like et |} (#rows #cols:nat)
+  (m1 : chest2 et rows cols) (m2 : chest2 real rows cols)
+  (_ : squash (m1 %~ m2))
+  : Lemma (TR.ctranspose m1 %~ mtranspose m2)
+= let lhs = TR.ctranspose m1 in
+  let rhs = mtranspose m2 in
+  introduce forall (i:natlt cols) (j:natlt rows). acc2 lhs i j %~ acc2 rhs i j
+  with (
+    TR.lemma_ctranspose_acc m1 i j;
+    assert (acc2 rhs i j == acc2 m2 j i);
+    elim_approx m1 m2 j i
+  );
+  lemma_approximates_intro lhs rhs
+#pop-options
+
+(* A-fragment approximation (FragLRM): [arr] holds [wm] row-fragments of the
+   per-warp A tile [rm : chest2 real (wm*frag) frag]. *)
+let sg_fragA_approx
+  (#et:Type0) {| scalar et, real_like et |}
+  (wm : nat)
+  (arr : array (fragment et FragA frag frag frag FragLRM) { length arr == wm })
+  (rm : chest2 real (wm*frag) frag)
+  : slprop
+= exists* (eAs : seq (chest2 et frag frag)).
+    arr |-> eAs **
+    pure ((Seq.length eAs == wm) /\
+      (forall (i : natlt wm). (Seq.index eAs i) %~ (ematrix_subtile rm frag frag i 0)))
+
+(* B-fragment approximation (FragLCM): [arr] holds [wn] col-fragments of the
+   per-warp B tile [rm : chest2 real frag (wn*frag)], (k,n)-oriented. *)
+let sg_fragB_approx
+  (#et:Type0) {| scalar et, real_like et |}
+  (wn : nat)
+  (arr : array (fragment et FragB frag frag frag FragLCM) { length arr == wn })
+  (rm : chest2 real frag (wn*frag))
+  : slprop
+= exists* (eBs : seq (chest2 et frag frag)).
+    arr |-> eBs **
+    pure ((Seq.length eBs == wn) /\
+      (forall (i : natlt wn). (Seq.index eBs i) %~ (ematrix_subtile rm frag frag 0 i)))
+
+(* Grid invariant for the [sp_mma] double loop (mirror of [arrayfragments_fade]):
+   accumulator tile (i,j) has one extra matmul added once the sweep has passed
+   it, otherwise it is unchanged. *)
+let arrayfragments_fade
+  (wm_e wn_e : nat)
+  (_ : squash (frag /?+ wm_e /\ frag /?+ wn_e))
+  (i : natlt (wm_e / frag))
+  (j : natlt (wn_e / frag))
+  (resIdxM : natle (wm_e / frag))
+  (resIdxN : natle (wn_e / frag))
+  (rA : chest2 real wm_e frag)
+  (rB : chest2 real frag wn_e)
+  (rAcc : chest2 real wm_e wn_e)
+: chest2 real frag frag
+=
+  D.lemma_nat_divides_pos_divides frag wm_e;
+  D.lemma_nat_divides_pos_divides frag wn_e;
+  if i < resIdxM || (i = resIdxM && j < resIdxN)
+  then ematrix_subtile rAcc frag frag i j `matplus`
+    (matmul (ematrix_subtile rA frag frag i 0) (ematrix_subtile rB frag frag 0 j))
+  else ematrix_subtile rAcc frag frag i j
+
 #push-options "--z3rlimit 30"
 inline_for_extraction noextract
 fn sp_load_a
-  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
   (bm bk wm : szp)
   (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v bk /\ SZ.v wm /?+ SZ.v bm))
   (fmap : et_ab -> et_ab)
@@ -77,24 +345,35 @@ fn sp_load_a
        {| strided_row_major (vtlayout_of_tlayout lA) |}
   (gA : array2 et_ab lA)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
+  (rA : chest2 real (SZ.v bm) (SZ.v bk) { eA %~ rA })
   (#fA : perm)
   (warp_m : szlt (SZ.v bm / SZ.v wm))
   (ks : szlt (SZ.v bk / frag))
   (#_ : squash (length aFrags == SZ.v wm / frag))
   (#_ : squash (valid_frag_et_dims et_ab FragA frag frag frag))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves gpu ** gA |-> Frac fA eA
-  preserves live aFrags
+  requires live aFrags
+  ensures
+    sg_fragA_approx (SZ.v wm / frag) aFrags
+      (ematrix_subtile rA (SZ.v wm) frag (SZ.v warp_m) (SZ.v ks))
 {
   array_fragment_pts_to_ref aFrags;
   let mfrag = wm /^ frag_sz;
+  assert (pure (SZ.v mfrag == SZ.v wm / frag));
   let mut i = 0sz;
   while (!i <^ mfrag)
     invariant live i
     invariant
       exists* ems.
         array_fragment_pts_to aFrags ems **
-        pure (Seq.length ems == SZ.v wm / frag /\ SZ.v !i <= SZ.v wm / frag)
+        pure (Seq.length ems == SZ.v wm / frag /\ SZ.v !i <= SZ.v wm / frag /\
+          (forall (t : natlt (SZ.v wm / frag)). SZ.v !i > t ==>
+            (Seq.index ems t) %~
+              (ematrix_subtile
+                 (ematrix_subtile rA (SZ.v wm) frag (SZ.v warp_m) (SZ.v ks))
+                 frag frag t 0)))
     decreases (SZ.v wm / frag - SZ.v !i)
   {
     a_tile_bound (SZ.v bm) (SZ.v wm) (SZ.v warp_m) (SZ.v !i);
@@ -109,19 +388,27 @@ fn sp_load_a
     array_fragment_extract aFrags !i;
     let a_frag = aFrags.(!i);
     mma_loadA_map fmap a_frag atile;
-    with v. assert a_frag |-> v;
-    Pulse.Lib.Forall.elim_forall #_ v;
+    Pulse.Lib.Forall.elim_forall
+      (chest_map fmap (ematrix_subtile eA frag frag (SZ.v arow) (SZ.v ks)));
     Kuiper.TradeHelpers.ambig_trade_elim ();
     Kuiper.TradeHelpers.ambig_trade_elim ();
+    chest2_map_id fmap (ematrix_subtile eA frag frag (SZ.v arow) (SZ.v ks));
+    sp_a_tile_approx (SZ.v bm) (SZ.v bk) (SZ.v wm) eA rA
+      (SZ.v warp_m) (SZ.v ks) (SZ.v !i) ();
+    assert (pure (SZ.v arow == SZ.v warp_m * (SZ.v wm / frag) + SZ.v !i));
     i := !i +^ 1sz;
   };
+  frag_div_mul (SZ.v wm);
+  assert (pure (SZ.v !i == SZ.v wm / frag));
+  fold sg_fragA_approx (SZ.v wm / frag) aFrags
+         (ematrix_subtile rA (SZ.v wm) frag (SZ.v warp_m) (SZ.v ks));
 }
 #pop-options
 
 #push-options "--z3rlimit 30"
 inline_for_extraction noextract
 fn sp_load_b
-  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
   (bn bk wn : szp)
   (#_ : squash (frag /?+ SZ.v wn /\ frag /?+ SZ.v bk /\ SZ.v wn /?+ SZ.v bn))
   (fmap : et_ab -> et_ab)
@@ -130,24 +417,35 @@ fn sp_load_b
        {| strided_col_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB)
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))
+  (rB : chest2 real (SZ.v bk) (SZ.v bn) { eB %~ rB })
   (#fB : perm)
   (warp_n : szlt (SZ.v bn / SZ.v wn))
   (ks : szlt (SZ.v bk / frag))
   (#_ : squash (length bFrags == SZ.v wn / frag))
   (#_ : squash (valid_frag_et_dims et_ab FragB frag frag frag))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves gpu ** gB |-> Frac fB eB
-  preserves live bFrags
+  requires live bFrags
+  ensures
+    sg_fragB_approx (SZ.v wn / frag) bFrags
+      (ematrix_subtile rB frag (SZ.v wn) (SZ.v ks) (SZ.v warp_n))
 {
   array_fragment_pts_to_ref bFrags;
   let nfrag = wn /^ frag_sz;
+  assert (pure (SZ.v nfrag == SZ.v wn / frag));
   let mut j = 0sz;
   while (!j <^ nfrag)
     invariant live j
     invariant
       exists* ems.
         array_fragment_pts_to bFrags ems **
-        pure (Seq.length ems == SZ.v wn / frag /\ SZ.v !j <= SZ.v wn / frag)
+        pure (Seq.length ems == SZ.v wn / frag /\ SZ.v !j <= SZ.v wn / frag /\
+          (forall (t : natlt (SZ.v wn / frag)). SZ.v !j > t ==>
+            (Seq.index ems t) %~
+              (ematrix_subtile
+                 (ematrix_subtile rB frag (SZ.v wn) (SZ.v ks) (SZ.v warp_n))
+                 frag frag 0 t)))
     decreases (SZ.v wn / frag - SZ.v !j)
   {
     a_tile_bound (SZ.v bn) (SZ.v wn) (SZ.v warp_n) (SZ.v !j);
@@ -162,86 +460,264 @@ fn sp_load_b
     array_fragment_extract bFrags !j;
     let b_frag = bFrags.(!j);
     mma_loadB_map_cm fmap b_frag btile;
-    with v. assert b_frag |-> v;
-    Pulse.Lib.Forall.elim_forall #_ v;
+    Pulse.Lib.Forall.elim_forall
+      (chest_map fmap (ematrix_subtile eB frag frag (SZ.v ks) (SZ.v bcol)));
     Kuiper.TradeHelpers.ambig_trade_elim ();
     Kuiper.TradeHelpers.ambig_trade_elim ();
+    chest2_map_id fmap (ematrix_subtile eB frag frag (SZ.v ks) (SZ.v bcol));
+    sp_b_tile_approx (SZ.v bn) (SZ.v bk) (SZ.v wn) eB rB
+      (SZ.v warp_n) (SZ.v ks) (SZ.v !j) ();
+    assert (pure (SZ.v bcol == SZ.v warp_n * (SZ.v wn / frag) + SZ.v !j));
     j := !j +^ 1sz;
   };
+  frag_div_mul (SZ.v wn);
+  assert (pure (SZ.v !j == SZ.v wn / frag));
+  fold sg_fragB_approx (SZ.v wn / frag) bFrags
+         (ematrix_subtile rB frag (SZ.v wn) (SZ.v ks) (SZ.v warp_n));
 }
 #pop-options
 
-#push-options "--z3rlimit 40 --split_queries always"
+#push-options "--z3rlimit 80"
 inline_for_extraction noextract
 fn sp_mma
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
+     real_like et_ab, real_like et_acc |}
   (wm wn : szp)
   (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (aFrags  : array (fragment et_ab FragA   frag frag frag FragLRM))
   (bFrags  : array (fragment et_ab FragB   frag frag frag FragLCM))
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
+  (rA : chest2 real (SZ.v wm) frag)
+  (rB : chest2 real frag (SZ.v wn))
+  (rAcc : chest2 real (SZ.v wm) (SZ.v wn))
   (#_ : squash (length aFrags == SZ.v wm / frag))
   (#_ : squash (length bFrags == SZ.v wn / frag))
   (#_ : squash (length accFrags == SZ.v wm / frag * (SZ.v wn / frag)))
   (#_ : squash (valid_frag_et_comb et_ab et_acc))
   ()
-  preserves live aFrags ** live bFrags ** live accFrags
+  requires
+    sg_fragA_approx (SZ.v wm / frag) aFrags rA **
+    sg_fragB_approx (SZ.v wn / frag) bFrags rB **
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags rAcc
+  ensures
+    live aFrags ** live bFrags **
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (rAcc `matplus` (matmul rA rB))
 {
   let mfrag = wm /^ frag_sz;
   let nfrag = wn /^ frag_sz;
-  array_fragment_pts_to_ref aFrags;
-  array_fragment_pts_to_ref bFrags;
-  array_fragment_pts_to_ref accFrags;
-  let mut ri = 0sz;
-  while (!ri <^ mfrag)
-    invariant live ri
-    invariant live aFrags ** live bFrags
+  assert (pure (SZ.v mfrag == SZ.v wm / frag /\ SZ.v nfrag == SZ.v wn / frag));
+
+  unfold sg_fragA_approx (SZ.v wm / frag) aFrags rA;
+  unfold sg_fragB_approx (SZ.v wn / frag) bFrags rB;
+  unfold fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags rAcc;
+
+  with eAs. assert aFrags |-> eAs;
+  with eBs. assert bFrags |-> eBs;
+
+  let mut resIdxM = 0sz;
+  while (!resIdxM <^ mfrag)
+    invariant live resIdxM
     invariant
-      exists* eAcc.
-        array_fragment_pts_to accFrags eAcc **
-        pure (Seq.length eAcc == SZ.v wm / frag * (SZ.v wn / frag) /\
-              SZ.v !ri <= SZ.v wm / frag)
-    decreases (SZ.v wm / frag - SZ.v !ri)
+      exists* (eAcc : seq (chest2 et_acc frag frag)).
+        accFrags |-> eAcc **
+        pure (
+          SZ.v !resIdxM <= SZ.v wm / frag /\
+          (Seq.length eAcc == SZ.v wm / frag * (SZ.v wn / frag)) /\
+          (forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+            (Seq.index eAcc (i * (SZ.v wn / frag) + j)) %~
+              (arrayfragments_fade (SZ.v wm) (SZ.v wn) () i j (SZ.v !resIdxM) 0 rA rB rAcc)))
+    decreases (SZ.v wm / frag - SZ.v !resIdxM)
   {
-    let mut rj = 0sz;
-    while (!rj <^ nfrag)
-      invariant live rj
-      invariant live aFrags ** live bFrags
+    let mut resIdxN = 0sz;
+    while (!resIdxN <^ nfrag)
+      invariant live resIdxN
       invariant
-        exists* eAcc.
-          array_fragment_pts_to accFrags eAcc **
-          pure (Seq.length eAcc == SZ.v wm / frag * (SZ.v wn / frag) /\
-                SZ.v !ri < SZ.v wm / frag /\ SZ.v !rj <= SZ.v wn / frag)
-      decreases (SZ.v wn / frag - SZ.v !rj)
+        exists* (eAcc : seq (chest2 et_acc frag frag)).
+          accFrags |-> eAcc **
+          pure (
+            SZ.v !resIdxN <= SZ.v wn / frag /\
+            SZ.v !resIdxM < SZ.v wm / frag /\
+            (Seq.length eAcc == SZ.v wm / frag * (SZ.v wn / frag)) /\
+            (forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+              (Seq.index eAcc (i * (SZ.v wn / frag) + j)) %~
+                (arrayfragments_fade (SZ.v wm) (SZ.v wn) () i j (SZ.v !resIdxM) (SZ.v !resIdxN) rA rB rAcc)))
+      decreases (SZ.v wn / frag - SZ.v !resIdxN)
     {
+      with eAccs. assert accFrags |-> eAccs;
+
       array_fragment_pts_to_ref aFrags;
       array_fragment_pts_to_ref bFrags;
       array_fragment_pts_to_ref accFrags;
-      array_fragment_extract_ro aFrags !ri;
-      array_fragment_extract_ro bFrags !rj;
-      let idx = !ri *^ nfrag +^ !rj;
-      array_fragment_extract accFrags idx;
-      let a_frag = aFrags.(!ri);
-      let b_frag = bFrags.(!rj);
-      let acc_frag = accFrags.(idx);
+
+      array_fragment_extract_ro aFrags !resIdxM;
+      array_fragment_extract_ro bFrags !resIdxN;
+      array_fragment_extract accFrags (!resIdxM * nfrag + !resIdxN);
+
+      let a_frag = aFrags.(!resIdxM);
+      let b_frag = bFrags.(!resIdxN);
+      let acc_frag = accFrags.(!resIdxM *^ nfrag +^ !resIdxN);
+
+      with eAt. assert a_frag |-> eAt;
+      with eBt. assert b_frag |-> eBt;
+      with eAcct. assert acc_frag |-> eAcct;
+      assert pure (eAt %~ (ematrix_subtile rA frag frag (SZ.v !resIdxM) 0));
+      assert pure (eBt %~ (ematrix_subtile rB frag frag 0 (SZ.v !resIdxN)));
+      assert pure (eAcct %~ (ematrix_subtile rAcc frag frag (SZ.v !resIdxM) (SZ.v !resIdxN)));
+
       mma_sync' a_frag b_frag acc_frag;
+
+      Kuiper.TensorCore.Base.emma_approx_lemma eAcct eAt eBt
+        (ematrix_subtile rAcc frag frag (SZ.v !resIdxM) (SZ.v !resIdxN))
+        (ematrix_subtile rA frag frag (SZ.v !resIdxM) 0)
+        (ematrix_subtile rB frag frag 0 (SZ.v !resIdxN));
+
       Kuiper.TradeHelpers.ambig_trade_elim ();
       Kuiper.TradeHelpers.ambig_trade_elim ();
-      with v. assert acc_frag |-> v;
-      Pulse.Lib.Forall.elim_forall #_ v;
+
+      with v. assert acc_frag `fragment_pts_to` v;
+      Pulse.Lib.Forall.elim_forall v;
+
       Kuiper.TradeHelpers.ambig_trade_elim ();
-      rj := !rj +^ 1sz;
+
+      assert array_fragment_pts_to accFrags (Seq.Base.upd eAccs
+            (SZ.v !resIdxM * (SZ.v wn / frag) + SZ.v !resIdxN)
+            (emma (Seq.index eAccs (SZ.v !resIdxM * (SZ.v wn / frag) + SZ.v !resIdxN))
+                (Seq.index eAs (SZ.v !resIdxM))
+                (Seq.index eBs (SZ.v !resIdxN))));
+
+      resIdxN := !resIdxN +^ 1sz;
     };
-    ri := !ri +^ 1sz;
+
+    resIdxM := !resIdxM +^ 1sz;
   };
+
+  with eAcc. assert accFrags |-> eAcc;
+  assert pure (
+    forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+      (Seq.index eAcc (i * (SZ.v wn / frag) + j)) %~
+        (arrayfragments_fade (SZ.v wm) (SZ.v wn) () i j (SZ.v mfrag) 0 rA rB rAcc));
+  assert pure (
+    forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+      (Seq.index eAcc (i * (SZ.v wn / frag) + j)) %~
+        (ematrix_subtile rAcc frag frag i j `matplus`
+          (matmul (ematrix_subtile rA frag frag i 0) (ematrix_subtile rB frag frag 0 j))));
+  assert pure (
+    forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+      (Seq.index eAcc (i * (SZ.v wn / frag) + j)) %~
+        (ematrix_subtile (rAcc `matplus` (matmul rA rB)) frag frag i j));
+  assert pure (Seq.length eAcc == SZ.v wm / frag * (SZ.v wn / frag));
+
+  fold fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+    (rAcc `matplus` (matmul rA rB));
 }
 #pop-options
+
+(* ---- accumulator bookkeeping (pure/ghost; mirror of To.Fragments) ---- *)
+
+#push-options "--z3rlimit 60"
+let subproducts_step_eq
+  (#bm #bk #bn : nat)
+  (wm_tm tk_dim wn_tn : pos)
+  (_ : squash (wm_tm /? bm /\ tk_dim /? bk /\ wn_tn /? bn))
+  (rAcc : chest2 real wm_tm wn_tn)
+  (rA : chest2 real bm bk) (rB : chest2 real bk bn)
+  (row : natlt (bm/wm_tm)) (col : natlt (bn/wn_tn))
+  (k : natlt (bk/tk_dim))
+  : Lemma (
+      matplus (__gmatmul_single rAcc matmul matplus
+              (ematrix_tiled rA wm_tm tk_dim) (ematrix_tiled rB tk_dim wn_tn)
+              row col k)
+          (matmul (ematrix_subtile rA wm_tm tk_dim row k)
+                  (ematrix_subtile rB tk_dim wn_tn k col))
+      ==
+      __gmatmul_single rAcc matmul matplus
+          (ematrix_tiled rA wm_tm tk_dim) (ematrix_tiled rB tk_dim wn_tn)
+          row col (k + 1))
+  = __gmatmul_single_lemma rAcc matmul matplus
+      (ematrix_tiled rA wm_tm tk_dim) (ematrix_tiled rB tk_dim wn_tn)
+      row col (k + 1);
+    macc_ematrix_tiled rA wm_tm tk_dim row k;
+    macc_ematrix_tiled rB tk_dim wn_tn k col;
+    assert (equal
+      (matplus (__gmatmul_single rAcc matmul matplus
+               (ematrix_tiled rA wm_tm tk_dim) (ematrix_tiled rB tk_dim wn_tn)
+               row col k)
+          (matmul (ematrix_subtile rA wm_tm tk_dim row k)
+                  (ematrix_subtile rB tk_dim wn_tn k col)))
+      (__gmatmul_single rAcc matmul matplus
+          (ematrix_tiled rA wm_tm tk_dim) (ematrix_tiled rB tk_dim wn_tn)
+          row col (k + 1)))
+#pop-options
+
+#push-options "--z3rlimit 60"
+noextract
+ghost fn rewrite_fragarrayAcc_step
+  (#et:Type0) {| scalar et, real_like et |}
+  (#tm #tn #tk : pos)
+  (#bm #bk #bn : pos)
+  (wm wn : pos)
+  (accumFrags : array (fragment et FragAcc tm tn tk FragLAcc)
+                { length accumFrags == wm*wn })
+  (rAcc : chest2 real (wm*tm) (wn*tn))
+  (rA : chest2 real bm bk) (rB : chest2 real bk bn)
+  (arow : natlt (bm/(wm*tm))) (bcol : natlt (bn/(wn*tn)))
+  (k : natlt (bk/tk))
+  (#_ : squash ((wm*tm) /? bm /\ tk /? bk /\ (wn*tn) /? bn))
+  requires fragarrayAcc_approximates wm wn accumFrags
+    (matplus (__gmatmul_single rAcc matmul matplus
+              (ematrix_tiled rA (wm*tm) tk) (ematrix_tiled rB tk (wn*tn))
+              arow bcol k)
+            (matmul (ematrix_subtile rA (wm*tm) tk arow k)
+                    (ematrix_subtile rB tk (wn*tn) k bcol)))
+  ensures fragarrayAcc_approximates wm wn accumFrags
+    (__gmatmul_single rAcc matmul matplus
+      (ematrix_tiled rA (wm*tm) tk) (ematrix_tiled rB tk (wn*tn))
+      arow bcol (k + 1))
+{
+  subproducts_step_eq (wm*tm) tk (wn*tn) () rAcc rA rB arow bcol k;
+  unfold fragarrayAcc_approximates wm wn accumFrags;
+  fold fragarrayAcc_approximates wm wn accumFrags
+    (__gmatmul_single rAcc matmul matplus
+      (ematrix_tiled rA (wm*tm) tk) (ematrix_tiled rB tk (wn*tn))
+      arow bcol (k + 1));
+}
+#pop-options
+
+noextract
+ghost fn rewrite_fragarrayAcc_tiles
+  (#et:Type0) {| scalar et, real_like et |}
+  (#tm #tn #tk : pos)
+  (#bm #bk #bn : pos)
+  (wm wn : pos)
+  (accumFrags : array (fragment et FragAcc tm tn tk FragLAcc)
+                { length accumFrags == wm*wn })
+  (rAcc : chest2 real (wm*tm) (wn*tn))
+  (rA : chest2 real bm bk) (rB : chest2 real bk bn)
+  (arow : natlt (bm/(wm*tm))) (bcol : natlt (bn/(wn*tn)))
+  (#_ : squash ((wm*tm) /? bm /\ tk /? bk /\ (wn*tn) /? bn))
+  requires fragarrayAcc_approximates wm wn accumFrags
+    (__gmatmul_single rAcc matmul matplus
+      (ematrix_tiled rA (wm*tm) tk) (ematrix_tiled rB tk (wn*tn))
+      arow bcol (bk/tk))
+  ensures fragarrayAcc_approximates wm wn accumFrags
+    (rAcc `matplus` matmul (ematrix_subtile rA (wm*tm) bk arow 0)
+                           (ematrix_subtile rB bk (wn*tn) 0 bcol))
+{
+  matmul_tiles_lemma (fun _ -> ()) (fun _ _ _ -> ())
+    (wm*tm) (wn*tn) tk rAcc rA rB arow bcol;
+  unfold fragarrayAcc_approximates wm wn accumFrags;
+  fold fragarrayAcc_approximates wm wn accumFrags
+    (rAcc `matplus` matmul (ematrix_subtile rA (wm*tm) bk arow 0)
+                           (ematrix_subtile rB bk (wn*tn) 0 bcol));
+}
 
 inline_for_extraction noextract
 fn subproducts
   (#et_ab #et_acc : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
+     real_like et_ab, real_like et_acc |}
   (bm bn bk wm wn : szp)
   (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn /\ frag /?+ SZ.v bk /\
                 SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn))
@@ -257,6 +733,9 @@ fn subproducts
   (gB : array2 et_ab lB)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))
+  (rA : chest2 real (SZ.v bm) (SZ.v bk) { eA %~ rA })
+  (rB : chest2 real (SZ.v bk) (SZ.v bn) { eB %~ rB })
+  (rAcc : chest2 real (SZ.v wm) (SZ.v wn))
   (#fA #fB : perm)
   (warp_m : szlt (SZ.v bm / SZ.v wm))
   (warp_n : szlt (SZ.v bn / SZ.v wn))
@@ -267,30 +746,68 @@ fn subproducts
   (#_ : squash (valid_frag_et_dims et_ab FragB frag frag frag))
   (#_ : squash (valid_frag_et_dims et_acc FragAcc frag frag frag))
   (#_ : squash (valid_frag_et_comb et_ab et_acc))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves
     gpu **
     gA |-> Frac fA eA **
     gB |-> Frac fB eB
   preserves
-    live aFrags ** live bFrags ** live accFrags
+    live aFrags ** live bFrags
+  requires
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags rAcc
+  ensures
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (rAcc `matplus`
+        (matmul (ematrix_subtile rA (SZ.v wm) (SZ.v bk) (SZ.v warp_m) 0)
+                (ematrix_subtile rB (SZ.v bk) (SZ.v wn) 0 (SZ.v warp_n))))
 {
   acc_len_reveal wm wn;
+  frag_div_mul (SZ.v wm);
+  frag_div_mul (SZ.v wn);
+
+  rewrite each rAcc
+  as __gmatmul_single rAcc matmul matplus
+      (ematrix_tiled rA (SZ.v wm) frag) (ematrix_tiled rB frag (SZ.v wn))
+      (SZ.v warp_m) (SZ.v warp_n) 0;
+
   let kstep = bk /^ frag_sz;
   let mut ks = 0sz;
   while (!ks <^ kstep)
-    invariant live ks
+    invariant live aFrags ** live bFrags
     invariant
-      gpu ** gA |-> Frac fA eA ** gB |-> Frac fB eB **
-      live aFrags ** live bFrags ** live accFrags
-    invariant pure (SZ.v !ks <= SZ.v bk / frag)
+      gpu ** gA |-> Frac fA eA ** gB |-> Frac fB eB
+    invariant
+      exists* (vki : sz { SZ.v vki <= SZ.v bk / frag }).
+        ks |-> vki **
+        fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+          (__gmatmul_single rAcc matmul matplus
+            (ematrix_tiled rA (SZ.v wm) frag) (ematrix_tiled rB frag (SZ.v wn))
+            (SZ.v warp_m) (SZ.v warp_n) (SZ.v !ks))
     decreases (SZ.v bk / frag - SZ.v !ks)
   {
-    sp_load_a bm bk wm fmap aFrags gA warp_m !ks ();
-    sp_load_b bn bk wn fmap bFrags gB warp_n !ks ();
-    sp_mma wm wn aFrags bFrags accFrags ();
+    sp_load_a bm bk wm fmap aFrags gA rA warp_m !ks fmap_id ();
+    sp_load_b bn bk wn fmap bFrags gB rB warp_n !ks fmap_id ();
+    sp_mma wm wn aFrags bFrags accFrags
+      (ematrix_subtile rA (SZ.v wm) frag (SZ.v warp_m) (SZ.v !ks))
+      (ematrix_subtile rB frag (SZ.v wn) (SZ.v !ks) (SZ.v warp_n))
+      (__gmatmul_single rAcc matmul matplus
+        (ematrix_tiled rA (SZ.v wm) frag) (ematrix_tiled rB frag (SZ.v wn))
+        (SZ.v warp_m) (SZ.v warp_n) (SZ.v !ks))
+      ();
+
+    rewrite_fragarrayAcc_step (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      rAcc rA rB (SZ.v warp_m) (SZ.v warp_n) !ks;
+
     ks := !ks +^ 1sz;
   };
+
+  with vki. assert (ks |-> vki);
+  assert pure (SZ.v vki == SZ.v bk / frag);
+  rewrite each (SZ.v vki) as (SZ.v bk / frag);
+
+  rewrite_fragarrayAcc_tiles (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+    rAcc rA rB (SZ.v warp_m) (SZ.v warp_n);
 }
 
 (* ---- subtile alignment inheritance (pure) ---- *)
@@ -334,6 +851,8 @@ let pending
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -346,27 +865,28 @@ let pending
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   : slprop
 = pledge0 (PC.batch_done b_c)
-    (FB.live_strided_chunks
-       (skewed_view bm bk skew (if vkt % 2 = 0 then sarA0 else sarA1)) nthr tid **
-     FB.live_strided_chunks
-       (skewed_view bn bk skew (if vkt % 2 = 0 then sarB0 else sarB1)) nthr tid **
-     (exists* eA eB.
-        (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eA) **
-        (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eB))) **
+    (FB.own_strided_chunks
+       (skewed_view bm bk skew (if vkt % 2 = 0 then sarA0 else sarA1))
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr tid **
+     FB.own_strided_chunks
+       (skewed_view bn bk skew (if vkt % 2 = 0 then sarB0 else sarB1))
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr tid **
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |->
+        Frac fA (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt)) **
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |->
+        Frac fB (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt))) **
   (if vkt = 0 then
      pipe_live (skewed_view bm bk skew (if vkt % 2 = 0 then sarA1 else sarA0)) nthr tid **
      pipe_live (skewed_view bn bk skew (if vkt % 2 = 0 then sarB1 else sarB0)) nthr tid
    else
      pipe_sharing (skewed_view bm bk skew (if vkt % 2 = 0 then sarA1 else sarA0)) nthr **
      pipe_sharing (skewed_view bn bk skew (if vkt % 2 = 0 then sarB1 else sarB0)) nthr) **
-  (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
-         @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
-  (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
-         @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
+  (forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
+       @==> gA |-> Frac fA (update_tile eA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
+  (forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
+       @==> gB |-> Frac fB (update_tile eB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
 
 (* the pledge/other/wands bundle at a fixed current/other buffer pair *)
 unfold
@@ -378,6 +898,8 @@ let pending_body
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (curA othA : larray et_ab (SZ.v bm * ldt bk skew))
   (curB othB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -389,25 +911,26 @@ let pending_body
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   : slprop
 = pledge0 (PC.batch_done b_c)
-    (FB.live_strided_chunks (skewed_view bm bk skew curA) nthr tid **
-     FB.live_strided_chunks (skewed_view bn bk skew curB) nthr tid **
-     (exists* eA eB.
-        (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eA) **
-        (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eB))) **
+    (FB.own_strided_chunks (skewed_view bm bk skew curA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr tid **
+     FB.own_strided_chunks (skewed_view bn bk skew curB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr tid **
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |->
+        Frac fA (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt)) **
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |->
+        Frac fB (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt))) **
   (if othlive then
      pipe_live (skewed_view bm bk skew othA) nthr tid **
      pipe_live (skewed_view bn bk skew othB) nthr tid
    else
      pipe_sharing (skewed_view bm bk skew othA) nthr **
      pipe_sharing (skewed_view bn bk skew othB) nthr) **
-  (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
-         @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
-  (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
-         @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
+  (forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
+       @==> gA |-> Frac fA (update_tile eA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
+  (forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
+       @==> gB |-> Frac fB (update_tile eB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
 #pop-options
 
 (* ---- parity fold/unfold of the carry predicate ---- *)
@@ -421,6 +944,8 @@ fn fold_pending_even
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -431,16 +956,16 @@ fn fold_pending_even
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   requires
     pure (vkt % 2 = 0) **
-    pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
+    pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 eA eB fA fB nthr tid block_row block_col
       b_c sq (vkt = 0) vkt
   ensures
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+    pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
 {
   rewrite
-    (pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col
+    (pending_body bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 eA eB fA fB nthr tid block_row block_col
       b_c sq (vkt = 0) vkt)
   as
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
+    (pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
 }
 #pop-options
 
@@ -461,6 +986,8 @@ let staged_half
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (curA : larray et_ab (SZ.v bm * ldt bk skew))
   (curB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -471,19 +998,20 @@ let staged_half
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   : slprop
 = pledge0 (PC.batch_done b_c)
-    (FB.live_strided_chunks (skewed_view bm bk skew curA) nthr tid **
-     FB.live_strided_chunks (skewed_view bn bk skew curB) nthr tid **
-     (exists* eA eB.
-        (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eA) **
-        (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eB))) **
-  (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
-         @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
-  (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
-     forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
-         @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
+    (FB.own_strided_chunks (skewed_view bm bk skew curA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr tid **
+     FB.own_strided_chunks (skewed_view bn bk skew curB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr tid **
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |->
+        Frac fA (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt)) **
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |->
+        Frac fB (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt))) **
+  (forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
+     (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
+       @==> gA |-> Frac fA (update_tile eA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
+  (forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
+     (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
+       @==> gB |-> Frac fB (update_tile eB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
 #pop-options
 
 (* ---- stage one k-tile [kt] of the globals into the writable buffers
@@ -505,6 +1033,8 @@ fn stage_next
   (#lB : layout2 (SZ.v n) (SZ.v k)) {| _clB : T.ctlayout lB |}
        {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB)
+  (#eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -544,13 +1074,13 @@ fn stage_next
   ()
   preserves gpu
   requires
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_live (skewed_view bm bk skew dstA) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew dstB) (SZ.v nthr) (SZ.v tid) **
     PC.batch_live b
   returns b' : PC.pipeline_batch_t
   ensures
-    staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+    staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB (SZ.v nthr) (SZ.v tid)
       (SZ.v block_row) (SZ.v block_col) b () (SZ.v kt) **
     PC.batch_committed b ** PC.batch_live b'
 {
@@ -593,7 +1123,7 @@ fn stage_next
   rewrite each tileA1 as array2_subtile gA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt);
   rewrite each tileB1 as array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt);
 
-  fold (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+  fold (staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB (SZ.v nthr) (SZ.v tid)
           (SZ.v block_row) (SZ.v block_col) b () (SZ.v kt));
   b'
 }
@@ -607,6 +1137,7 @@ fn subproducts_buf
   (#et_ab #et_acc : Type0)
   {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
   {| _sac : scalar et_acc |} {| _vac : has_vec_cpy et_acc |}
+  {| _rab : real_like et_ab |} {| _rac : real_like et_acc |}
   (bm bn bk wm wn skew : szp)
   (curbufA : larray et_ab (SZ.v bm * ldt bk skew))
   (curbufB : larray et_ab (SZ.v bn * ldt bk skew))
@@ -618,6 +1149,11 @@ fn subproducts_buf
   (aFrags  : array (fragment et_ab  FragA   frag frag frag FragLRM))
   (bFrags  : array (fragment et_ab  FragB   frag frag frag FragLCM))
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
+  (#eA_tile : chest2 et_ab (SZ.v bm) (SZ.v bk))
+  (#eB_tile : chest2 et_ab (SZ.v bn) (SZ.v bk))
+  (rA : chest2 real (SZ.v bm) (SZ.v bk) { eA_tile %~ rA })
+  (rB_phys : chest2 real (SZ.v bn) (SZ.v bk) { eB_tile %~ rB_phys })
+  (rAcc : chest2 real (SZ.v wm) (SZ.v wn))
   (sq_c : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
   (sq_v : squash (
      valid_frag_et_dims et_ab FragA frag frag frag /\
@@ -626,26 +1162,32 @@ fn subproducts_buf
      valid_frag_et_comb et_ab et_acc /\
      length aFrags == SZ.v wm / frag /\ length bFrags == SZ.v wn / frag /\
      length accFrags == acc_len wm wn))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   requires
     gpu **
-    pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr) **
-    pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr) **
-    live aFrags ** live bFrags ** live accFrags
+    pipe_sharing_c (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr) **
+    pipe_sharing_c (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr) **
+    live aFrags ** live bFrags **
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags rAcc
   ensures
     gpu **
-    pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr) **
-    pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr) **
-    live aFrags ** live bFrags ** live accFrags
+    pipe_sharing_c (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr) **
+    pipe_sharing_c (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr) **
+    live aFrags ** live bFrags **
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (rAcc `matplus`
+        (matmul (ematrix_subtile rA (SZ.v wm) (SZ.v bk) (SZ.v warp_m) 0)
+                (ematrix_subtile (mtranspose rB_phys) (SZ.v bk) (SZ.v wn) 0 (SZ.v warp_n))))
 {
-  unfold (pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr));
-  with emCA. assert (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  unfold (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  unfold (pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr));
-  with emCB. assert (FB.bp_sharing (skewed_view bn bk skew curbufB) emCB (SZ.v nthr));
-  unfold (FB.bp_sharing (skewed_view bn bk skew curbufB) emCB (SZ.v nthr));
+  unfold (pipe_sharing_c (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr));
+  unfold (FB.bp_sharing (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr));
+  unfold (pipe_sharing_c (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr));
+  unfold (FB.bp_sharing (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr));
 
   TR.atranspose_fwd (skewed_view bn bk skew curbufB);
+
+  lemma_ctranspose_approx eB_tile rB_phys ();
 
   subproducts bm bn bk wm wn fmap aFrags bFrags accFrags
     #(l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew))
@@ -659,14 +1201,22 @@ fn subproducts_buf
         #(c_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz) #())
     #(TR.scm_of_srm (srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz))
     (TR.atranspose (skewed_view bn bk skew curbufB))
-    warp_m warp_n ();
+    #eA_tile
+    #(TR.ctranspose eB_tile)
+    rA
+    (mtranspose rB_phys)
+    rAcc
+    #(1.0R /. SZ.v nthr) #(1.0R /. SZ.v nthr)
+    warp_m warp_n
+    () () ;
 
   TR.atranspose_back (skewed_view bn bk skew curbufB);
+  TR.lemma_ctranspose_involutive eB_tile;
 
-  fold (FB.bp_sharing (skewed_view bm bk skew curbufA) emCA (SZ.v nthr));
-  fold (pipe_sharing (skewed_view bm bk skew curbufA) (SZ.v nthr));
-  fold (FB.bp_sharing (skewed_view bn bk skew curbufB) (TR.ctranspose (TR.ctranspose emCB)) (SZ.v nthr));
-  fold (pipe_sharing (skewed_view bn bk skew curbufB) (SZ.v nthr));
+  fold (FB.bp_sharing (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr));
+  fold (pipe_sharing_c (skewed_view bm bk skew curbufA) eA_tile (SZ.v nthr));
+  fold (FB.bp_sharing (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr));
+  fold (pipe_sharing_c (skewed_view bn bk skew curbufB) eB_tile (SZ.v nthr));
 }
 #pop-options
 
@@ -679,6 +1229,8 @@ fn restore_globals
   (bm bn bk : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
   (block_col : nat { block_col < SZ.v n / SZ.v bn })
@@ -686,32 +1238,31 @@ fn restore_globals
                 SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   requires
-    (exists* eA eB.
-       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eA) **
-       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eB)) **
-    (exists* (emA : chest2 et_ab (SZ.v m) (SZ.v k)).
-       forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-         (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
-           @==> gA |-> Frac fA (update_tile emA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
-    (exists* (emB : chest2 et_ab (SZ.v n) (SZ.v k)).
-       forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-         (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
-           @==> gB |-> Frac fB (update_tile emB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
+    (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |->
+       Frac fA (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt)) **
+    (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |->
+       Frac fB (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt)) **
+    (forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
+       (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
+         @==> gA |-> Frac fA (update_tile eA (SZ.v bm) (SZ.v bk) block_row vkt tm')) **
+    (forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
+       (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
+         @==> gB |-> Frac fB (update_tile eB (SZ.v bn) (SZ.v bk) block_col vkt tm'))
   ensures
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e)
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB)
 {
-  with eAr. assert (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA eAr);
-  with emAw. assert (forall* (tm' : chest2 et_ab (SZ.v bm) (SZ.v bk)).
-      (array2_subtile gA (SZ.v bm) (SZ.v bk) block_row vkt |-> Frac fA tm')
-        @==> gA |-> Frac fA (update_tile emAw (SZ.v bm) (SZ.v bk) block_row vkt tm'));
-  Pulse.Lib.Forall.elim_forall #_ eAr;
+  Pulse.Lib.Forall.elim_forall #_ (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt);
   Pulse.Lib.Trade.elim_trade _ _;
-  with eBr. assert (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB eBr);
-  with emBw. assert (forall* (tm' : chest2 et_ab (SZ.v bn) (SZ.v bk)).
-      (array2_subtile gB (SZ.v bn) (SZ.v bk) block_col vkt |-> Frac fB tm')
-        @==> gB |-> Frac fB (update_tile emBw (SZ.v bn) (SZ.v bk) block_col vkt tm'));
-  Pulse.Lib.Forall.elim_forall #_ eBr;
+  update_tile_self eA (SZ.v bm) (SZ.v bk) block_row vkt;
+  rewrite (gA |-> Frac fA (update_tile eA (SZ.v bm) (SZ.v bk) block_row vkt
+             (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt)))
+    as (gA |-> Frac fA eA);
+  Pulse.Lib.Forall.elim_forall #_ (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt);
   Pulse.Lib.Trade.elim_trade _ _;
+  update_tile_self eB (SZ.v bn) (SZ.v bk) block_col vkt;
+  rewrite (gB |-> Frac fB (update_tile eB (SZ.v bn) (SZ.v bk) block_col vkt
+             (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt)))
+    as (gB |-> Frac fB eB);
 }
 #pop-options
 
@@ -738,6 +1289,8 @@ fn unfold_pending_g
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (srcA dstA : larray et_ab (SZ.v bm * ldt bk skew))
@@ -756,38 +1309,47 @@ fn unfold_pending_g
      srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
      dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
   requires
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+    pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
   ensures
-    pending_body bm bn bk skew gA gB srcA dstA srcB dstB fA fB nthr tid block_row block_col
+    pending_body bm bn bk skew gA gB srcA dstA srcB dstB eA eB fA fB nthr tid block_row block_col
       b_c sq (vkt = 0) vkt
 {
   rewrite
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
+    (pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
   as
-    (pending_body bm bn bk skew gA gB srcA dstA srcB dstB fA fB nthr tid block_row block_col
+    (pending_body bm bn bk skew gA gB srcA dstA srcB dstB eA eB fA fB nthr tid block_row block_col
       b_c sq (vkt = 0) vkt);
 }
 
-(* [live src ** (ite oth)] over [src*]/[dst*] -> [pipe_p vkt]. *)
+(* [live_c src ** (ite oth)] over [src*]/[dst*] -> [pipe_p_c vkt] (content). *)
 ghost
 fn fold_pipe_p_g
   (#et : Type0) {| sized et, has_vec_cpy et |}
+  (m n k : szp)
   (bm bn bk skew : szp)
+  (eA : chest2 et (SZ.v m) (SZ.v k))
+  (eB : chest2 et (SZ.v n) (SZ.v k))
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
   (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
   (srcA dstA : larray et (SZ.v bm * ldt bk skew))
   (srcB dstB : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
+  (nthr : pos)
   (vkt : nat) (tid : natlt nthr)
+  (sq_bc : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                   SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
   (sq_sel : squash (
+     vkt < SZ.v k / SZ.v bk /\
      srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
      dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
      srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
      dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
   requires
-    pure (vkt < ktiles) **
-    pipe_live (skewed_view bm bk skew srcA) nthr tid **
-    pipe_live (skewed_view bn bk skew srcB) nthr tid **
+    pipe_live_c (skewed_view bm bk skew srcA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr tid **
+    pipe_live_c (skewed_view bn bk skew srcB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr tid **
     (if vkt = 0 then
        pipe_live (skewed_view bm bk skew dstA) nthr tid **
        pipe_live (skewed_view bn bk skew dstB) nthr tid
@@ -795,11 +1357,14 @@ fn fold_pipe_p_g
        pipe_sharing (skewed_view bm bk skew dstA) nthr **
        pipe_sharing (skewed_view bn bk skew dstB) nthr)
   ensures
-    pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid
+    pipe_p_c m n k bm bn bk skew eA eB block_row block_col
+             sarA0 sarA1 sarB0 sarB1 nthr sq_bc vkt tid
 {
   rewrite
-    (pipe_live (skewed_view bm bk skew srcA) nthr tid **
-     pipe_live (skewed_view bn bk skew srcB) nthr tid **
+    (pipe_live_c (skewed_view bm bk skew srcA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr tid **
+     pipe_live_c (skewed_view bn bk skew srcB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr tid **
      (if vkt = 0 then
         pipe_live (skewed_view bm bk skew dstA) nthr tid **
         pipe_live (skewed_view bn bk skew dstB) nthr tid
@@ -807,39 +1372,53 @@ fn fold_pipe_p_g
         pipe_sharing (skewed_view bm bk skew dstA) nthr **
         pipe_sharing (skewed_view bn bk skew dstB) nthr))
   as
-    (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid);
+    (pipe_p_c m n k bm bn bk skew eA eB block_row block_col
+              sarA0 sarA1 sarB0 sarB1 nthr sq_bc vkt tid);
 }
 
-(* [pipe_q vkt] -> [sharing src ** live dst] over [src*]/[dst*]. *)
+(* [pipe_q_c vkt] -> [sharing_c src (content) ** live dst] over [src*]/[dst*]. *)
 ghost
 fn unfold_pipe_q_g
   (#et : Type0) {| sized et, has_vec_cpy et |}
+  (m n k : szp)
   (bm bn bk skew : szp)
+  (eA : chest2 et (SZ.v m) (SZ.v k))
+  (eB : chest2 et (SZ.v n) (SZ.v k))
+  (block_row : nat { block_row < SZ.v m / SZ.v bm })
+  (block_col : nat { block_col < SZ.v n / SZ.v bn })
   (sarA0 sarA1 : larray et (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et (SZ.v bn * ldt bk skew))
   (srcA dstA : larray et (SZ.v bm * ldt bk skew))
   (srcB dstB : larray et (SZ.v bn * ldt bk skew))
-  (nthr : pos) (ktiles : nat)
+  (nthr : pos)
   (vkt : nat) (tid : natlt nthr)
+  (sq_bc : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                   SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
   (sq_sel : squash (
+     vkt < SZ.v k / SZ.v bk /\
      srcA == (if vkt % 2 = 0 then sarA0 else sarA1) /\
      dstA == (if vkt % 2 = 0 then sarA1 else sarA0) /\
      srcB == (if vkt % 2 = 0 then sarB0 else sarB1) /\
      dstB == (if vkt % 2 = 0 then sarB1 else sarB0)))
   requires
-    pure (vkt < ktiles) **
-    pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid
+    pipe_q_c m n k bm bn bk skew eA eB block_row block_col
+             sarA0 sarA1 sarB0 sarB1 nthr sq_bc vkt tid
   ensures
-    pipe_sharing (skewed_view bm bk skew srcA) nthr **
-    pipe_sharing (skewed_view bn bk skew srcB) nthr **
+    pipe_sharing_c (skewed_view bm bk skew srcA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr **
+    pipe_sharing_c (skewed_view bn bk skew srcB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
     pipe_live (skewed_view bn bk skew dstB) nthr tid
 {
   rewrite
-    (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr ktiles vkt tid)
+    (pipe_q_c m n k bm bn bk skew eA eB block_row block_col
+              sarA0 sarA1 sarB0 sarB1 nthr sq_bc vkt tid)
   as
-    (pipe_sharing (skewed_view bm bk skew srcA) nthr **
-     pipe_sharing (skewed_view bn bk skew srcB) nthr **
+    (pipe_sharing_c (skewed_view bm bk skew srcA)
+       (ematrix_subtile eA (SZ.v bm) (SZ.v bk) block_row vkt) nthr **
+     pipe_sharing_c (skewed_view bn bk skew srcB)
+       (ematrix_subtile eB (SZ.v bn) (SZ.v bk) block_col vkt) nthr **
      pipe_live (skewed_view bm bk skew dstA) nthr tid **
      pipe_live (skewed_view bn bk skew dstB) nthr tid);
 }
@@ -886,6 +1465,8 @@ fn fold_pending_g
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (srcA dstA : larray et_ab (SZ.v bm * ldt bk skew))
@@ -905,16 +1486,16 @@ fn fold_pending_g
      dstB == (if kt1 % 2 = 0 then sarB0 else sarB1) /\
      srcB == (if kt1 % 2 = 0 then sarB1 else sarB0)))
   requires
-    pending_body bm bn bk skew gA gB dstA srcA dstB srcB fA fB nthr tid block_row block_col
+    pending_body bm bn bk skew gA gB dstA srcA dstB srcB eA eB fA fB nthr tid block_row block_col
       b_c sq false kt1
   ensures
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1
+    pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1
 {
   rewrite
-    (pending_body bm bn bk skew gA gB dstA srcA dstB srcB fA fB nthr tid block_row block_col
+    (pending_body bm bn bk skew gA gB dstA srcA dstB srcB eA eB fA fB nthr tid block_row block_col
       b_c sq false kt1)
   as
-    (pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1);
+    (pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq kt1);
 }
 #pop-options
 
@@ -928,6 +1509,8 @@ let kcarry
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -941,7 +1524,7 @@ let kcarry
 = if vkt < SZ.v k / SZ.v bk then
     (exists* (b_c b_l : PC.pipeline_batch_t).
       PC.batch_committed b_c ** PC.batch_live b_l **
-      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
+      pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
   else
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
@@ -954,6 +1537,8 @@ fn unfold_kcarry_live
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -965,18 +1550,18 @@ fn unfold_kcarry_live
   (vkt : nat { vkt <= SZ.v k / SZ.v bk })
   (sq_lt : squash (vkt < SZ.v k / SZ.v bk))
   requires
-    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+    kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
   ensures
     exists* (b_c b_l : PC.pipeline_batch_t).
       PC.batch_committed b_c ** PC.batch_live b_l **
-      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+      pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
 {
   rewrite
-    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt)
+    (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt)
   as
     (exists* (b_c b_l : PC.pipeline_batch_t).
       PC.batch_committed b_c ** PC.batch_live b_l **
-      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
+      pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt);
 }
 
 ghost
@@ -986,6 +1571,8 @@ fn fold_kcarry_live
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -999,22 +1586,22 @@ fn fold_kcarry_live
   (sq_lt : squash (vkt < SZ.v k / SZ.v bk))
   requires
     PC.batch_committed b_c ** (exists* (bl : PC.pipeline_batch_t). PC.batch_live bl) **
-    pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
+    pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt
   ensures
-    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+    kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
 {
   with (b_l : PC.pipeline_batch_t). assert (PC.batch_live b_l);
   introduce
     exists* (c l : PC.pipeline_batch_t).
       PC.batch_committed c ** PC.batch_live l **
-      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt
+      pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt
   with b_c b_l;
   rewrite
     (exists* (c l : PC.pipeline_batch_t).
       PC.batch_committed c ** PC.batch_live l **
-      pending bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt)
+      pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col c sq vkt)
   as
-    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
+    (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
 }
 
 ghost
@@ -1024,6 +1611,8 @@ fn fold_kcarry_done
   (bm bn bk skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (sarA0 sarA1 : larray et_ab (SZ.v bm * ldt bk skew))
   (sarB0 sarB1 : larray et_ab (SZ.v bn * ldt bk skew))
   (fA fB : perm)
@@ -1039,14 +1628,14 @@ fn fold_kcarry_done
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) tid
   ensures
-    kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
+    kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
 {
   rewrite
     ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
      pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
             (SZ.v k / SZ.v bk - 1) tid)
   as
-    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
+    (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt);
 }
 #pop-options
 
@@ -1062,6 +1651,8 @@ let cstage
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -1073,7 +1664,7 @@ let cstage
   : slprop
 = if vkt + 1 < SZ.v k / SZ.v bk then
     PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
-    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+    staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
   else
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
@@ -1089,6 +1680,8 @@ fn fold_cstage_stage
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -1100,16 +1693,16 @@ fn fold_cstage_stage
   (sq_stg : squash (vkt + 1 < SZ.v k / SZ.v bk))
   requires
     PC.batch_committed b_l ** PC.batch_live b_l' **
-    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+    staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
   ensures
-    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+    cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
 {
   introduce exists* (bl : PC.pipeline_batch_t). PC.batch_live bl with b_l';
   rewrite
     (PC.batch_committed b_l ** (exists* (bl : PC.pipeline_batch_t). PC.batch_live bl) **
-     staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1))
+     staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1))
   as
-    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt);
+    (cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt);
 }
 
 ghost
@@ -1121,6 +1714,8 @@ fn fold_cstage_nostage
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -1136,7 +1731,7 @@ fn fold_cstage_nostage
     pipe_live (skewed_view bn bk skew dstB) nthr tid **
     PC.batch_live b_l
   ensures
-    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+    cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
 {
   rewrite
     ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
@@ -1144,7 +1739,7 @@ fn fold_cstage_nostage
      pipe_live (skewed_view bn bk skew dstB) nthr tid **
      PC.batch_live b_l)
   as
-    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt);
+    (cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt);
 }
 
 ghost
@@ -1156,6 +1751,8 @@ fn unfold_cstage_stage
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -1166,16 +1763,16 @@ fn unfold_cstage_stage
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   (sq_stg : squash (vkt + 1 < SZ.v k / SZ.v bk))
   requires
-    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+    cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
   ensures
     PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
-    staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
+    staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
 {
   rewrite
-    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt)
+    (cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt)
   as
     (PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
-     staged_half bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col b_l sq (vkt + 1));
+     staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1));
 }
 
 ghost
@@ -1187,6 +1784,8 @@ fn unfold_cstage_nostage
   (#lB : layout2 (SZ.v n) (SZ.v k)) (gB : array2 et_ab lB)
   (dstA : larray et_ab (SZ.v bm * ldt bk skew))
   (dstB : larray et_ab (SZ.v bn * ldt bk skew))
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (fA fB : perm)
   (nthr : pos) (tid : natlt nthr)
   (block_row : nat { block_row < SZ.v m / SZ.v bm })
@@ -1197,7 +1796,7 @@ fn unfold_cstage_nostage
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   (sq_nostg : squash (~(vkt + 1 < SZ.v k / SZ.v bk)))
   requires
-    cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt
+    cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
   ensures
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
@@ -1205,12 +1804,137 @@ fn unfold_cstage_nostage
     PC.batch_live b_l
 {
   rewrite
-    (cstage bm bn bk skew gA gB dstA dstB fA fB nthr tid block_row block_col sq b_l vkt)
+    (cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt)
   as
     ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
      pipe_live (skewed_view bm bk skew dstA) nthr tid **
      pipe_live (skewed_view bn bk skew dstB) nthr tid **
      PC.batch_live b_l);
+}
+#pop-options
+
+
+(* ---- k-loop accumulator advance/collapse (pure/ghost).  The accumulator
+   invariant is keyed on [__gmatmul_single ... vkt]; each iteration advances it
+   by the block-warp matmul [subproducts_buf] produced, and at loop exit it
+   collapses to [warp_matmul].  Mirrors To.KLoop's [k_loop_step]/[compute_acc]
+   exit, but with tiling granularity [bk] (not the fragment [tk]). ---- *)
+
+(* nested-subtile identity: the block-then-warp subtile equals the global-warp
+   subtile at the composed index (A: row composition; B: col composition after
+   [mtranspose_subtile]). *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 40"
+let kloop_acc_identity
+  (#m #n #k : nat) (bm bn bk wm wn : pos)
+  (rA : chest2 real m k) (rB : chest2 real n k)
+  (block_row block_col warp_m warp_n grow gcol vkt : nat)
+  (sq : squash (
+     bm /? m /\ bn /? n /\ bk /? k /\ wm /? bm /\ wn /? bn /\
+     block_row < m / bm /\ block_col < n / bn /\
+     warp_m < bm / wm /\ warp_n < bn / wn /\ vkt < k / bk /\
+     grow == block_row * (bm / wm) + warp_m /\
+     gcol == block_col * (bn / wn) + warp_n))
+  : Lemma (
+      matmul (ematrix_subtile (ematrix_subtile rA bm bk block_row vkt) wm bk warp_m 0)
+             (ematrix_subtile (mtranspose (ematrix_subtile rB bn bk block_col vkt)) bk wn 0 warp_n)
+      ==
+      matmul (ematrix_subtile rA wm bk grow vkt)
+             (ematrix_subtile (mtranspose rB) bk wn vkt gcol))
+= lemma_tile_index_bound m bm wm block_row warp_m;
+  lemma_tile_index_bound n bn wn block_col warp_n;
+  ematrix_subtile_compose rA bm bk wm bk block_row vkt warp_m 0 grow vkt ();
+  ematrix_subtile_compose (mtranspose rB) bk bn bk wn vkt block_col 0 warp_n vkt gcol ()
+
+#pop-options
+
+(* one k-tile: advance the [__gmatmul_single ... vkt] accumulator to [vkt+1]. *)
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
+noextract
+ghost
+fn kloop_acc_step
+  (#et_acc : Type0) {| scalar et_acc |} {| real_like et_acc |}
+  (#m #n #k : nat) (bm bn bk wm wn : pos)
+  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
+  (rA : chest2 real m k) (rB : chest2 real n k)
+  (block_row block_col warp_m warp_n grow gcol vkt : nat)
+  (sq : squash (
+     length accFrags == (wm / frag) * (wn / frag) /\
+     frag /? wm /\ frag /? wn /\
+     bm /? m /\ bn /? n /\ bk /? k /\ wm /? bm /\ wn /? bn /\
+     block_row < m / bm /\ block_col < n / bn /\
+     warp_m < bm / wm /\ warp_n < bn / wn /\ vkt < k / bk /\
+     grow == block_row * (bm / wm) + warp_m /\
+     gcol == block_col * (bn / wn) + warp_n))
+  requires
+    fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+      (matplus
+        (__gmatmul_single (const _ 0.0R) matmul matplus
+           (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol vkt)
+        (matmul (ematrix_subtile (ematrix_subtile rA bm bk block_row vkt) wm bk warp_m 0)
+                (ematrix_subtile (mtranspose (ematrix_subtile rB bn bk block_col vkt)) bk wn 0 warp_n)))
+  ensures
+    fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+      (__gmatmul_single (const _ 0.0R) matmul matplus
+         (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (vkt + 1))
+{
+  lemma_tile_index_bound m bm wm block_row warp_m;
+  lemma_tile_index_bound n bn wn block_col warp_n;
+  kloop_acc_identity bm bn bk wm wn rA rB block_row block_col warp_m warp_n grow gcol vkt ();
+  subproducts_step_eq #m #k #n wm bk wn () (const _ 0.0R) rA (mtranspose rB) grow gcol vkt;
+  unfold fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+    (matplus
+      (__gmatmul_single (const _ 0.0R) matmul matplus
+         (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol vkt)
+      (matmul (ematrix_subtile (ematrix_subtile rA bm bk block_row vkt) wm bk warp_m 0)
+              (ematrix_subtile (mtranspose (ematrix_subtile rB bn bk block_col vkt)) bk wn 0 warp_n)));
+  fold fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+    (__gmatmul_single (const _ 0.0R) matmul matplus
+       (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (vkt + 1));
+}
+#pop-options
+
+(* loop exit: collapse [__gmatmul_single ... (k/bk)] to [warp_matmul]. *)
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 40"
+noextract
+ghost
+fn kloop_acc_collapse
+  (#et_acc : Type0) {| scalar et_acc |} {| real_like et_acc |}
+  (#m #n #k : nat) (bm bn bk wm wn : pos)
+  (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
+  (rA : chest2 real m k) (rB : chest2 real n k)
+  (grow gcol : nat)
+  (sq : squash (
+     length accFrags == (wm / frag) * (wn / frag) /\
+     frag /? wm /\ frag /? wn /\ wm /?+ m /\ wn /?+ n /\ bk /? k /\ k > 0 /\
+     grow < m / wm /\ gcol < n / wn))
+  requires
+    fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+      (__gmatmul_single (const _ 0.0R) matmul matplus
+         (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (k / bk))
+  ensures
+    fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+      (warp_matmul rA rB wm wn grow gcol)
+{
+  matmul_tiles_lemma (fun _ -> ()) (fun _ _ _ -> ())
+    #m #n #k wm wn bk (const _ 0.0R) rA (mtranspose rB) grow gcol;
+  // matmul_tiles_lemma gives (in gmatmul_single form, unfolds to __gmatmul_single ...(k/bk)):
+  //   __gmatmul...(k/bk) == matplus (const 0) (matmul A' B')
+  //     with A' = ematrix_subtile rA wm k grow 0, B' = ematrix_subtile (mtranspose rB) k wn 0 gcol
+  // matplus (const 0) X == X (equal + ext SMTPat):
+  assert pure (matplus (const _ 0.0R)
+      (matmul (ematrix_subtile rA wm k grow 0) (ematrix_subtile (mtranspose rB) k wn 0 gcol))
+      `equal`
+      (matmul (ematrix_subtile rA wm k grow 0) (ematrix_subtile (mtranspose rB) k wn 0 gcol)));
+  // warp_matmul rA rB wm wn grow gcol == matmul A' (mtranspose (ematrix_subtile rB wn k gcol 0))
+  //   and mtranspose_subtile (SMTPat) turns the second factor into B'.  Chain everything:
+  assert pure (__gmatmul_single (const _ 0.0R) matmul matplus
+      (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (k / bk)
+      == warp_matmul rA rB wm wn grow gcol);
+  unfold fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+    (__gmatmul_single (const _ 0.0R) matmul matplus
+       (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (k / bk));
+  fold fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags
+    (warp_matmul rA rB wm wn grow gcol);
 }
 #pop-options
 
@@ -1221,6 +1945,7 @@ fn kloop
   (#et_ab #et_acc : Type0)
   {| _sab : scalar et_ab |} {| _vab : has_vec_cpy et_ab |}
   {| _sac : scalar et_acc |} {| _vac : has_vec_cpy et_acc |}
+  {| _rab : real_like et_ab |} {| _rac : real_like et_acc |}
   (#m #n #k : szp)
   (bm bn bk wm wn skew : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| _clA : T.ctlayout lA |}
@@ -1242,6 +1967,10 @@ fn kloop
   (block_col : szlt (SZ.v n / SZ.v bn))
   (warp_m : szlt (SZ.v bm / SZ.v wm))
   (warp_n : szlt (SZ.v bn / SZ.v wn))
+  (rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
+  (rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
+  (grow : erased nat { reveal grow < SZ.v m / SZ.v wm })
+  (gcol : erased nat { reveal gcol < SZ.v n / SZ.v wn })
   (a_t_row a_t_col a_row_step a_iters : SZ.t)
   (b_t_row b_t_col b_row_step b_iters : SZ.t)
   (sq_c : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
@@ -1274,13 +2003,22 @@ fn kloop
      valid_frag_et_comb et_ab et_acc /\
      SZ.fits (SZ.v wm / frag * (SZ.v wn / frag)) /\
      length accFrags == acc_len wm wn))
+  (sq_bc : squash (SZ.v bm > 0 /\ SZ.v bm /? SZ.v m /\ SZ.v bn > 0 /\ SZ.v bn /? SZ.v n /\
+                   SZ.v bk > 0 /\ SZ.v bk /? SZ.v k))
+  (sq_gc : squash (
+     reveal grow == SZ.v block_row * (SZ.v bm / SZ.v wm) + SZ.v warp_m /\
+     reveal gcol == SZ.v block_col * (SZ.v bn / SZ.v wn) + SZ.v warp_n))
+  (sq_pc : squash (SZ.v k > 0 /\ frag /?+ SZ.v wm /\ frag /?+ SZ.v wn /\
+                   SZ.v wm /?+ SZ.v m /\ SZ.v wn /?+ SZ.v n))
+  (fmap_id : squash (forall (x : et_ab). fmap x == x))
   ()
   preserves gpu
   preserves thread_id (SZ.v nthr) (SZ.v tid)
-  preserves live accFrags
   preserves B.barrier_tok
-    (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk))
+    (pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+       sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc)
   requires
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags (const _ 0.0R) **
     (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     B.barrier_state 0 **
     pipe_live (skewed_view bm bk skew sarA0) (SZ.v nthr) (SZ.v tid) **
@@ -1288,6 +2026,8 @@ fn kloop
     pipe_live (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid) **
     pipe_live (skewed_view bn bk skew sarB1) (SZ.v nthr) (SZ.v tid)
   ensures
+    fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+      (warp_matmul rA rB (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)) **
     (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
@@ -1313,6 +2053,7 @@ fn kloop
   unfold (FB.live_strided_chunks (skewed_view bn bk skew sarB0) (SZ.v nthr) (SZ.v tid));
   with emBd0. assert (FB.own_strided_chunks (skewed_view bn bk skew sarB0) emBd0 (SZ.v nthr) (SZ.v tid));
 
+  P.chunk_divides_ldt et_ab et_acc bm bn bk wm wn skew;
   lemma_subtile_aligned lA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v 0sz) (SZ.v (chunk et_ab));
   lemma_subtile_aligned lB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v 0sz) (SZ.v (chunk et_ab));
   lemma_aligned_srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz (SZ.v (chunk et_ab));
@@ -1341,12 +2082,45 @@ fn kloop
   rewrite each tileB0 as array2_subtile gB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v 0sz);
 
 
-  fold_pending_even bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+  fold_pending_even bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 eA eB fA fB
     (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) b0 () 0;
 
   (* ---- fold the prologue's [pending 0] + batches into the loop carry ---- *)
-  fold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+  fold_kcarry_live bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB
     (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () 0 b0 ();
+
+  (* ---- accumulator: reindex the (zeroed) fragments as the empty partial
+     ([__gmatmul_single ... 0] over the (wm,bk)x(bk,wn) tilings).  The requires
+     hands us [const 0] at the [(wm/frag)*frag] shape forced by
+     [fragarrayAcc_approximates]; bridge it to a [wm]-shaped zero [rAcc0] (a
+     subtile of a constant is the constant tile, so the pure content-facts are
+     preserved across the shape mismatch), then rewrite by the zero-lemma. ---- *)
+  frag_div_mul (SZ.v wm);
+  frag_div_mul (SZ.v wn);
+  unfold fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags (const _ 0.0R);
+  Kuiper.Spec.GEMM.__gmatmul_single_zero_lemma (const _ 0.0R) matmul matplus
+    (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+    (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+    (reveal grow) (reveal gcol);
+  (* the zeroed [__gmatmul_single ... 0] and the WMP-shaped [const 0] have the
+     same per-tile content (all zero), so [fragarrayAcc]'s content-facts carry
+     across; make the tile equality explicit so the fold discharges. *)
+  assert pure (forall (i : natlt (SZ.v wm / frag)) (j : natlt (SZ.v wn / frag)).
+    ematrix_subtile
+      (__gmatmul_single (const _ 0.0R) matmul matplus
+         (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+         (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+         (reveal grow) (reveal gcol) 0)
+      frag frag i j
+    `equal`
+    ematrix_subtile
+      (const _ 0.0R <: chest2 real ((SZ.v wm / frag) * frag) ((SZ.v wn / frag) * frag))
+      frag frag i j);
+  fold fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+    (__gmatmul_single (const _ 0.0R) matmul matplus
+       (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+       (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+       (reveal grow) (reveal gcol) 0);
 
   let mut idx = 0sz;
   FStar.Math.Lemmas.lemma_div_le (SZ.v bk) (SZ.v k) (SZ.v bk);
@@ -1364,10 +2138,16 @@ fn kloop
       exists* (vkt : SZ.t { SZ.v vkt <= SZ.v k / SZ.v bk }).
         gpu ** thread_id (SZ.v nthr) (SZ.v tid) **
         B.barrier_tok
-          (pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)) **
+          (pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+             sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc) **
         B.barrier_state (SZ.v vkt) **
-        live aFrags ** live bFrags ** live accFrags **
-        kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+        live aFrags ** live bFrags **
+        fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+          (__gmatmul_single (const _ 0.0R) matmul matplus
+             (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+             (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+             (reveal grow) (reveal gcol) (SZ.v vkt)) **
+        kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
           (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt) **
         (idx |-> vkt)
     decreases (SZ.v num_k_tiles - SZ.v !idx)
@@ -1399,10 +2179,10 @@ fn kloop
       dstB == (if SZ.v vkt % 2 = 0 then sarB1 else sarB0));
 
     (* ---- ghost: expose the current-tile pledge over [src*]/[dst*] ---- *)
-    unfold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+    unfold_kcarry_live bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB
       (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt) ();
     with b_c b_l. _;
-    unfold_pending_g bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
+    unfold_pending_g bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
       (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_c) () (SZ.v vkt) ();
 
     (* ---- CONCRETE: __pipeline_wait_prior(0) then redeem the staged pledge ---- *)
@@ -1410,20 +2190,28 @@ fn kloop
     PC.pipeline_wait_all_prior #bd;
     redeem_pledge emp_inames (PC.batch_done bd) _;
     drop_ (PC.batch_done bd);
-    restore_globals bm bn bk gA gB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
-    fold (pipe_live (skewed_view bm bk skew srcA) (SZ.v nthr) (SZ.v tid));
-    fold (pipe_live (skewed_view bn bk skew srcB) (SZ.v nthr) (SZ.v tid));
+    restore_globals bm bn bk gA gB eA eB fA fB (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt);
+    fold (pipe_live_c (skewed_view bm bk skew srcA)
+            (ematrix_subtile eA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v vkt)) (SZ.v nthr) (SZ.v tid));
+    fold (pipe_live_c (skewed_view bn bk skew srcB)
+            (ematrix_subtile eB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v vkt)) (SZ.v nthr) (SZ.v tid));
 
     (* ---- CONCRETE: __syncthreads() (barrier) advancing the pipe contract ---- *)
-    fold_pipe_p_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
-    rewrite (pipe_p bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
-      as ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rin (SZ.v vkt) (SZ.v tid));
+    fold_pipe_p_g m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+      sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
+      (SZ.v nthr) (SZ.v vkt) (SZ.v tid) sq_bc ();
+    rewrite (pipe_p_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+               sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc (SZ.v vkt) (SZ.v tid))
+      as ((pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+             sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc).B.rin (SZ.v vkt) (SZ.v tid));
     B.barrier_wait () #_ #_ #(SZ.v vkt) #(SZ.v tid);
-    rewrite ((pipe_contract bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)).B.rout (SZ.v vkt) (SZ.v tid))
-      as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid));
-    unfold_pipe_q_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
-      (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
+    rewrite ((pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+                sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc).B.rout (SZ.v vkt) (SZ.v tid))
+      as (pipe_q_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+            sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) sq_bc (SZ.v vkt) (SZ.v tid));
+    unfold_pipe_q_g m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+      sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
+      (SZ.v nthr) (SZ.v vkt) (SZ.v tid) sq_bc ();
 
     (* ---- the ONLY copy of the staging code: guarded on [kt+1 < ktiles] ---- *)
     if (kt1 <^ num_k_tiles) {
@@ -1431,20 +2219,42 @@ fn kloop
         nthr tid block_row block_col
         a_t_row a_t_col a_row_step a_iters b_t_row b_t_col b_row_step b_iters
         ldsz kt1 (reveal b_l) () () () () () () ();
-      rewrite (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+      rewrite (staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB (SZ.v nthr) (SZ.v tid)
                 (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v kt1))
-        as (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+        as (staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB (SZ.v nthr) (SZ.v tid)
                 (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1));
-      fold_cstage_stage bm bn bk skew gA gB dstA dstB fA fB
+      fold_cstage_stage bm bn bk skew gA gB dstA dstB eA eB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) b_l2 (SZ.v vkt) ();
     } else {
-      fold_cstage_nostage bm bn bk skew gA gB dstA dstB fA fB
+      fold_cstage_nostage bm bn bk skew gA gB dstA dstB eA eB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
     };
 
     (* ---- the ONLY copy of the fragment math, over the read buffer [src*] ---- *)
+    lemma_subtile_approx eA rA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v vkt) ();
+    lemma_subtile_approx eB rB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v vkt) ();
     subproducts_buf bm bn bk wm wn skew srcA srcB fmap nthr warp_m warp_n ldsz
-      aFrags bFrags accFrags () () ();
+      aFrags bFrags accFrags
+      (ematrix_subtile rA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v vkt))
+      (ematrix_subtile rB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v vkt))
+      (__gmatmul_single (const _ 0.0R) matmul matplus
+         (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+         (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+         (reveal grow) (reveal gcol) (SZ.v vkt))
+      () () () ();
+    (* advance the [__gmatmul_single ... vkt] accumulator to [vkt+1]. *)
+    acc_len_reveal wm wn;
+    kloop_acc_step (SZ.v bm) (SZ.v bn) (SZ.v bk) (SZ.v wm) (SZ.v wn) accFrags
+      rA rB (SZ.v block_row) (SZ.v block_col) (SZ.v warp_m) (SZ.v warp_n)
+      (reveal grow) (reveal gcol) (SZ.v vkt) ();
+    (* forget the read buffer's published content: the reconciled loop carry
+       ([pending]/[pipe_q]) uses the content-free [pipe_sharing]. *)
+    unfold (pipe_sharing_c (skewed_view bm bk skew srcA)
+              (ematrix_subtile eA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v vkt)) (SZ.v nthr));
+    fold (pipe_sharing (skewed_view bm bk skew srcA) (SZ.v nthr));
+    unfold (pipe_sharing_c (skewed_view bn bk skew srcB)
+              (ematrix_subtile eB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v vkt)) (SZ.v nthr));
+    fold (pipe_sharing (skewed_view bn bk skew srcB) (SZ.v nthr));
 
     (* ---- ghost: reconcile the guard output back into the loop carry ---- *)
     sel_flip (SZ.v vkt) sarA0 sarA1;
@@ -1458,18 +2268,20 @@ fn kloop
       dstB == (if (SZ.v vkt + 1) % 2 = 0 then sarB0 else sarB1) /\
       srcB == (if (SZ.v vkt + 1) % 2 = 0 then sarB1 else sarB0));
     if (kt1 <^ num_k_tiles) {
-      unfold_cstage_stage bm bn bk skew gA gB dstA dstB fA fB
+      unfold_cstage_stage bm bn bk skew gA gB dstA dstB eA eB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
-      unfold (staged_half bm bn bk skew gA gB dstA dstB fA fB (SZ.v nthr) (SZ.v tid)
+      unfold (staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB (SZ.v nthr) (SZ.v tid)
                 (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1));
-      fold_pending_g bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
+      fold_pending_g bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) (reveal b_l) () (SZ.v vkt + 1) ();
-      fold_kcarry_live bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+      fold_kcarry_live bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1) (reveal b_l) ();
     } else {
       assert pure (SZ.v num_k_tiles == SZ.v k / SZ.v bk);
       assert pure (SZ.v kt1 == SZ.v vkt + 1 /\ SZ.v vkt < SZ.v k / SZ.v bk);
-      unfold_cstage_nostage bm bn bk skew gA gB dstA dstB fA fB
+      assert pure (SZ.v kt1 >= SZ.v num_k_tiles);
+      assert pure (SZ.v kt1 == SZ.v k / SZ.v bk);
+      unfold_cstage_nostage bm bn bk skew gA gB dstA dstB eA eB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
       fold_pipe_q_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
         (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
@@ -1478,24 +2290,38 @@ fn kloop
         as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) (SZ.v tid));
       with lb. assert (PC.batch_live lb);
       drop_ (PC.batch_live lb);
-      fold_kcarry_done bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB
+      fold_kcarry_done bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1) ();
     };
     rewrite
-      (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+      (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
         (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1))
     as
-      (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+      (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
         (SZ.v block_row) (SZ.v block_col) () (SZ.v kt1));
+    rewrite
+      (fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+        (__gmatmul_single (const _ 0.0R) matmul matplus
+           (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+           (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+           (reveal grow) (reveal gcol) (SZ.v vkt + 1)))
+    as
+      (fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+        (__gmatmul_single (const _ 0.0R) matmul matplus
+           (ematrix_tiled rA (SZ.v wm) (SZ.v bk))
+           (ematrix_tiled (mtranspose rB) (SZ.v bk) (SZ.v wn))
+           (reveal grow) (reveal gcol) (SZ.v kt1)));
     rewrite (B.barrier_state (SZ.v vkt + 1)) as (B.barrier_state (SZ.v kt1));
     idx := !idx +^ 1sz;
   };
 
   (* ---- loop exit: [vkt == ktiles], so [kcarry] is its "done" branch ---- *)
   with vkt. assert (idx |-> vkt);
+  assert pure (SZ.v num_k_tiles == SZ.v k / SZ.v bk);
+  assert pure (SZ.v vkt >= SZ.v num_k_tiles /\ SZ.v vkt <= SZ.v k / SZ.v bk);
   assert pure (SZ.v vkt == SZ.v k / SZ.v bk);
   rewrite
-    (kcarry bm bn bk skew gA gB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
+    (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
       (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt))
   as
     ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
@@ -1503,6 +2329,10 @@ fn kloop
             (SZ.v k / SZ.v bk - 1) (SZ.v tid));
   rewrite (B.barrier_state (SZ.v vkt))
     as (B.barrier_state (SZ.v k / SZ.v bk));
+  (* collapse the accumulator [__gmatmul_single ... (k/bk)] to [warp_matmul]. *)
+  acc_len_reveal wm wn;
+  kloop_acc_collapse (SZ.v bm) (SZ.v bn) (SZ.v bk) (SZ.v wm) (SZ.v wn) accFrags
+    rA rB (reveal grow) (reveal gcol) ();
   with va. assert (aFrags |-> va);
   drop_ (aFrags |-> va);
   with vb. assert (bFrags |-> vb);
