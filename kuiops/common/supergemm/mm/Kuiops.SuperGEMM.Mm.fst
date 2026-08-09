@@ -31,7 +31,7 @@ fn supergemm_mm_async
   {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
   {| scalar et_acc, has_vec_cpy et_acc, real_like et_acc |}
   {| scalar et_d,  has_vec_cpy et_d,  real_like et_d |}
-  (bm bn bk wm wn skew : szp)
+  (bm bn bk wm wn skew group : szp)
   (#sqc : squash (P.constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_vf : squash (valid_frag_et_dims et_ab FragA frag frag frag /\
                 valid_frag_et_dims et_ab FragB frag frag frag /\
@@ -86,7 +86,7 @@ fn supergemm_mm_async
   launch (
     mk_kernel
       gA #eA gB #eB gD post_map
-      bm bn bk wm wn skew
+      bm bn bk wm wn skew group
       fA fB nblk nthr ()
   ) s;
 }

@@ -500,6 +500,12 @@ _MAX_THREADS = 1024
 _PREFERRED_WARPS = 8
 _MAX_BLOCKS = 2097152
 _WARP = 32
+
+# SuperGEMM's L2 block-index swizzle groups consecutively scheduled blocks into
+# strips this many block-rows tall, so a scheduling wave reuses B columns out of
+# L2. It is a pure permutation -- legal for every value, and clamped internally
+# when it exceeds the grid's block-row count -- so it never constrains tiling.
+_SUPERGEMM_GROUP = 8
 _FRAG = 16   # the sm_80/sm_86 WMMA shape, 16x16x16
 
 # The GEMM operands are copied through `has_vec_cpy`, which exists for these
@@ -691,7 +697,8 @@ def _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K):
                             continue
                         inner.append(
                             ((abs(warps - _PREFERRED_WARPS), -wn),
-                             dict(bm=bm, bn=bn, bk=bk, wm=wm, wn=wn, skew=skew)))
+                             dict(bm=bm, bn=bn, bk=bk, wm=wm, wn=wn, skew=skew,
+                                  group=_SUPERGEMM_GROUP)))
                 inner.sort(key=lambda w: w[0])
                 tiles.extend(t for _, t in inner)
     return tiles

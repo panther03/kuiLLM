@@ -61,7 +61,7 @@ let {{ name }} (rows cols shared : szp)
     (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
     (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD }) =
     supergemm_mm_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz
+        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz
         (fcast #({{ acc_et }}) #({{ out_et }}))
         (fun (r:real) -> r)
         rows shared cols gA gB gD
