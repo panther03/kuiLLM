@@ -24,6 +24,17 @@ module Kuiops.SuperGEMM.Mm.Epilogue
    Step 1: memory safety only.  All data values are existentially quantified;
    the post merely re-establishes ownership of D, the scratch and the fragments.
 
+   Step 6: functional.  On entry [fragarrayAcc_approximates] states the
+   accumulator fragments approximate the warp's real tile [rAcc]; on exit
+   [output_lane_approximates'] states the lane's D cells approximate
+   [post_map_r] of the matching cells of [rAcc].  The chain is: [mma_store]
+   copies each [frag x frag] accumulator fragment into a disjoint 16-column
+   slice of the fp32 band, so the band content approximates the [frag x wn]
+   row-band of [rAcc]; the vectorized drain writes [post_map] of that band into
+   D, and [post_map %~ post_map_r] carries the approximation through the cast.
+   The accumulator's [frag x frag] tiling and the drain's [frag x wn] band
+   tiling differ, hence the [coerce_chest2_cols] on the post's real target.
+
    The lane's slice of D is [output_lane_live'] (the layout-generic version from
    [Kuiops.SuperGEMM.Mm.Output], identical to [Shared.kpre]/[kpost]) under the
    BAND tiling [tm = frag, tn = wn, wm = mfrag, wn = 1], so the drain's vec-group
@@ -46,8 +57,12 @@ open Kuiper.Tensor { array2, layout2 }
 open Kuiper.Array2.Strided
   { strided_row_major, cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live' }
+open Kuiper.TensorCore { FragAcc, FragLAcc, fragment }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
+open Kuiper.Chest { chest2, chest_map }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
 
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Shared { scratch_tile_live, shmems_desc }
@@ -56,35 +71,78 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
 
+(* Value-preserving coercion between two [chest2] column extents that are
+   provably equal.  The accumulator fragments are tiled [frag x frag]
+   ([nfrag wn] of them across a band), whereas the output drain tiles the same
+   warp tile into [frag x wn] bands.  [rAcc] therefore reaches the epilogue with
+   columns [nfrag wn * frag], but [output_lane_approximates'] indexes it with
+   [1 * wn]; both equal [wn]. *)
+inline_for_extraction noextract
+let coerce_chest2_cols (#et : Type) (#r #c1 #c2 : nat)
+  (_ : squash (c1 == c2)) (x : chest2 et r c1) : chest2 et r c2
+= coerce_eq () x
+
+(* Functional (approximation) counterpart of [output_lane_live']: instead of
+   merely re-establishing that the lane owns its output cells, it states that
+   for every [tm x tn] output fragment the lane holds cells [eD] that
+   approximate the matching subtile of the real target [rD].  This is the
+   layout-generic version of upstream
+   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.output_lane_approximates].
+
+   TODO(upstream): fold into [Kuiops.SuperGEMM.Mm.Output] beside
+   [output_lane_live'] once that module is upstreamed to [...To.KernelDesc]. *)
+let output_lane_approximates'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : nat)
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ m /\ bn /?+ n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (bid : natlt (m / bm * (n / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rD : chest2 real (wm * tm) (wn * tn))
+  : slprop
+= forall+ (mi : natlt wm) (nj : natlt wn).
+    exists* (eD : chest2 et tm tn).
+      own_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        eD (tid % warp_size) **
+      pure (eD %~ ematrix_subtile rD tm tn mi nj)
+
 inline_for_extraction noextract
 fn epilogue
   (#et_ab #et_acc #et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab,
-     scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
+     scalar et_acc, has_vec_cpy et_acc, real_like et_acc,
+     scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n : szp)
   (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (#_ : squash (mfrag wm * frag == SZ.v wm))
+  (#_ : squash (nfrag wn * frag == SZ.v wn))
   (nblk : szp { SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn) })
   (nthr : szp { SZ.v nthr == P.nthr bm bn wm wn })
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
-  (#fAcc : perm)
-  (#ems : erased (seq (value_for et_acc FragAcc frag frag frag)))
+  (rAcc : chest2 real (mfrag wm * frag) (nfrag wn * frag))
   (bid : szlt (SZ.v nblk))
   (tid : szlt (SZ.v nthr))
   (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
   ()
   preserves gpu
   preserves thread_id nthr (SZ.v tid)
-  preserves array_fragment_pts_to accFrags #fAcc ems
-  preserves output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid)
+  preserves fragarrayAcc_approximates (mfrag wm) (nfrag wn) accFrags rAcc
   preserves scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid)
   preserves pure (aligned 16 (T.core gD))
   preserves pure (aligned_strided_row_major (SZ.v (chunk et_d)) strD)
+  requires output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid)
+  ensures output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 (SZ.v bid) (SZ.v tid)
+    (coerce_chest2_cols #real #(mfrag wm * frag) #(nfrag wn * frag) #(1 * SZ.v wn) ()
+      (chest_map post_map_r rAcc))
