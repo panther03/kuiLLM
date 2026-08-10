@@ -1070,6 +1070,9 @@ let kpost1_sendable
       #(is_send_across_star pAlignedB pAlignedD #sendAlignedB #sendAlignedD) in
   (* Now the functional output tile and its sendability. *)
   let rD = lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid in
+  (* prime [mfrag wm * frag == wm] so the sendable squash's [mfrag wm*frag /?+ bm]
+     reduces to [wm /?+ bm] (Z3 will not derive the divides-exact nonlinearly). *)
+  FStar.Math.Lemmas.lemma_div_exact (SZ.v wm) frag;
   let output_send =
     output_lane_approximates_sendable' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 #_
       nblk nthr bid tid rD in

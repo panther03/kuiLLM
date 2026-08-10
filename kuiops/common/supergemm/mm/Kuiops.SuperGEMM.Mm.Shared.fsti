@@ -265,8 +265,11 @@ let grow_bound (m bm wm block_row warp_m : nat)
 (* The per-lane real output target keyed off [bid]/[tid], in [warp_matmul]
    form: decode the row-major block index and the warp index, then name the
    corresponding [(wm x wn)] tile of [A @ B^T] post-mapped by [post_map_r].
-   [coerce_eq] reshapes [(wm, wn)] to the epilogue's [(mfrag wm * frag,
-   1 * wn)] output tiling; both are [== SZ.v wm]/[== SZ.v wn].  This is exactly
+   The [warp_matmul] is built at the epilogue's reshaped output dims
+   [(mfrag wm * frag, nfrag wn * frag)] (both [== SZ.v wm]/[== SZ.v wn]) so the
+   [chest_map] here is at the SAME shape the [Epilogue] maps over -- that makes
+   the [kf] fold a plain congruence rather than a coerce-commute.  [coerce_eq]
+   only reshapes the column count [nfrag wn * frag == 1 * wn].  This is exactly
    the [rD] the [Epilogue] produces (with [rAcc = warp_matmul ...]); [kf] binds
    the two together at the fold. *)
 let lane_target
@@ -298,7 +301,8 @@ let lane_target
   Kuiper.Divides.lemma_divides_trans (SZ.v wn) (SZ.v bn) (SZ.v n);
   let grow : natlt (SZ.v m / SZ.v wm) = block_row * (SZ.v bm / SZ.v wm) + warp_m in
   let gcol : natlt (SZ.v n / SZ.v wn) = block_col * (SZ.v bn / SZ.v wn) + warp_n in
-  coerce_eq () (chest_map post_map_r (warp_matmul rA rB (SZ.v wm) (SZ.v wn) grow gcol))
+  coerce_eq () (chest_map post_map_r
+    (warp_matmul rA rB (mfrag wm * frag) (nfrag wn * frag) grow gcol))
 
 (* On exit the A/B global read shares are pinned back to [eA]/[eB]: the
    pipelined staging path ([kloop]) is a READ, so [array2_vec_cpy_pipelined]
