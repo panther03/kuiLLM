@@ -68,12 +68,24 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
     the first case still climbing, which read 6x slow on a 35us kernel and made
     the first row of the table meaningless.
 
+    Even with both of those, the *whole* first case still read slow -- the dummy
+    ``torch.mm`` load ramps the clocks but does not prime the contenders' own
+    code paths (module load, shared-memory carveout, first-launch JIT), and on a
+    ~40us kernel that residue was a 25% error, large enough to look like a real
+    regression. The first case is therefore run once and discarded before any
+    timing is taken.
+
     Returns a ``pandas.DataFrame``, one row per case.
     """
     import pandas as pd
 
     warm_up(warmup_ms)
     contenders = list(impls) + [("ref", reference)]
+    if cases:
+        prime_args, prime_kwargs = make_inputs(*cases[0][1:])
+        for _, fn in contenders:
+            time_call(lambda: fn(*prime_args, **prime_kwargs),
+                      iters=iters, warmup=warmup)
     rows = []
     for name, *data in cases:
         args, kwargs = make_inputs(*data)
