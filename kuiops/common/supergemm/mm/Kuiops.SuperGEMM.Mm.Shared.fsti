@@ -38,7 +38,11 @@ open Kuiper.Tensor.Tiling
 module SZ = Kuiper.SizeT
 
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live' }
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
+open Kuiper.Chest { chest_map }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
+open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q }
@@ -224,16 +228,115 @@ let kpre1
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
 
-(* On exit the A/B global read shares come back at an UNSPECIFIED chest: the
-   pipelined staging path ([kloop]) re-materialises each fractional share
-   through the [cp.async] batch pledge, which (in step 1, memory safety only)
-   does not track that a global read preserves content.  Pinning the chest to
-   [eA]/[eB] is deferred to the functional-spec step; hence the existentials.
-   [output_lane_live'] is likewise contents-unspecified. *)
+(* ---- functional output predicate + real target (step 6) ----
+
+   [output_lane_approximates'] is the functional counterpart of
+   [output_lane_live']: each lane owns cells [eD] that APPROXIMATE the matching
+   subtile of a real target [rD].  It is a verbatim copy of the definition the
+   [Epilogue] commits to in its [ensures]; [Shared] cannot import [Epilogue]
+   (that module imports this one), so the predicate is duplicated here and the
+   two are bridged by a trivial [==] lemma at the [kf] fold seam.
+
+   TODO(upstream): host this beside [output_lane_live'] in [Mm.Output] and have
+   both [Epilogue] and [Shared] import it, once the layering is upstreamed. *)
+let output_lane_approximates'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : nat)
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ m /\ bn /?+ n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (bid : natlt (m / bm * (n / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rD : chest2 real (wm * tm) (wn * tn))
+  : slprop
+= forall+ (mi : natlt wm) (nj : natlt wn).
+    exists* (eD : chest2 et tm tn).
+      own_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        eD (tid % warp_size) **
+      pure (eD %~ ematrix_subtile rD tm tn mi nj)
+
+(* ---- arithmetic support for [lane_target]'s tile-index bounds ---- *)
+
+(* [a < b*c ==> a/c < b]. *)
+let div_ub (a b c : nat)
+  : Lemma (requires c > 0 /\ a < b * c) (ensures a / c < b)
+= if a / c >= b then begin
+    FStar.Math.Lemmas.lemma_div_mod a c;
+    FStar.Math.Lemmas.lemma_mult_le_right c b (a / c)
+  end
+
+(* [wm | bm | m ==> m/wm == (m/bm)*(bm/wm)]. *)
+let div_compose (m bm wm : pos)
+  : Lemma (requires bm % wm == 0 /\ m % bm == 0)
+          (ensures m / wm == (m / bm) * (bm / wm))
+= let a = m / bm in let b = bm / wm in
+  FStar.Math.Lemmas.lemma_div_exact bm wm;
+  FStar.Math.Lemmas.lemma_div_exact m bm;
+  assert (m == a * (b * wm));
+  FStar.Math.Lemmas.paren_mul_right a b wm;
+  FStar.Math.Lemmas.cancel_mul_div (a * b) wm
+
+(* The combined warp-row index [block_row*(bm/wm)+warp_m] is a valid
+   [natlt (m/wm)] -- what [warp_matmul]'s [row] argument requires. *)
+let grow_bound (m bm wm block_row warp_m : nat)
+  : Lemma (requires wm > 0 /\ bm > 0 /\ m > 0 /\ bm % wm == 0 /\ m % bm == 0 /\
+                    block_row < m / bm /\ warp_m < bm / wm)
+          (ensures block_row * (bm / wm) + warp_m < m / wm)
+= div_compose m bm wm; let b = bm / wm in
+  FStar.Math.Lemmas.distributivity_add_left block_row 1 b;
+  FStar.Math.Lemmas.lemma_mult_le_right b (block_row + 1) (m / bm)
+
+(* The per-lane real output target keyed off [bid]/[tid], in [warp_matmul]
+   form: decode the row-major block index and the warp index, then name the
+   corresponding [(wm x wn)] tile of [A @ B^T] post-mapped by [post_map_r].
+   [coerce_eq] reshapes [(wm, wn)] to the epilogue's [(mfrag wm * frag,
+   1 * wn)] output tiling; both are [== SZ.v wm]/[== SZ.v wn].  This is exactly
+   the [rD] the [Epilogue] produces (with [rAcc = warp_matmul ...]); [kf] binds
+   the two together at the fold. *)
+let lane_target
+  (#m #n #k : szp)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
+  (post_map_r : real -> real)
+  (bm bn wm wn : szp)
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
+  (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (bid : natlt nblk) (tid : natlt nthr)
+  : chest2 real (mfrag wm * frag) (1 * SZ.v wn)
+=
+  let num_n = SZ.v n / SZ.v bn in
+  let block_row = bid / num_n in
+  let block_col = bid % num_n in
+  let wnn = SZ.v bn / SZ.v wn in
+  let wid = tid / warp_size in
+  let warp_m = wid / wnn in
+  let warp_n = wid % wnn in
+  div_ub bid (SZ.v m / SZ.v bm) num_n;
+  div_ub wid (SZ.v bm / SZ.v wm) wnn;
+  grow_bound (SZ.v m) (SZ.v bm) (SZ.v wm) block_row warp_m;
+  grow_bound (SZ.v n) (SZ.v bn) (SZ.v wn) block_col warp_n;
+  Kuiper.Divides.lemma_divides_trans (SZ.v wm) (SZ.v bm) (SZ.v m);
+  Kuiper.Divides.lemma_divides_trans (SZ.v wn) (SZ.v bn) (SZ.v n);
+  let grow : natlt (SZ.v m / SZ.v wm) = block_row * (SZ.v bm / SZ.v wm) + warp_m in
+  let gcol : natlt (SZ.v n / SZ.v wn) = block_col * (SZ.v bn / SZ.v wn) + warp_n in
+  coerce_eq () (chest_map post_map_r (warp_matmul rA rB (SZ.v wm) (SZ.v wn) grow gcol))
+
+(* On exit the A/B global read shares are pinned back to [eA]/[eB]: the
+   pipelined staging path ([kloop]) is a READ, so [array2_vec_cpy_pipelined]
+   hands the source cells back unchanged and each fractional share re-materialises
+   at the ORIGINAL chest.  The output tile is [output_lane_approximates'] against
+   [lane_target] -- each lane approximates the [(wm x wn)] tile of
+   [post_map (A @ B^T)] it computed. *)
 unfold
 let kpost1
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -242,18 +345,22 @@ let kpost1
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
                 frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') **
-  (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') **
-  output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid **
+= (gA |-> Frac (fA /. (nblk * nthr)) eA) **
+  (gB |-> Frac (fB /. (nblk * nthr)) eB) **
+  output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+    (lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid) **
   pure (aligned 16 (core gA)) **
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
@@ -284,11 +391,22 @@ let kpre
 = kpre1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
   shared_thread_live bm bn bk wm wn skew sh nthr tid
 
+(* The number of staged k-tiles, packaged as a [pos] whose positivity is
+   discharged ONCE here in a minimal context.  Kept a plain [let] (not
+   [unfold]) so it stays opaque inside [kpost]'s heavy VC: otherwise the
+   nonlinear [k / bk > 0] fact competes with [kpost1]'s (now functional)
+   divides obligations and only clears above our rlimit budget.  Used
+   verbatim everywhere the last-used k-tile count appears in the teardown. *)
+let last_ktiles (k bk : szp)
+  (_ : squash (SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
+  : y:pos{y == SZ.v k / SZ.v bk}
+= SZ.v k / SZ.v bk
+
 unfold
 let kpost
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -297,18 +415,21 @@ let kpost
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
-  shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid
+= kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid **
+  shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid
 
 (* ---- block-level pre/post (sh-free) and frame ---- *)
 
@@ -339,7 +460,7 @@ let block_pre
 unfold
 let block_post
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -348,17 +469,20 @@ let block_post
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
                 frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk)
   : slprop
 = forall+ (tid : natlt nthr).
-    kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid
+    kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid
 
 (* Dead skew-pad cells of the four A/B pipeline buffers and the scratch. *)
 let block_frame
@@ -417,7 +541,7 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -426,11 +550,14 @@ fn block_teardown
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
@@ -438,12 +565,12 @@ fn block_teardown
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid) **
+      kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_post gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
+    block_post gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid
 
 (* ---- block-sendability of the per-thread pre/post ----
    Needed to populate the [kpre_sendable] / [kpost_sendable] fields of
@@ -479,7 +606,7 @@ val kpre_sendable
 val kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -488,19 +615,22 @@ val kpost_sendable
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD { is_global gD })
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid)
+      (kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid)
 
 (* ---- shared-buffer 16-byte alignment (for cp.async in [kloop]) ----
    Each of the four pipeline buffers is a block array (by [c_shmems_inv]),

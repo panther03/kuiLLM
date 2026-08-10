@@ -566,7 +566,7 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -575,11 +575,14 @@ fn block_teardown
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
@@ -587,12 +590,12 @@ fn block_teardown
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid) **
+      kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_post gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid
+    block_post gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid
 {
   P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
   unfold (block_frame bm bn bk wm wn skew sh);
@@ -600,38 +603,38 @@ fn block_teardown
   (* Peel [kpost1] (= [block_post]) off from the shared final state. *)
   forevery_map #(natlt (SZ.v nthr))
     (fun tid ->
-      kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid)
+      kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid)
     (fun tid ->
-      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid **
-      shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
+      kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid **
+      shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid)
     fn tid {
-      unfold (kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid);
+      unfold (kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid);
     };
   forevery_unzip #(natlt (SZ.v nthr))
     (fun tid ->
-      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
-    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid);
+      kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid)
+    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid);
 
   (* Split [shared_thread_final] into the [pipe_q] product and the scratch. *)
   forevery_map #(natlt (SZ.v nthr))
-    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
+    (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid)
     (fun tid ->
       pipe_q bm bn bk skew
         (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
         (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) tid **
+        (SZ.v nthr) (last_ktiles k bk ()) (last_ktiles k bk () - 1) tid **
       scratch_tile_live bm bn bk wm wn skew sh nthr tid)
     fn tid {
-      unfold (shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid);
+      unfold (shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid);
     };
   forevery_unzip #(natlt (SZ.v nthr))
     (fun tid ->
       pipe_q bm bn bk skew
         (sar_a0 bm bn bk wm wn skew sh) (sar_a1 bm bn bk wm wn skew sh)
         (sar_b0 bm bn bk wm wn skew sh) (sar_b1 bm bn bk wm wn skew sh)
-        (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) tid)
+        (SZ.v nthr) (last_ktiles k bk ()) (last_ktiles k bk () - 1) tid)
     (fun tid -> scratch_tile_live bm bn bk wm wn skew sh nthr tid);
 
   (* Resolve the parity of the last-used k-tile and open each thread's
@@ -641,7 +644,7 @@ fn block_teardown
      the disjoint partition. *)
   P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
   gather_last_pipe_buffers bm bn bk wm wn skew nthr sh
-    (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) #();
+    (last_ktiles k bk ()) (last_ktiles k bk () - 1) #();
 
   gather_scratch_from_threads bm bn bk wm wn skew nthr sh;
   fold_live_c_shmem (fst (snd (snd (snd (snd sh)))));
@@ -875,6 +878,48 @@ let output_lane_live_sendable
   solve
 #pop-options
 
+(* Functional counterpart of [output_lane_live_sendable]: the extra
+   [pure (eD %~ ematrix_subtile rD ...)] is placeless, so the sendability
+   tactic ([solve]) discharges it the same way the live body is handled.  The
+   two [cancel_mul_div] calls line up [(wm*tm)/wm == tm] / [(wn*tn)/wn == tn]
+   for the fragment indices, mirroring [output_lane_approximates_sendable_to]. *)
+#push-options "--split_queries always"
+let output_lane_approximates_sendable'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : szp)
+  (#lD : layout2 (SZ.v m) (SZ.v n))
+  (gD : array2 et lD { is_global gD })
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ SZ.v m /\ bn /?+ SZ.v n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (nblk : szp{SZ.v nblk == SZ.v m / bm * (SZ.v n / bn)})
+  (nthr : szp{SZ.v nthr == bm / (wm * tm) * (bn / (wn * tn)) * warp_size})
+  (bid : natlt nblk)
+  (tid : natlt nthr)
+  (rD : chest2 real (wm * tm) (wn * tn))
+  : is_send_across block_of (output_lane_approximates' gD bm bn tm tn wm wn bid tid rD)
+=
+  FStar.Math.Lemmas.cancel_mul_div wm tm;
+  FStar.Math.Lemmas.cancel_mul_div wn tn;
+  let wid : natlt (bm / (wm * tm) * (bn / (wn * tn))) = tid / warp_size in
+  let lane : natlt warp_size = tid % warp_size in
+  assert_norm (
+    reveal (block_tile_idx_rows (SZ.v m) (SZ.v n) bm bn bid)
+      == bid / (SZ.v n / bn));
+  assert_norm (
+    reveal (block_tile_idx_cols (SZ.v m) (SZ.v n) bm bn bid)
+      == bid % (SZ.v n / bn));
+  assert_norm (
+    reveal (warp_tile_idx_rows bm bn (wm * tm) (wn * tn) wid)
+      == wid / (bn / (wn * tn)));
+  assert_norm (
+    reveal (warp_tile_idx_cols bm bn (wm * tm) (wn * tn) wid)
+      == wid % (bn / (wn * tn)));
+  assert (forall (mi : natlt wm) (nj : natlt wn).
+    is_global (output_fragment' gD bm bn tm tn wm wn bid wid mi nj));
+  solve
+#pop-options
+
 let kpre1_sendable
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
   (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
@@ -967,9 +1012,10 @@ let kpre_sendable
     (shared_thread_live bm bn bk wm wn skew sh nthr tid)
     #base_send #shared_send
 
+#push-options "--split_queries always"
 let kpost1_sendable
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -978,39 +1024,37 @@ let kpost1_sendable
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD { is_global gD })
+  (post_map_r : real -> real)
   (bm bn wm wn : szp)
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
                 frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of (
-      kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
+      kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid)
 =
-  let output_send =
-    output_lane_live_sendable gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 #_
-      nblk nthr bid tid in
-  let pA = (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') in
-  let pB = (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') in
-  let pOutput = output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid in
+  (* Bind the A/B global read shares and their sendability FIRST, in a context
+     free of the real-approximation facts: the [Frac (f /. (nblk*nthr))]
+     permission-positivity ([_ >. 0.0R]) is real-division arithmetic that Z3
+     only discharges cheaply when [rD]/[output_lane_approximates'] real facts
+     are not yet in scope (cf. the live [kpre1_sendable], which has none). *)
+  let pA = gA |-> Frac (fA /. (nblk * nthr)) eA in
+  let pB = gB |-> Frac (fB /. (nblk * nthr)) eB in
   let pAlignedA = pure (aligned 16 (core gA)) in
   let pAlignedB = pure (aligned 16 (core gB)) in
   let pAlignedD = pure (aligned 16 (core gD)) in
   let pPure = pAlignedA ** pAlignedB ** pAlignedD in
-  let ffA (eA' : chest2 et_ab (SZ.v m) (SZ.v k))
-    : is_send_across block_of (gA |-> Frac (fA /. (nblk * nthr)) eA') =
-    send_across_if_send_across_gpu (gA |-> Frac (fA /. (nblk * nthr)) eA')
-      (is_send_across_global_tensor gA #(fA /. (nblk * nthr)) eA') in
   let sendA : is_send_across block_of pA =
-    is_send_across_exists (fun eA' -> gA |-> Frac (fA /. (nblk * nthr)) eA') #ffA in
-  let ffB (eB' : chest2 et_ab (SZ.v n) (SZ.v k))
-    : is_send_across block_of (gB |-> Frac (fB /. (nblk * nthr)) eB') =
-    send_across_if_send_across_gpu (gB |-> Frac (fB /. (nblk * nthr)) eB')
-      (is_send_across_global_tensor gB #(fB /. (nblk * nthr)) eB') in
+    send_across_if_send_across_gpu pA
+      (is_send_across_global_tensor gA #(fA /. (nblk * nthr)) eA) in
   let sendB : is_send_across block_of pB =
-    is_send_across_exists (fun eB' -> gB |-> Frac (fB /. (nblk * nthr)) eB') #ffB in
+    send_across_if_send_across_gpu pB
+      (is_send_across_global_tensor gB #(fB /. (nblk * nthr)) eB) in
   let sendAlignedA : is_send_across block_of pAlignedA =
     is_send_across_placeless pAlignedA
       #(placeless_pure (aligned 16 (core gA))) in
@@ -1024,16 +1068,23 @@ let kpost1_sendable
     is_send_across_star pAlignedA (pAlignedB ** pAlignedD)
       #sendAlignedA
       #(is_send_across_star pAlignedB pAlignedD #sendAlignedB #sendAlignedD) in
+  (* Now the functional output tile and its sendability. *)
+  let rD = lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid in
+  let output_send =
+    output_lane_approximates_sendable' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 #_
+      nblk nthr bid tid rD in
+  let pOutput = output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid rD in
   let sendOutputPure =
     is_send_across_star pOutput pPure #output_send #sendPure in
   let sendBOutput =
     is_send_across_star pB (pOutput ** pPure) #sendB #sendOutputPure in
   is_send_across_star pA (pB ** pOutput ** pPure) #sendA #sendBOutput
+#pop-options
 
 let kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
-  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d |}
+  (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -1042,28 +1093,31 @@ let kpost_sendable
   (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD { is_global gD })
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (c_shmems_inv sh))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gD bm bn bk wm wn skew
-        fA fB nblk nthr sh bid tid)
+      (kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew
+        fA fB rA rB nblk nthr sh bid tid)
 =
   let base_send =
-    kpost1_sendable gA eA gB eB gD bm bn wm wn #_
-      fA fB nblk nthr bid tid in
+    kpost1_sendable gA eA gB eB gD post_map_r bm bn wm wn #_
+      fA fB rA rB nblk nthr bid tid in
   let shared_send =
-    shared_thread_final_sendable bm bn bk wm wn skew nthr sh #_ (SZ.v k / SZ.v bk) tid in
+    shared_thread_final_sendable bm bn bk wm wn skew nthr sh #_ (last_ktiles k bk ()) tid in
   is_send_across_star
-    (kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
-    (shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) tid)
+    (kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid)
+    (shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid)
     #base_send #shared_send
 
 #push-options "--split_queries always"
