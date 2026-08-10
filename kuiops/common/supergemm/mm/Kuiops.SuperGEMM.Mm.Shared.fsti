@@ -41,7 +41,7 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiper.Chest { chest_map }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual }
 open Kuiops.SuperGEMM.Mm.Params
@@ -228,35 +228,8 @@ let kpre1
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gD))
 
-(* ---- functional output predicate + real target (step 6) ----
-
-   [output_lane_approximates'] is the functional counterpart of
-   [output_lane_live']: each lane owns cells [eD] that APPROXIMATE the matching
-   subtile of a real target [rD].  It is a verbatim copy of the definition the
-   [Epilogue] commits to in its [ensures]; [Shared] cannot import [Epilogue]
-   (that module imports this one), so the predicate is duplicated here and the
-   two are bridged by a trivial [==] lemma at the [kf] fold seam.
-
-   TODO(upstream): host this beside [output_lane_live'] in [Mm.Output] and have
-   both [Epilogue] and [Shared] import it, once the layering is upstreamed. *)
-let output_lane_approximates'
-  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
-  (#m #n : nat)
-  (#lD : layout2 m n)
-  (gD : array2 et lD)
-  (bm bn tm tn wm wn : pos)
-  (#_ : squash (bm /?+ m /\ bn /?+ n /\
-                wm * tm /?+ bm /\ wn * tn /?+ bn))
-  (bid : natlt (m / bm * (n / bn)))
-  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
-  (rD : chest2 real (wm * tm) (wn * tn))
-  : slprop
-= forall+ (mi : natlt wm) (nj : natlt wn).
-    exists* (eD : chest2 et tm tn).
-      own_lane_cells
-        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
-        eD (tid % warp_size) **
-      pure (eD %~ ematrix_subtile rD tm tn mi nj)
+(* [output_lane_approximates'] (the functional counterpart of
+   [output_lane_live']) is now imported from [Mm.Output]; see the [open] above. *)
 
 (* ---- arithmetic support for [lane_target]'s tile-index bounds ---- *)
 

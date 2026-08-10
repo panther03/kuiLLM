@@ -13,7 +13,7 @@ open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fr
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
   { own_lane_cells, live_lane_cells, in_lane }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueCell
   { tiled_cell }

@@ -58,11 +58,9 @@ open Kuiper.Array2.Strided
   { strided_row_major, cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.TensorCore { FragAcc, FragLAcc, fragment }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
-open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiper.Chest { chest2, chest_map }
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment' }
+open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Shared { scratch_tile_live, shmems_desc }
@@ -81,34 +79,6 @@ inline_for_extraction noextract
 let coerce_chest2_cols (#et : Type) (#r #c1 #c2 : nat)
   (_ : squash (c1 == c2)) (x : chest2 et r c1) : chest2 et r c2
 = coerce_eq () x
-
-(* Functional (approximation) counterpart of [output_lane_live']: instead of
-   merely re-establishing that the lane owns its output cells, it states that
-   for every [tm x tn] output fragment the lane holds cells [eD] that
-   approximate the matching subtile of the real target [rD].  This is the
-   layout-generic version of upstream
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.output_lane_approximates].
-
-   TODO(upstream): fold into [Kuiops.SuperGEMM.Mm.Output] beside
-   [output_lane_live'] once that module is upstreamed to [...To.KernelDesc]. *)
-let output_lane_approximates'
-  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
-  (#m #n : nat)
-  (#lD : layout2 m n)
-  (gD : array2 et lD)
-  (bm bn tm tn wm wn : pos)
-  (#_ : squash (bm /?+ m /\ bn /?+ n /\
-                wm * tm /?+ bm /\ wn * tn /?+ bn))
-  (bid : natlt (m / bm * (n / bn)))
-  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
-  (rD : chest2 real (wm * tm) (wn * tn))
-  : slprop
-= forall+ (mi : natlt wm) (nj : natlt wn).
-    exists* (eD : chest2 et tm tn).
-      own_lane_cells
-        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
-        eD (tid % warp_size) **
-      pure (eD %~ ematrix_subtile rD tm tn mi nj)
 
 inline_for_extraction noextract
 fn epilogue

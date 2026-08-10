@@ -24,7 +24,8 @@ open Kuiper.Tensor.Tiling
 open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_fragment, output_lane_live,
-                                                     live_lane_cells }
+                                                     live_lane_cells, own_lane_cells }
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
@@ -61,6 +62,36 @@ let output_lane_live'
     live_lane_cells
       (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
       (tid % warp_size)
+
+(* Functional (approximation) counterpart of [output_lane_live']: instead of
+   merely re-establishing that the lane owns its output cells, it states that
+   for every [tm x tn] output fragment the lane holds cells [eD] that
+   approximate the matching subtile of the real target [rD].  Layout-generic
+   version of upstream
+   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.output_lane_approximates].
+
+   Hosted here beside [output_lane_live'] because both [Epilogue] (which commits
+   to it in its [ensures]) and [Shared] (which restates the [kf] postcondition)
+   need it, and [Shared] cannot import [Epilogue] (that module imports [Shared]).
+   [Mm.Output] is imported by both, so it is the single, cycle-free home. *)
+let output_lane_approximates'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : nat)
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ m /\ bn /?+ n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (bid : natlt (m / bm * (n / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rD : chest2 real (wm * tm) (wn * tn))
+  : slprop
+= forall+ (mi : natlt wm) (nj : natlt wn).
+    exists* (eD : chest2 et tm tn).
+      own_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        eD (tid % warp_size) **
+      pure (eD %~ ematrix_subtile rD tm tn mi nj)
 
 (* ---- layout-generic live split of the output tile among warp lanes ----
    The generalisation of upstream

@@ -18,7 +18,7 @@ open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { live_lane_cells }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile_idx_rows, block_tile_idx_cols, warp_tile_idx_rows, warp_tile_idx_cols }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_split, skew_join }
-open Kuiops.SuperGEMM.Mm.Output { output_fragment', output_lane_live' }
+open Kuiops.SuperGEMM.Mm.Output { output_fragment', output_lane_live', output_lane_approximates' }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q,
   unfold_pipe_q_even, unfold_pipe_q_odd }
