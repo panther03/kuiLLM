@@ -73,9 +73,10 @@ fn supergemm_mm_async
   ensures
     pledge0 (epoch_done s e)
       (on gpu_loc
-        (exists* (eA' : chest2 et_ab (SZ.v rows) (SZ.v shared)). gA |-> Frac fA eA' **
-          (exists* (eB' : chest2 et_ab (SZ.v cols) (SZ.v shared)). gB |-> Frac fB eB' **
-            (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). gD |-> eD'))))
+        ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+          (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). (gD |-> eD') **
+            pure (eD' %~ chest_map post_map_r
+                    (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB)))))))
 {
   let nblk = (rows /^ bm) *^ (cols /^ bn);
   let nthr = (bm /^ wm) *^ (bn /^ wn) *^ warp_size;
@@ -85,7 +86,7 @@ fn supergemm_mm_async
 
   launch (
     mk_kernel
-      gA #eA gB #eB gD post_map
+      gA #eA #(to_real_matrix eA) gB #eB #(to_real_matrix eB) gD post_map post_map_r
       bm bn bk wm wn skew group
       fA fB nblk nthr ()
   ) s;
