@@ -50,7 +50,8 @@ def time_call(fn, iters=50, warmup=10):
 
 
 def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
-                 reference, flops=None, iters=50, warmup=10, warmup_ms=300):
+                 reference, flops=None, iters=50, warmup=10, warmup_ms=300,
+                 settle_ms=50):
     """Benchmark ``impls`` against ``reference`` over ``cases``.
 
     ``cases`` are ``(name, *data)`` tuples; ``make_inputs``, ``case_columns`` and
@@ -62,7 +63,10 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
     ``impls`` is a list of ``(name, callable)``. Each contender is timed once;
     the output of its last timed call is what its error is measured on, against
     the reference's. ``warmup_ms`` of dummy load precedes the whole run to pin
-    the GPU clocks (see ``warm_up``).
+    the GPU clocks (see ``warm_up``), and ``settle_ms`` re-pins them before each
+    individual measurement: a single up-front ramp leaves the first contender of
+    the first case still climbing, which read 6x slow on a 35us kernel and made
+    the first row of the table meaningless.
 
     Returns a ``pandas.DataFrame``, one row per case.
     """
@@ -75,6 +79,8 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
         args, kwargs = make_inputs(*data)
         times, outs = {}, {}
         for label, fn in contenders:
+            if settle_ms:
+                warm_up(settle_ms)
             times[label], outs[label] = time_call(
                 lambda: fn(*args, **kwargs), iters=iters, warmup=warmup)
 
