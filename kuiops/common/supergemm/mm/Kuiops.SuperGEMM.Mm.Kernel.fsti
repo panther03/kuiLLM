@@ -42,7 +42,7 @@ val mk_kernel
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD { is_global gD })
   (post_map : et_acc -> et_d)
-  (bm bn bk wm wn skew : szp)
+  (bm bn bk wm wn skew group : szp)
   (#sqc : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_bmnk : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                 SZ.v bk /?+ SZ.v k /\ SZ.v bk <= SZ.v k))
