@@ -25,6 +25,7 @@ open Kuiops.SuperGEMM.Mm.Params
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
+module MS = Kuiper.Spec.GEMM
 
 inline_for_extraction noextract
 val mk_kernel
@@ -71,6 +72,8 @@ val mk_kernel
       (gA |-> Frac fA eA **
        gB |-> Frac fB eB **
        live gD)
-      (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac fA eA' **
-        (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac fB eB' **
-          (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)). gD |-> eD')))
+      (gA |-> Frac fA eA **
+       gB |-> Frac fB eB **
+       (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)).
+          gD |-> eD' **
+          pure (eD' %~ Kuiper.Chest.chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))))

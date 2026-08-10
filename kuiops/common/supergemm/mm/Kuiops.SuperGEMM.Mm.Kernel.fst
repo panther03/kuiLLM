@@ -27,7 +27,7 @@ open Kuiper.Kernel.Desc { kernel_desc }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Output
   { output_lane_live', output_lane_approximates', output_fragment',
-    split_output_to_lanes', gather_output_live' }
+    split_output_to_lanes', gather_output_live', gather_output_approximates' }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
@@ -37,14 +37,19 @@ open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_t_row, g_t_col, g_row_step, g_a_iters
 open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
 open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
-open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
+open Kuiops.SuperGEMM.Mm.Spec { warp_matmul, warp_matmul_is_subtile, mtranspose_subtile }
 open Kuiops.SuperGEMM.Mm.Epilogue { epilogue }
+open Kuiops.SuperGEMM.Mm.KernelLemmas
+  { map_subtile_commute, subtile_subtile_compose, coerce_subtile_col,
+    coerce_wm_nested, mfrag_frag_eq, lane_target_is_subtile, td_bounds }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module B = Kuiper.Barrier
 module P = Kuiops.SuperGEMM.Mm.Params
 module SH = Kuiops.SuperGEMM.Mm.Shared
+module MS = Kuiper.Spec.GEMM
+module ML = FStar.Math.Lemmas
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
@@ -176,9 +181,61 @@ fn lane_approx_to_live'
   fold output_lane_live' gD bm bn tm tn wm wn #sq bid tid;
 }
 
+(* Pure chest/subtile algebra for the functional teardown lives in
+   [Kuiops.SuperGEMM.Mm.KernelLemmas]. *)
+
+
 (* ---------------------------------------------------------------------- *)
 (* teardown : reverse of setup                                            *)
 (* ---------------------------------------------------------------------- *)
+
+(* Swap the (proof-irrelevant) real target of an [output_lane_approximates']
+   for a provably-equal one.  A raw [rewrite] at the [output_lane_approximates']
+   level forces Pulse to re-elaborate the heavy nested-subtile term (and its
+   [tid]-refinement / divisor side-conditions) under no binder; doing it lane
+   by lane after [unfold] discharges those obligations with [mi:natlt wm],
+   [nj:natlt wn] in scope instead. *)
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 30"
+ghost
+fn lane_retarget
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : nat)
+  (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#sq : squash (bm /?+ m /\ bn /?+ n /\ wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (bid : natlt (m / bm * (n / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rD1 rD2 : chest2 real (wm * tm) (wn * tn))
+  (_ : squash (rD1 == rD2))
+  requires output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD1
+  ensures  output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD2
+{
+  unfold output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD1;
+  forevery_map_2
+    #(natlt wm) #(natlt wn)
+    (fun (mi : natlt wm) (nj : natlt wn) ->
+      exists* (eD : chest2 et tm tn).
+        own_lane_cells
+          (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+          eD (tid % warp_size)
+        ** pure (eD %~ ematrix_subtile rD1 tm tn mi nj))
+    (fun (mi : natlt wm) (nj : natlt wn) ->
+      exists* (eD : chest2 et tm tn).
+        own_lane_cells
+          (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+          eD (tid % warp_size)
+        ** pure (eD %~ ematrix_subtile rD2 tm tn mi nj))
+    fn mi nj {
+      with eD. assert (own_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        eD (tid % warp_size) ** pure (eD %~ ematrix_subtile rD1 tm tn mi nj));
+      rewrite (pure (eD %~ ematrix_subtile rD1 tm tn mi nj))
+        as (pure (eD %~ ematrix_subtile rD2 tm tn mi nj));
+    };
+  fold output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD2;
+}
+#pop-options
 
 #push-options "--split_queries no"
 ghost
@@ -209,58 +266,110 @@ fn teardown
     (forall+ (bid : natlt nblk).
       SH.block_post gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid) ** pure True
   ensures
-    (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac fA eA') **
-    (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac fB eB') **
-    (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)). gD |-> eD')
+    (gA |-> Frac fA eA) **
+    (gB |-> Frac fB eB) **
+    (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)).
+       gD |-> eD' **
+       pure (eD' %~ chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB))))
 {
   let mfw = wm /^ frag_sz;
   assert pure (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn);
   assert pure (SZ.v mfw == mfrag wm);
   assert pure (SZ.v mfw * SZ.v frag_sz == SZ.v wm);
 
-  (* [forall+ bid. block_post] unfolds to [forall+ bid tid. kpost1];
-     unfold each functional kpost1 into its components and forget the A/B
-     pinning and the output approximation content (step-1 liveness gather). *)
+  (* [forall+ bid. block_post] unfolds to [forall+ bid tid. kpost1]; keep the
+     A/B pinning to [eA]/[eB] and rewrite each functional output lane from
+     [lane_target] into the doubly-nested-subtile form of the whole real target
+     that [gather_output_approximates'] consumes. *)
   forevery_map_2
     #(natlt nblk) #(natlt nthr)
     (fun bid tid ->
       SH.kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid)
     (fun bid tid ->
-      (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') **
-      ((exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') **
-       output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid))
+      (gA |-> Frac (fA /. (nblk * nthr)) eA) **
+      ((gB |-> Frac (fB /. (nblk * nthr)) eB) **
+       output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+         (ematrix_subtile
+            (ematrix_subtile (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))
+              (SZ.v bm) (SZ.v bn) (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn)))
+            (mfrag wm * frag) (1 * SZ.v wn)
+            ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+            ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn))))))
     fn bid tid {
       unfold SH.kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid;
-      lane_approx_to_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
-        (SH.lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid);
+      td_bounds (SZ.v m) (SZ.v n) (SZ.v bm) (SZ.v bn) (SZ.v wm) (SZ.v wn)
+        (SZ.v nblk) (SZ.v nthr) bid tid;
+      lane_target_is_subtile rA rB post_map_r bm bn wm wn () nblk nthr bid tid
+        (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn))
+        ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+        ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn)));
+      assert (pure (mfrag wm * frag == SZ.v wm));
+      assert (pure (1 * SZ.v wn == SZ.v wn));
+      assert (pure (SZ.v n / SZ.v bn > 0));
+      assert (pure (SZ.v bn / (1 * SZ.v wn) > 0));
+      assert (pure (bid / (SZ.v n / SZ.v bn) < SZ.v m / SZ.v bm));
+      assert (pure (bid % (SZ.v n / SZ.v bn) < SZ.v n / SZ.v bn));
+      assert (pure ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)) < SZ.v bm / (mfrag wm * frag)));
+      assert (pure ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn)) < SZ.v bn / (1 * SZ.v wn)));
+      assert (pure (SH.lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid
+        == ematrix_subtile
+             (ematrix_subtile (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))
+               (SZ.v bm) (SZ.v bn) (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn)))
+             (mfrag wm * frag) (1 * SZ.v wn)
+             ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+             ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn)))));
+      lane_retarget gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+        (SH.lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid)
+        (ematrix_subtile
+           (ematrix_subtile (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))
+             (SZ.v bm) (SZ.v bn) (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn)))
+           (mfrag wm * frag) (1 * SZ.v wn)
+           ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+           ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn))))
+        ();
     };
 
   forevery_unzip_2
     #(natlt nblk) #(natlt nthr)
-    (fun _ _ -> exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA')
+    (fun _ _ -> gA |-> Frac (fA /. (nblk * nthr)) eA)
     (fun bid tid ->
-      (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') **
-      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid);
+      (gB |-> Frac (fB /. (nblk * nthr)) eB) **
+      output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+        (ematrix_subtile
+           (ematrix_subtile (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))
+             (SZ.v bm) (SZ.v bn) (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn)))
+           (mfrag wm * frag) (1 * SZ.v wn)
+           ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+           ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn)))));
   forevery_unzip_2
     #(natlt nblk) #(natlt nthr)
-    (fun _ _ -> exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB')
+    (fun _ _ -> gB |-> Frac (fB /. (nblk * nthr)) eB)
     (fun bid tid ->
-      output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid);
+      output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+        (ematrix_subtile
+           (ematrix_subtile (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))
+             (SZ.v bm) (SZ.v bn) (bid / (SZ.v n / SZ.v bn)) (bid % (SZ.v n / SZ.v bn)))
+           (mfrag wm * frag) (1 * SZ.v wn)
+           ((tid / warp_size) / (SZ.v bn / (1 * SZ.v wn)))
+           ((tid / warp_size) % (SZ.v bn / (1 * SZ.v wn)))));
 
-  (* gather A *)
+  (* gather A functionally: each read share re-materialises at [eA] *)
   forevery_unfactor' (nblk * nthr) nblk nthr
-    (fun _ _ -> exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA');
-  tensor_gather_n_underspec gA (nblk * nthr);
+    (fun _ _ -> gA |-> Frac (fA /. (nblk * nthr)) eA);
+  tensor_gather_n gA (nblk * nthr);
 
-  (* gather B *)
+  (* gather B functionally *)
   forevery_unfactor' (nblk * nthr) nblk nthr
-    (fun _ _ -> exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB');
-  tensor_gather_n_underspec gB (nblk * nthr);
+    (fun _ _ -> gB |-> Frac (fB /. (nblk * nthr)) eB);
+  tensor_gather_n gB (nblk * nthr);
 
-  (* gather D: bridge the band indices back to the [split]/[gather] szp form *)
+  (* gather D functionally: bridge the band indices back to the [split]/[gather]
+     szp form, then reassemble the whole output certified against the real
+     product. *)
   rewrite each (mfrag wm) as (SZ.v mfw);
   rewrite each frag as (SZ.v frag_sz);
-  gather_output_live' gD bm bn frag_sz wn mfw 1sz nblk nthr ();
+  gather_output_approximates' gD bm bn frag_sz wn mfw 1sz nblk nthr
+    (chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)));
 }
 #pop-options
 
@@ -722,9 +831,11 @@ let mk_kernel
       (gA |-> Frac fA eA **
        gB |-> Frac fB eB **
        live gD)
-      (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac fA eA' **
-        (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac fB eB' **
-          (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)). gD |-> eD')))
+      (gA |-> Frac fA eA **
+       gB |-> Frac fB eB **
+       (exists* (eD' : chest2 et_d (SZ.v m) (SZ.v n)).
+          gD |-> eD' **
+          pure (eD' %~ chest_map post_map_r (MS.matmul rA (Kuiper.EMatrix.mtranspose rB)))))
 =
   geo_facts et_ab et_acc bm bn bk wm wn skew;
   P.nthr_pos bm bn wm wn;
