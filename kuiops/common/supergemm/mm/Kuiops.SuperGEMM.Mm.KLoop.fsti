@@ -214,7 +214,7 @@ fn kloop
   ensures
     fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
       (warp_matmul rA rB (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)) **
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) (SZ.v tid)

@@ -57,6 +57,14 @@ let sel_flip (#a:Type0) (r:nat) (x y:a)
 
 let acc_len_alloc wm wn = reveal_opaque (`%acc_len) acc_len
 
+(* Last-k-tile arithmetic, isolated as a pure lemma so the resource-heavy
+   k-loop body does not spend its rlimit budget re-deriving trivial linear
+   facts inside a large SMT context. *)
+let ktiles_last_arith (kt1 vkt kk : nat) (bkv : pos) (nkt : nat)
+  : Lemma (requires nkt == kk / bkv /\ kt1 == vkt + 1 /\ vkt < kk / bkv)
+          (ensures (kt1 < nkt) \/ (kt1 == kk / bkv /\ vkt == kk / bkv - 1))
+  = ()
+
 (* [warp_m * mfrag + i] indexes a 16-row band of the [bm x bk] A tile. *)
 let a_tile_bound (bm wm : pos) (warp_m i : nat)
   : Lemma (requires frag /?+ wm /\ wm /?+ bm /\
@@ -1526,7 +1534,7 @@ let kcarry
       PC.batch_committed b_c ** PC.batch_live b_l **
       pending bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col b_c sq vkt)
   else
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) tid
 
@@ -1624,14 +1632,14 @@ fn fold_kcarry_done
   (vkt : nat { vkt <= SZ.v k / SZ.v bk })
   (sq_ge : squash (~(vkt < SZ.v k / SZ.v bk)))
   requires
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) tid
   ensures
     kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB nthr tid block_row block_col sq vkt
 {
   rewrite
-    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
      pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 nthr (SZ.v k / SZ.v bk)
             (SZ.v k / SZ.v bk - 1) tid)
   as
@@ -1666,7 +1674,7 @@ let cstage
     PC.batch_committed b_l ** (exists* b_l'. PC.batch_live b_l') **
     staged_half bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col b_l sq (vkt + 1)
   else
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
     pipe_live (skewed_view bn bk skew dstB) nthr tid **
     PC.batch_live b_l
@@ -1726,7 +1734,7 @@ fn fold_cstage_nostage
   (vkt : nat { vkt < SZ.v k / SZ.v bk })
   (sq_nostg : squash (~(vkt + 1 < SZ.v k / SZ.v bk)))
   requires
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
     pipe_live (skewed_view bn bk skew dstB) nthr tid **
     PC.batch_live b_l
@@ -1734,7 +1742,7 @@ fn fold_cstage_nostage
     cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
 {
   rewrite
-    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
      pipe_live (skewed_view bm bk skew dstA) nthr tid **
      pipe_live (skewed_view bn bk skew dstB) nthr tid **
      PC.batch_live b_l)
@@ -1798,7 +1806,7 @@ fn unfold_cstage_nostage
   requires
     cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt
   ensures
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     pipe_live (skewed_view bm bk skew dstA) nthr tid **
     pipe_live (skewed_view bn bk skew dstB) nthr tid **
     PC.batch_live b_l
@@ -1806,7 +1814,7 @@ fn unfold_cstage_nostage
   rewrite
     (cstage bm bn bk skew gA gB dstA dstB eA eB fA fB nthr tid block_row block_col sq b_l vkt)
   as
-    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
      pipe_live (skewed_view bm bk skew dstA) nthr tid **
      pipe_live (skewed_view bn bk skew dstB) nthr tid **
      PC.batch_live b_l);
@@ -2028,7 +2036,7 @@ fn kloop
   ensures
     fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
       (warp_matmul rA rB (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)) **
-    (exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
     B.barrier_state (SZ.v k / SZ.v bk) **
     pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
            (SZ.v k / SZ.v bk - 1) (SZ.v tid)
@@ -2172,6 +2180,11 @@ fn kloop
     assert pure (SZ.v vkt < SZ.v k / SZ.v bk);
     assert pure (SZ.v par == SZ.v vkt % 2);
     assert pure (SZ.v kt1 == SZ.v vkt + 1 /\ SZ.v kt1 <= SZ.v k / SZ.v bk);
+    (* Isolate the last-k-tile linear arithmetic in the light pre-body context:
+       either [kt1] is not the last tile, or it is and [vkt == k/bk - 1].  The
+       resource-heavy else-branch below then only picks a disjunct from the
+       [kt1 <^ num_k_tiles] guard, never re-deriving the div/mod. *)
+    ktiles_last_arith (SZ.v kt1) (SZ.v vkt) (SZ.v k) (SZ.v bk) (SZ.v num_k_tiles);
     assert pure (
       srcA == (if SZ.v vkt % 2 = 0 then sarA0 else sarA1) /\
       dstA == (if SZ.v vkt % 2 = 0 then sarA1 else sarA0) /\
@@ -2277,15 +2290,10 @@ fn kloop
       fold_kcarry_live bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt + 1) (reveal b_l) ();
     } else {
-      assert pure (SZ.v num_k_tiles == SZ.v k / SZ.v bk);
-      assert pure (SZ.v kt1 == SZ.v vkt + 1 /\ SZ.v vkt < SZ.v k / SZ.v bk);
-      assert pure (SZ.v kt1 >= SZ.v num_k_tiles);
-      assert pure (SZ.v kt1 == SZ.v k / SZ.v bk);
       unfold_cstage_nostage bm bn bk skew gA gB dstA dstB eA eB fA fB
         (SZ.v nthr) (SZ.v tid) (SZ.v block_row) (SZ.v block_col) () (reveal b_l) (SZ.v vkt) ();
       fold_pipe_q_g bm bn bk skew sarA0 sarA1 sarB0 sarB1 srcA dstA srcB dstB
         (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid) ();
-      assert pure (SZ.v vkt == SZ.v k / SZ.v bk - 1);
       rewrite (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v vkt) (SZ.v tid))
         as (pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk) (SZ.v k / SZ.v bk - 1) (SZ.v tid));
       with lb. assert (PC.batch_live lb);
@@ -2324,7 +2332,7 @@ fn kloop
     (kcarry bm bn bk skew gA gB eA eB sarA0 sarA1 sarB0 sarB1 fA fB (SZ.v nthr) (SZ.v tid)
       (SZ.v block_row) (SZ.v block_col) () (SZ.v vkt))
   as
-    ((exists* e. gA |-> Frac fA e) ** (exists* e. gB |-> Frac fB e) **
+    ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
      pipe_q bm bn bk skew sarA0 sarA1 sarB0 sarB1 (SZ.v nthr) (SZ.v k / SZ.v bk)
             (SZ.v k / SZ.v bk - 1) (SZ.v tid));
   rewrite (B.barrier_state (SZ.v vkt))
