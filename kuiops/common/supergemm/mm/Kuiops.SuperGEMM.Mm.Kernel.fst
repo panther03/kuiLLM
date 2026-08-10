@@ -37,7 +37,6 @@ module T = Kuiper.Tensor
 module B = Kuiper.Barrier
 module P = Kuiops.SuperGEMM.Mm.Params
 module SH = Kuiops.SuperGEMM.Mm.Shared
-module SW = Kuiops.SuperGEMM.Mm.Swizzle
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
@@ -217,10 +216,6 @@ let div_ub (a b c : nat)
   FStar.Math.Lemmas.lemma_div_mod a c;
   FStar.Math.Lemmas.lemma_mult_lt_left c (a / c) b
 
-inline_for_extraction noextract
-let sz_min (a b : SZ.t) : (r : SZ.t { SZ.v r == (if SZ.v a < SZ.v b then SZ.v a else SZ.v b) }) =
-  if a <^ b then a else b
-
 #push-options "--split_queries no --z3rlimit 15"
 
 inline_for_extraction noextract
@@ -296,36 +291,23 @@ fn kf
   (* frag divides wm/wn *)
   assert pure (mfrag wm * frag == SZ.v wm);
 
-  (* ---- index decode (GROUP-based L2 swizzle) ----
-     Permute the linear block index into a [group]-tall, [num_n]-wide
-     column-major strip so concurrently-resident CTAs share L2 working sets: a
-     scheduling wave then reuses A rows / B columns out of L2 instead of
-     streaming a whole row of B per block row.  This is a pure bijection on
-     block indices ([Swizzle]) -- it changes neither the ownership partition
-     (kpre/kpost are indexed by [bid], not by the tile coordinates) nor any
-     proof obligation, only which (row,col) tile a block loads.
-
-     [sw_decode_spec] discharges the in-range refinements and every no-overflow
-     side condition of the SizeT decode.  [gid] is computed as
-     [(bid / num_n) / group] so we never form [group * num_n] (which carries no
-     fits bound); the largest intermediate is [(gid*group) * num_n], which is
-     [<= bid < nblk] and hence fits. *)
+  (* ---- index decode (plain row-major) ----
+     Block [bid] owns the row-major tile [(bid / num_n, bid % num_n)], which is
+     exactly the D ownership partition ([Output.block_tile] decodes [bid] the
+     same way).  The [group] parameter is retained on [mk_kernel] (an inert L2
+     swizzle knob) but is NOT applied here: a swizzled COMPUTE decode against a
+     row-major OWNERSHIP partition would write each block's product to the wrong
+     tile -- silent numerical garbage that the safety proof cannot see.  The
+     functional postcondition requires compute and ownership to agree, so the
+     decode is row-major.  Re-wiring the swizzle correctly means reindexing
+     ownership too (see [Swizzle.sw_lin]); that is deferred. *)
   let num_n = n /^ bn;
   assert pure (SZ.v num_n == SZ.v n / SZ.v bn /\ SZ.v num_n > 0);
   let num_m = m /^ bm;
   assert pure (SZ.v num_m == SZ.v m / SZ.v bm /\ SZ.v num_m > 0);
-  SW.sw_decode_spec (SZ.v num_m) (SZ.v num_n) (SZ.v group) (SZ.v bid);
-  FStar.Math.Lemmas.division_multiplication_lemma (SZ.v bid) (SZ.v num_n) (SZ.v group);
-  FStar.Math.Lemmas.paren_mul_right (SZ.v bid / (SZ.v group * SZ.v num_n)) (SZ.v group) (SZ.v num_n);
-  let gid  = (bid /^ num_n) /^ group;
-  assert pure (SZ.v gid == SZ.v bid / (SZ.v group * SZ.v num_n));
-  let gidg = gid *^ group;
-  let rem  = bid -^ gidg *^ num_n;
-  let d    = num_m -^ gidg;
-  let rows = sz_min d group;
-  assert pure (SZ.v rows > 0);
-  let block_row : szlt (SZ.v m / SZ.v bm) = gidg +^ rem %^ rows;
-  let block_col : szlt (SZ.v n / SZ.v bn) = rem /^ rows;
+  div_ub (SZ.v bid) (SZ.v num_m) (SZ.v num_n);
+  let block_row : szlt (SZ.v m / SZ.v bm) = bid /^ num_n;
+  let block_col : szlt (SZ.v n / SZ.v bn) = bid %^ num_n;
 
   let wid = tid /^ warp_size;
   assert pure (SZ.v nthr == warps bm bn wm wn * SZ.v warp_size);
