@@ -133,3 +133,38 @@ fn gather_output_live'
     forall+ (bid : natlt nblk) (tid : natlt nthr).
       output_lane_live' gD bm bn tm tn wm wn bid tid
   ensures exists* (eD : chest2 et (SZ.v m) (SZ.v n)). gD |-> eD
+
+(* ---- layout-generic FUNCTIONAL inverse of [split_output_to_lanes'] ----
+   The approximation counterpart of [gather_output_live']: given, for every
+   [(bid, tid)], that the thread's lane holds output cells approximating the
+   matching doubly-nested subtile of the real target [rD], it gathers the whole
+   output array back and certifies [eD %~ rD].  Layout-generic version of
+   upstream [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown.gather_output]
+   (which is pinned to row-major [gD : array2 et (rm m n)] and folds in the
+   accumulate-into-C combine; SuperGEMM has no C operand, so [rD] is the whole
+   post-mapped product). *)
+ghost
+fn gather_output_approximates'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : szp)
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : szp)
+  (#_ : squash (bm /?+ m /\ bn /?+ n /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (#_ : squash (tm /?+ (wm * tm) /\ tn /?+ (wn * tn)))
+  (#_ : squash (SZ.fits (m * n)))
+  (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == SZ.v bm / (SZ.v wm * SZ.v tm) * (SZ.v bn / (SZ.v wn * SZ.v tn)) * warp_size})
+  (rD : chest2 real (SZ.v m) (SZ.v n))
+  requires
+    forall+ (bid : natlt nblk) (tid : natlt nthr).
+      output_lane_approximates' gD bm bn tm tn wm wn bid tid
+        (ematrix_subtile
+          (ematrix_subtile rD bm bn (bid / (n / bn)) (bid % (n / bn)))
+          (wm * tm) (wn * tn)
+          ((tid / warp_size) / (bn / (wn * tn)))
+          ((tid / warp_size) % (bn / (wn * tn))))
+  ensures
+    exists* (eD : chest2 et (SZ.v m) (SZ.v n)).
+      gD |-> eD ** pure (eD %~ rD)
