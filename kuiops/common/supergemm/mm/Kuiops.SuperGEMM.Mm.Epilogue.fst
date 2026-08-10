@@ -1386,11 +1386,13 @@ fn epilogue
   let mfrag_wm_sz : szp = wm /^ frag_sz;
   assert pure (SZ.v mfrag_wm_sz == mfrag wm);
 
-  // pos-typed band dimension products, bound OUTSIDE the [withlocal] block so
-  // the [pos] refinement is discharged here (where the [constraints] context is
-  // available) rather than re-elaborated inside the block, which fails.
-  let rows_prod : pos = mfrag wm * frag;
-  let cnf_prod : pos = nfrag wn * frag;
+  // Band dimension products, bound OUTSIDE the [withlocal] block so the
+  // positivity refinement is discharged here (where the [constraints] context
+  // is available) rather than re-elaborated inside the block, which fails.
+  // They feed a lemma only, so they must be [erased] or they extract as
+  // statement-position [Prims_op_Star]/[Prims_op_Division] applications.
+  let rows_prod : (p:erased nat{p > 0}) = hide (mfrag wm * frag);
+  let cnf_prod : (p:erased nat{p > 0}) = hide (nfrag wn * frag);
 
   // ---- skewed shared-tile leading dimension (row stride)
   let ld_sz : SZ.t = wn `SZ.add` chunk et_acc;
@@ -1466,17 +1468,14 @@ fn epilogue
       decreases (mfrag wm - SZ.v !i)
     {
       let iv = !i;
-      let iv_nat : natlt (mfrag wm) = SZ.v iv;
-      // next pivot as a machine int; used for the drained forever so it matches
-      // the loop invariant [mixed (SZ.v !i)] exactly after [i := inext] (a plain
-      // [SZ.v iv + 1] would not be syntactically [SZ.v (iv +^ 1sz)]).
-      let inext = iv +^ 1sz;
-      assert pure (SZ.v inext == SZ.v iv + 1);
+      // Ghost: consumed only by rewrites/folds.  A concrete binding here
+      // extracts as a statement-position [FStar_SizeT_v] call.
+      let iv_nat : (x:erased nat{x < mfrag wm}) = hide (SZ.v iv);
       // [chest_map post_map_r (band iv of rAcc)] == [band iv of rD].  Proven
       // up-front (pure, slprop-independent) where the proof state is light; the
       // nonlinear lemma-argument elaboration is fragile deeper in the block.
-      coerced_drain_target_eq_cnf post_map_r rows_prod (SZ.v wn) frag
-        cnf_prod rAcc (SZ.v iv) ();
+      coerced_drain_target_eq_cnf post_map_r (reveal rows_prod) (SZ.v wn) frag
+        (reveal cnf_prod) rAcc (SZ.v iv) ();
       assert pure (chest_map post_map_r (ematrix_subtile rAcc frag (SZ.v wn) (SZ.v iv) 0)
                    == ematrix_subtile rD frag (SZ.v wn) (SZ.v iv) 0);
 
@@ -1513,9 +1512,9 @@ fn epilogue
       // the [forall+] frame-match succeeds (a concrete-predicate shift in the
       // drain body's rich context does not).
       epi_mixed_shift_all gD bm bn wm wn nblk nthr () bid tid rD (SZ.v iv);
-      forevery_extract_replace_eqtype #(natlt (mfrag wm)) iv_nat
-        (mixed (SZ.v iv)) (mixed (SZ.v inext));
-      rewrite (mixed (SZ.v iv) iv_nat) as (live_cell iv_nat);
+      forevery_extract_replace_eqtype #(natlt (mfrag wm)) (reveal iv_nat)
+        (mixed (SZ.v iv)) (mixed (SZ.v (iv +^ 1sz)));
+      rewrite (mixed (SZ.v iv) (reveal iv_nat)) as (live_cell (reveal iv_nat));
 
       assert pure (SZ.sizet_to_nat frag_sz == frag);
       assert pure (SZ.sizet_to_nat mfrag_wm_sz == mfrag wm);
@@ -1543,7 +1542,7 @@ fn epilogue
       assert pure (warps_n bn wn == SZ.v bn / SZ.v wn);
 
       // reshape [live_cell iv] to drain_band's drain-coordinate form
-      rewrite (live_cell iv_nat)
+      rewrite (live_cell (reveal iv_nat))
       as
         (live_lane_cells
           (output_fragment' gD bm bn frag_sz wn mfrag_wm_sz 1sz
@@ -1649,12 +1648,12 @@ fn epilogue
       as
         (own_lane_approx
           (output_fragment' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
-            (SZ.v bid) (SZ.v tid / Kuiper.Barrier.Warp.warp_size) iv_nat 0)
+            (SZ.v bid) (SZ.v tid / Kuiper.Barrier.Warp.warp_size) (reveal iv_nat) 0)
           (SZ.v tid % Kuiper.Barrier.Warp.warp_size)
-          (ematrix_subtile rD frag (SZ.v wn) iv_nat 0));
-      fold (epi_approx_band gD bm bn wm wn nblk nthr () bid tid rD iv_nat);
-      rewrite (epi_approx_band gD bm bn wm wn nblk nthr () bid tid rD iv_nat)
-        as (mixed (SZ.v inext) iv_nat);
+          (ematrix_subtile rD frag (SZ.v wn) (reveal iv_nat) 0));
+      fold (epi_approx_band gD bm bn wm wn nblk nthr () bid tid rD (reveal iv_nat));
+      rewrite (epi_approx_band gD bm bn wm wn nblk nthr () bid tid rD (reveal iv_nat))
+        as (mixed (SZ.v (iv +^ 1sz)) (reveal iv_nat));
 
       // re-fold the shared band
       rewrite each band
@@ -1665,10 +1664,14 @@ fn epilogue
       // extract time. It consumes [mixed (iv+1) iv_nat] and re-establishes the
       // whole forever at pivot [iv+1].
       elim_trade
-        (mixed (SZ.v inext) iv_nat)
-        (forall+ (x : natlt (mfrag wm)). mixed (SZ.v inext) x);
-
-      i := inext;
+        (mixed (SZ.v (iv +^ 1sz)) (reveal iv_nat))
+        (forall+ (x : natlt (mfrag wm)). mixed (SZ.v (iv +^ 1sz)) x);
+      // Increment via [!i], not a body-local name: karamel turns this while
+      // into a C [for] and moves the update into the increment slot, where a
+      // body-scoped binding would be out of scope.  Everything above is stated
+      // over [SZ.v (iv +^ 1sz)] so it matches the post-assignment invariant
+      // syntactically.
+      i := !i +^ 1sz;
     };
 
     // ---- re-fold the accumulator fragments' abstraction
