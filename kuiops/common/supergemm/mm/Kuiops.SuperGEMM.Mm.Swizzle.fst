@@ -1,6 +1,7 @@
 module Kuiops.SuperGEMM.Mm.Swizzle
 
 open Kuiper.Common { natlt }
+open Kuiper.Bijection { bijection, mk_bijection, ( =~ ) }
 
 module ML = FStar.Math.Lemmas
 
@@ -217,3 +218,79 @@ let sw_surjective (nm nn g : pos) (r : natlt nm) (c : natlt nn)
     ML.lemma_mod_plus t c rows;
     assert (br % rows == t);
     assert (sw_row nm nn g bid == r)
+
+(* ---- self-bijection ---- *)
+
+(* Forward map (the one [forevery_iso] applies): row-major linear index of the
+   swizzled tile.  Exported as a [Tot] function so the ownership index is a
+   plain refined value, not a ghost projection of the bijection record. *)
+inline_for_extraction noextract
+let sw_lin (nm nn g : pos) (bid : natlt (nm * nn)) : natlt (nm * nn) =
+  let r = sw_row nm nn g bid in
+  let c = sw_col nm nn g bid in
+  ML.lemma_mult_le_right nn r (nm - 1);
+  ML.distributivity_sub_left nm 1 nn;
+  r * nn + c
+
+(* Decode: [sw_lin] is [sw_row] in the high digit and [sw_col] in the low digit
+   (base [nn]).  These let the block/warp decode obligation
+   [sw_lin bid / nn : natlt nm] reduce to [sw_row bid]'s own type, avoiding any
+   product-bound reasoning at the use site. *)
+let sw_lin_div (nm nn g : pos) (bid : natlt (nm * nn))
+  : Lemma (sw_lin nm nn g bid / nn == sw_row nm nn g bid)
+  = let r = sw_row nm nn g bid in
+    let c = sw_col nm nn g bid in
+    ML.lemma_div_plus c r nn;
+    ML.small_division_lemma_1 c nn
+
+let sw_lin_mod (nm nn g : pos) (bid : natlt (nm * nn))
+  : Lemma (sw_lin nm nn g bid % nn == sw_col nm nn g bid)
+  = let r = sw_row nm nn g bid in
+    let c = sw_col nm nn g bid in
+    ML.lemma_mod_plus c r nn;
+    ML.small_modulo_lemma_1 c nn
+
+(* Inverse map. *)
+inline_for_extraction noextract
+let sw_ff (nm nn g : pos) (s : natlt (nm * nn)) : natlt (nm * nn) =
+  ML.swap_mul nm nn;
+  div_lt_mul s nn nm;
+  ML.modulo_range_lemma s nn;
+  let r : natlt nm = s / nn in
+  let c : natlt nn = s % nn in
+  sw_inv nm nn g r c
+
+let sw_ff_gg (nm nn g : pos) (bid : natlt (nm * nn))
+  : Lemma (sw_ff nm nn g (sw_lin nm nn g bid) == bid)
+  = let r = sw_row nm nn g bid in
+    let c = sw_col nm nn g bid in
+    ML.lemma_mult_le_right nn r (nm - 1);
+    ML.distributivity_sub_left nm 1 nn;
+    (* s = r*nn + c with c < nn, so s/nn = r and s%nn = c *)
+    ML.lemma_div_plus c r nn;
+    ML.small_division_lemma_1 c nn;
+    ML.lemma_mod_plus c r nn;
+    ML.small_modulo_lemma_1 c nn;
+    sw_inv_correct nm nn g bid
+
+let sw_gg_ff (nm nn g : pos) (s : natlt (nm * nn))
+  : Lemma (sw_lin nm nn g (sw_ff nm nn g s) == s)
+  = ML.swap_mul nm nn;
+    div_lt_mul s nn nm;
+    ML.modulo_range_lemma s nn;
+    let r : natlt nm = s / nn in
+    let c : natlt nn = s % nn in
+    (* sw_row/sw_col of the inverse are r/c (SMTPat on sw_inv), so
+       sw_lin = r*nn + c = s by euclidean division. *)
+    ML.euclidean_division_definition s nn
+
+let sw_bij (nm nn g : pos) (nb : pos { nb == nm * nn }) : (natlt nb =~ natlt nb) =
+  mk_bijection #(natlt nb) #(natlt nb)
+    (fun (s : natlt nb) -> (sw_ff nm nn g s <: natlt nb))
+    (fun (bid : natlt nb) -> (sw_lin nm nn g bid <: natlt nb))
+    (fun (x : natlt nb) -> sw_ff_gg nm nn g x)
+    (fun (x : natlt nb) -> sw_gg_ff nm nn g x)
+
+let sw_bij_gg (nm nn g : pos) (nb : pos { nb == nm * nn }) (bid : natlt nb)
+  : Lemma ((sw_bij nm nn g nb).gg bid == sw_lin nm nn g bid)
+  = ()
