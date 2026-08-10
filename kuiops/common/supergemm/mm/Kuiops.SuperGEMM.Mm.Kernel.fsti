@@ -29,19 +29,23 @@ module P = Kuiops.SuperGEMM.Mm.Params
 inline_for_extraction noextract
 val mk_kernel
   (#et_ab #et_acc #et_d : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab,
+     scalar et_acc, has_vec_cpy et_acc, real_like et_acc,
+     scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| T.ctlayout lA |}
        {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
   (gA : array2 et_ab lA { is_global gA }) (#eA : chest2 et_ab (SZ.v m) (SZ.v k))
+       (#rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
   (#lB : layout2 (SZ.v n) (SZ.v k)) {| T.ctlayout lB |}
        {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB { is_global gB }) (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
+       (#rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
   (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD { is_global gD })
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (bm bn bk wm wn skew group : szp)
   (#sqc : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_bmnk : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\

@@ -25,11 +25,19 @@ open Pulse.Lib.Array { length }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Kernel.Desc { kernel_desc }
 open Kuiops.SuperGEMM.Mm.Params
-open Kuiops.SuperGEMM.Mm.Output { output_lane_live', split_output_to_lanes', gather_output_live' }
+open Kuiops.SuperGEMM.Mm.Output
+  { output_lane_live', output_lane_approximates', output_fragment',
+    split_output_to_lanes', gather_output_live' }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
-  { skewed_view, pipe_live, pipe_q, pipe_contract, pipe_p_to_q_transform }
+  { skewed_view, pipe_live, pipe_q, pipe_contract, pipe_p_to_q_transform,
+    pipe_contract_c, pipe_p_to_q_transform_c }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_t_row, g_t_col, g_row_step, g_a_iters }
 open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.SuperGEMM.Mm.Epilogue { epilogue }
 
 module SZ = Kuiper.SizeT
@@ -124,6 +132,51 @@ fn setup
 #pop-options
 
 (* ---------------------------------------------------------------------- *)
+(* Weaken the functional output-lane predicate to its liveness counterpart.*)
+(* Throwaway bridge for step 1: [kpost1] is functional ([output_lane_      *)
+(* approximates']) but the whole-matrix teardown gather is still           *)
+(* [gather_output_live'] (the functional gather lands in a later pass), so *)
+(* forget the approximation content per lane, keeping ownership.           *)
+(* ---------------------------------------------------------------------- *)
+ghost
+fn lane_approx_to_live'
+  (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
+  (#m #n : nat) (#lD : layout2 m n)
+  (gD : array2 et lD)
+  (bm bn tm tn wm wn : pos)
+  (#sq : squash (bm /?+ m /\ bn /?+ n /\ wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (bid : natlt (m / bm * (n / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rD : chest2 real (wm * tm) (wn * tn))
+  requires output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD
+  ensures  output_lane_live' gD bm bn tm tn wm wn #sq bid tid
+{
+  unfold output_lane_approximates' gD bm bn tm tn wm wn #sq bid tid rD;
+  forevery_map_2
+    #(natlt wm) #(natlt wn)
+    (fun (mi : natlt wm) (nj : natlt wn) ->
+      exists* (eD : chest2 et tm tn).
+        own_lane_cells
+          (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+          eD (tid % warp_size)
+        ** pure (eD %~ ematrix_subtile rD tm tn mi nj))
+    (fun (mi : natlt wm) (nj : natlt wn) ->
+      live_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        (tid % warp_size))
+    fn mi nj {
+      with eD. assert (own_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        eD (tid % warp_size) ** pure (eD %~ ematrix_subtile rD tm tn mi nj));
+      drop_ (pure (eD %~ ematrix_subtile rD tm tn mi nj));
+      fold live_lane_cells
+        (output_fragment' gD bm bn tm tn wm wn bid (tid / warp_size) mi nj)
+        (tid % warp_size);
+    };
+  fold output_lane_live' gD bm bn tm tn wm wn #sq bid tid;
+}
+
+(* ---------------------------------------------------------------------- *)
 (* teardown : reverse of setup                                            *)
 (* ---------------------------------------------------------------------- *)
 
@@ -132,7 +185,7 @@ ghost
 fn teardown
   (#et_ab #et_acc #et_d : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
+     scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -141,17 +194,20 @@ fn teardown
   (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
   (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
   (gD : array2 et_d lD)
+  (post_map_r : real -> real)
   (bm bn bk wm wn skew : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n))
   (#_ : squash (SZ.fits (SZ.v m * SZ.v n)))
   (fA fB : perm)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   ()
   requires
     (forall+ (bid : natlt nblk).
-      SH.block_post gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid) ** pure True
+      SH.block_post gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid) ** pure True
   ensures
     (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac fA eA') **
     (exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac fB eB') **
@@ -163,17 +219,20 @@ fn teardown
   assert pure (SZ.v mfw * SZ.v frag_sz == SZ.v wm);
 
   (* [forall+ bid. block_post] unfolds to [forall+ bid tid. kpost1];
-     unfold each kpost1 into its components. *)
+     unfold each functional kpost1 into its components and forget the A/B
+     pinning and the output approximation content (step-1 liveness gather). *)
   forevery_map_2
     #(natlt nblk) #(natlt nthr)
     (fun bid tid ->
-      SH.kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid)
+      SH.kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid)
     (fun bid tid ->
       (exists* (eA' : chest2 et_ab (SZ.v m) (SZ.v k)). gA |-> Frac (fA /. (nblk * nthr)) eA') **
       ((exists* (eB' : chest2 et_ab (SZ.v n) (SZ.v k)). gB |-> Frac (fB /. (nblk * nthr)) eB') **
        output_lane_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid))
     fn bid tid {
-      unfold SH.kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid;
+      unfold SH.kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid;
+      lane_approx_to_live' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1 bid tid
+        (SH.lane_target rA rB post_map_r bm bn wm wn nblk nthr bid tid);
     };
 
   forevery_unzip_2
@@ -216,24 +275,109 @@ let div_ub (a b c : nat)
   FStar.Math.Lemmas.lemma_div_mod a c;
   FStar.Math.Lemmas.lemma_mult_lt_left c (a / c) b
 
+(* Both block-tile decode bounds in one standalone lemma: keeps the nonlinear
+   [bid < (m/bm)*(n/bn)] discharge out of the giant [mk_kernel] record context,
+   where the [barrier_ok] lambda's inline [div_ub] is Z3-flaky. *)
+let bok_bounds (m n bm bn nblk bid : nat)
+  : Lemma
+    (requires m > 0 /\ n > 0 /\ bm > 0 /\ bn > 0 /\
+              m % bm == 0 /\ n % bn == 0 /\
+              nblk == m / bm * (n / bn) /\ bid < nblk)
+    (ensures  n / bn > 0 /\ m / bm > 0 /\
+              bid / (n / bn) < m / bm /\ bid % (n / bn) < n / bn)
+= FStar.Math.Lemmas.lemma_div_mod m bm;
+  FStar.Math.Lemmas.lemma_div_mod n bn;
+  div_ub bid (m / bm) (n / bn);
+  FStar.Math.Lemmas.lemma_mod_lt bid (n / bn)
+
+(* ---- content-carrying block barrier contract ----
+   The functional [kloop] consumes a CONTENT-carrying barrier ([pipe_contract_c],
+   which pins each staged shared tile to the block's global A/B subtile) rather
+   than the memory-safety [pipe_contract].  Naming it through this helper keeps
+   the [block_row]/[block_col] refinement ([< m/bm], [< n/bn]) discharged ONCE
+   (via [div_ub]) here, so neither [kf]'s contract nor the [barrier_contract]
+   field re-derives the nonlinear bound. *)
+let bcontract
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (#m #n #k : szp)
+  (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (bm bn bk wm wn skew : szp)
+  (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\ SZ.v bk /?+ SZ.v k))
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (bid : natlt nblk)
+  (ptrs : c_shmems (SH.shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  : B.contract (SZ.v nthr)
+= let num_n = SZ.v n / SZ.v bn in
+  div_ub bid (SZ.v m / SZ.v bm) num_n;
+  pipe_contract_c m n k bm bn bk skew eA eB (bid / num_n) (bid % num_n)
+    (SH.sar_a0 bm bn bk wm wn skew ptrs) (SH.sar_a1 bm bn bk wm wn skew ptrs)
+    (SH.sar_b0 bm bn bk wm wn skew ptrs) (SH.sar_b1 bm bn bk wm wn skew ptrs)
+    (SZ.v nthr) ()
+
 #push-options "--split_queries no --z3rlimit 15"
+
+(* Pure bridge for the [kf] post fold: the [rD] the epilogue produces
+   ([chest_map post_map_r] over the coerced warp accumulator) is definitionally
+   the [lane_target] [kpost1] expects, once the szt block/warp decode is written
+   in [bid]/[tid] nat div/mod form.  Proving this in a pure lemma keeps the
+   [lane_target] unfold (and its bound lemmas) out of the Pulse VC. *)
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 40"
+let lane_fold_bridge
+  (#m #n #k : szp)
+  (rA : chest2 real (SZ.v m) (SZ.v k))
+  (rB : chest2 real (SZ.v n) (SZ.v k))
+  (post_map_r : real -> real)
+  (bm bn wm wn : szp)
+  (sq : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
+  (sq2 : squash (SZ.v m % (mfrag wm * frag) == 0 /\ SZ.v n % (nfrag wn * frag) == 0))
+  (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (bid : natlt nblk) (tid : natlt nthr)
+  (grow_v : natlt (SZ.v m / SZ.v wm))
+  (gcol_v : natlt (SZ.v n / SZ.v wn))
+  (rAcc : chest2 real (mfrag wm * frag) (nfrag wn * frag))
+  : Lemma
+    (requires
+      grow_v == (bid / (SZ.v n / SZ.v bn)) * (SZ.v bm / SZ.v wm)
+                 + (tid / warp_size) / (SZ.v bn / SZ.v wn) /\
+      gcol_v == (bid % (SZ.v n / SZ.v bn)) * (SZ.v bn / SZ.v wn)
+                 + (tid / warp_size) % (SZ.v bn / SZ.v wn) /\
+      rAcc
+        == warp_matmul rA rB (mfrag wm * frag) (nfrag wn * frag) grow_v gcol_v)
+    (ensures
+      Kuiops.SuperGEMM.Mm.Epilogue.coerce_chest2_cols
+        #real #(mfrag wm * frag) #(nfrag wn * frag) #(1 * SZ.v wn) ()
+        (chest_map post_map_r rAcc)
+      == SH.lane_target rA rB post_map_r bm bn wm wn #sq nblk nthr bid tid)
+  = ()
+#pop-options
 
 inline_for_extraction noextract
 fn kf
   (#et_ab #et_acc #et_d : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab,
+     scalar et_acc, has_vec_cpy et_acc, real_like et_acc,
+     scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| T.ctlayout lA |}
        {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
   (gA : array2 et_ab lA) (#eA : chest2 et_ab (SZ.v m) (SZ.v k))
+       (#rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
   (#lB : layout2 (SZ.v n) (SZ.v k)) {| T.ctlayout lB |}
        {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB) (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
+       (#rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
   (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD)
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (bm bn bk wm wn skew group : szp)
   (#_ : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
@@ -263,22 +407,14 @@ fn kf
     SH.kpre gA eA gB eB gD bm bn bk wm wn skew fA fB nblk nthr sh bid tid **
     thread_id (SZ.v nthr) (SZ.v tid) **
     block_id (SZ.v nblk) (SZ.v bid) **
-    B.barrier_tok
-      (pipe_contract bm bn bk skew
-        (SH.sar_a0 bm bn bk wm wn skew sh) (SH.sar_a1 bm bn bk wm wn skew sh)
-        (SH.sar_b0 bm bn bk wm wn skew sh) (SH.sar_b1 bm bn bk wm wn skew sh)
-        (SZ.v nthr) (SZ.v k / SZ.v bk)) **
+    B.barrier_tok (bcontract eA eB bm bn bk wm wn skew nthr nblk (SZ.v bid) sh) **
     B.barrier_state 0
   ensures
     gpu **
-    SH.kpost gA eA gB eB gD bm bn bk wm wn skew fA fB nblk nthr sh bid tid **
+    SH.kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew fA fB rA rB nblk nthr sh bid tid **
     thread_id (SZ.v nthr) (SZ.v tid) **
     block_id (SZ.v nblk) (SZ.v bid) **
-    B.barrier_tok
-      (pipe_contract bm bn bk skew
-        (SH.sar_a0 bm bn bk wm wn skew sh) (SH.sar_a1 bm bn bk wm wn skew sh)
-        (SH.sar_b0 bm bn bk wm wn skew sh) (SH.sar_b1 bm bn bk wm wn skew sh)
-        (SZ.v nthr) (SZ.v k / SZ.v bk)) **
+    B.barrier_tok (bcontract eA eB bm bn bk wm wn skew nthr nblk (SZ.v bid) sh) **
     B.barrier_state (SZ.v k / SZ.v bk)
 {
   unfold SH.kpre gA eA gB eB gD bm bn bk wm wn skew fA fB nblk nthr sh bid tid;
@@ -343,19 +479,55 @@ fn kf
   acc_len_reveal wm wn;
   assert pure (length accFrags == SZ.v wm / frag * (SZ.v wn / frag));
 
+  (* zero the accumulator before the k-loop (route 1); bound folds to a
+     compile-time literal since [wm]/[wn] are closure-captured szp params. *)
+  populate_acc_with_zero #et_acc frag_sz frag_sz frag_sz (wm /^ frag_sz) (wn /^ frag_sz) accFrags;
+  rewrite each SZ.v (wm /^ frag_sz) as (SZ.v wm / frag);
+  rewrite each SZ.v (wn /^ frag_sz) as (SZ.v wn / frag);
+
+  (* per-warp real output target, in [warp_matmul] form: the combined
+     warp-row/col indices [block_row*(bm/wm)+warp_m] / [block_col*(bn/wn)+warp_n]
+     are valid [natlt (m/wm)]/[natlt (n/wn)] (grow_bound). *)
+  SH.grow_bound (SZ.v m) (SZ.v bm) (SZ.v wm) (SZ.v block_row) (SZ.v warp_m);
+  SH.grow_bound (SZ.v n) (SZ.v bn) (SZ.v wn) (SZ.v block_col) (SZ.v warp_n);
+  let grow : (g:erased nat { reveal g < SZ.v m / SZ.v wm }) =
+    hide (SZ.v block_row * (SZ.v bm / SZ.v wm) + SZ.v warp_m);
+  let gcol : (g:erased nat { reveal g < SZ.v n / SZ.v wn }) =
+    hide (SZ.v block_col * (SZ.v bn / SZ.v wn) + SZ.v warp_n);
+
   (* ---- pipeline buffers ----
      Destructure [sh] as a tuple so KaRaMeL emits the cast
      `(et * ) KPR_SHMEM_AT(..)` on each shared pointer; the [sar_*] accessors (fst/snd
      projections) bypass that path and leave `void *` initialisers that nvcc
      rejects.  The [rewrites_to] lines reconcile the destructured names with
      the [sar_*] forms appearing in the pipe_live/pipe_q slprops. *)
+  (* bridge the content-carrying block barrier to the [pipe_contract_c] form the
+     functional [kloop] consumes: [bcontract]'s [block_row]/[block_col] are the
+     nat div/mod of [bid]; reconcile them with the szt decode. *)
+  assert pure (SZ.v block_row == SZ.v bid / (SZ.v n / SZ.v bn));
+  assert pure (SZ.v block_col == SZ.v bid % (SZ.v n / SZ.v bn));
+  rewrite (B.barrier_tok (bcontract eA eB bm bn bk wm wn skew nthr nblk (SZ.v bid) sh))
+       as (B.barrier_tok
+             (pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+                (SH.sar_a0 bm bn bk wm wn skew sh) (SH.sar_a1 bm bn bk wm wn skew sh)
+                (SH.sar_b0 bm bn bk wm wn skew sh) (SH.sar_b1 bm bn bk wm wn skew sh)
+                (SZ.v nthr) ()));
+
   let (sA0, (sA1, (sB0, (sB1, srest)))) = sh;
   assert rewrites_to sA0 (SH.sar_a0 bm bn bk wm wn skew sh);
   assert rewrites_to sA1 (SH.sar_a1 bm bn bk wm wn skew sh);
   assert rewrites_to sB0 (SH.sar_b0 bm bn bk wm wn skew sh);
   assert rewrites_to sB1 (SH.sar_b1 bm bn bk wm wn skew sh);
 
-  (* ---- pipelined main loop ---- *)
+  (* ---- pipelined main loop ----
+     Prime Z3 with the divides-transitivity facts [kloop]'s [sq_pc] needs
+     ([wm | m], [wn | n] from [wm | bm | m]); without these hints the squash
+     argument's SMT discharge fails and the whole application cores ill-typed. *)
+  assert pure (SZ.v k > 0);
+  Kuiper.Divides.lemma_divides_trans (SZ.v wm) (SZ.v bm) (SZ.v m);
+  Kuiper.Divides.lemma_divides_trans (SZ.v wn) (SZ.v bn) (SZ.v n);
+  assert pure (SZ.v wm /?+ SZ.v m);
+  assert pure (SZ.v wn /?+ SZ.v n);
   kloop #et_ab #et_acc bm bn bk wm wn skew
     gA #eA gB #eB
     sA0 sA1 sB0 sB1
@@ -363,9 +535,10 @@ fn kf
     (fun x -> x)
     (fA /. (nblk * nthr)) (fB /. (nblk * nthr))
     nthr tid block_row block_col warp_m warp_n
+    rA rB grow gcol
     a_t_row a_t_col a_row_step a_iters
     a_t_row a_t_col a_row_step b_iters
-    () () () () () () ();
+    () () () () () () () () () () ();
 
   (* Reconcile [sh]: the [let]-pattern above substituted [sh] with the
      destructured tuple in the ambient slprops (e.g. [scratch_tile_live]); the
@@ -375,18 +548,50 @@ fn kf
              (sA0, (sA1, (sB0, (sB1, srest)))) nthr (SZ.v tid))
        as (SH.scratch_tile_live bm bn bk wm wn skew sh nthr (SZ.v tid));
 
-  (* ---- epilogue: drain accumulator into D ---- *)
-  with ems. assert (accFrags |-> ems);
-  epilogue gD post_map bm bn bk wm wn skew nblk nthr sh accFrags bid tid ();
+  (* restore the block barrier to [bcontract] form for [kf]'s ensures *)
+  rewrite (B.barrier_tok
+             (pipe_contract_c m n k bm bn bk skew eA eB (SZ.v block_row) (SZ.v block_col)
+                sA0 sA1 sB0 sB1 (SZ.v nthr) ()))
+       as (B.barrier_tok (bcontract eA eB bm bn bk wm wn skew nthr nblk (SZ.v bid) sh));
+
+  (* ---- epilogue: drain accumulator into D ----
+     Bridge kloop's per-warp product to the epilogue's [rAcc] parameter:
+     [warp_matmul ... : chest2 real (SZ.v wm) (SZ.v wn)] reshaped to the
+     epilogue's [(mfrag wm * frag, nfrag wn * frag)] tiling (both == wm/wn). *)
+  assert pure (mfrag wm * frag == SZ.v wm);
+  assert pure (nfrag wn * frag == SZ.v wn);
+  assert pure (SZ.v m % (mfrag wm * frag) == 0);
+  assert pure (SZ.v n % (nfrag wn * frag) == 0);
+  let rAcc : chest2 real (mfrag wm * frag) (nfrag wn * frag) =
+    warp_matmul rA rB (mfrag wm * frag) (nfrag wn * frag) (reveal grow) (reveal gcol);
+  rewrite (fragarrayAcc_approximates (SZ.v wm / frag) (SZ.v wn / frag) accFrags
+             (warp_matmul rA rB (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)))
+       as (fragarrayAcc_approximates (mfrag wm) (nfrag wn) accFrags rAcc);
+  epilogue gD post_map post_map_r bm bn bk wm wn skew nblk nthr sh accFrags rAcc bid tid ();
 
   (* dispose accumulator fragments *)
+  unfold (fragarrayAcc_approximates (mfrag wm) (nfrag wn) accFrags rAcc);
   with ems'. assert (accFrags |-> ems');
   drop_ (accFrags |-> ems');
 
-  (* ---- fold the post ---- *)
-  fold SH.kpost1 gA eA gB eB gD bm bn wm wn fA fB nblk nthr bid tid;
+  (* ---- fold the post ----
+     Bridge the epilogue's [rD] (chest_map over the coerced accumulator) to
+     [kpost1]'s [lane_target] via the pure [lane_fold_bridge] (keeps the
+     [lane_target] unfold out of the Pulse VC), then rewrite the slprop target
+     by the resulting chest equality (congruence only). *)
+  lane_fold_bridge #m #n #k rA rB post_map_r bm bn wm wn () ()
+    nblk nthr (SZ.v bid) (SZ.v tid) (reveal grow) (reveal gcol) rAcc;
+  rewrite (output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
+             (SZ.v bid) (SZ.v tid)
+             (Kuiops.SuperGEMM.Mm.Epilogue.coerce_chest2_cols
+               #real #(mfrag wm * frag) #(nfrag wn * frag) #(1 * SZ.v wn) ()
+               (chest_map post_map_r rAcc)))
+       as (output_lane_approximates' gD (SZ.v bm) (SZ.v bn) frag (SZ.v wn) (mfrag wm) 1
+             (SZ.v bid) (SZ.v tid)
+             (SH.lane_target rA rB post_map_r bm bn wm wn nblk nthr (SZ.v bid) (SZ.v tid)));
+  fold SH.kpost1 gA eA gB eB gD post_map_r bm bn wm wn fA fB rA rB nblk nthr bid tid;
   fold SH.shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v k / SZ.v bk) (SZ.v tid);
-  fold SH.kpost gA eA gB eB gD bm bn bk wm wn skew fA fB nblk nthr sh bid tid;
+  fold SH.kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew fA fB rA rB nblk nthr sh bid tid;
 }
 #pop-options
 
@@ -475,19 +680,23 @@ let output_tiling_bounds (bm bn wm wn m n : pos)
 inline_for_extraction noextract
 let mk_kernel
   (#et_ab #et_acc #et_d : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc,
-     scalar et_d, has_vec_cpy et_d |}
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab,
+     scalar et_acc, has_vec_cpy et_acc, real_like et_acc,
+     scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n #k : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k)) {| T.ctlayout lA |}
        {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
   (gA : array2 et_ab lA { is_global gA }) (#eA : chest2 et_ab (SZ.v m) (SZ.v k))
+       (#rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
   (#lB : layout2 (SZ.v n) (SZ.v k)) {| T.ctlayout lB |}
        {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
   (gB : array2 et_ab lB { is_global gB }) (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
+       (#rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
   (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
        {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
   (gD : array2 et_d lD { is_global gD })
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (bm bn bk wm wn skew group : szp)
   (#sqc : squash (constraints et_ab et_acc bm bn bk wm wn skew))
   (#sq_bmnk : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
@@ -522,6 +731,8 @@ let mk_kernel
   P.nthr_le_max_threads et_ab et_acc bm bn bk wm wn skew;
   P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
   let sq_bmn : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n) = () in
+  let sq_bcon : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                        SZ.v bk /?+ SZ.v k) = () in
   let sq_blk6 : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
                         SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
                         frag /?+ SZ.v wm /\ frag /?+ SZ.v wn) = () in
@@ -544,37 +755,36 @@ let mk_kernel
     kpre  = (fun sh bid tid ->
       SH.kpre gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmn fA fB nblk nthr sh bid tid);
     kpost = (fun sh bid tid ->
-      SH.kpost gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmnk fA fB nblk nthr sh bid tid);
+      SH.kpost gA eA gB eB gD post_map_r bm bn bk wm wn skew #sqc #sq_bmnk fA fB rA rB nblk nthr sh bid tid);
 
     barrier_contract = (fun _bid ptrs ->
-      pipe_contract bm bn bk skew
-        (SH.sar_a0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_a1 bm bn bk wm wn skew #sqc ptrs)
-        (SH.sar_b0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_b1 bm bn bk wm wn skew #sqc ptrs)
-        (SZ.v nthr) (SZ.v k / SZ.v bk));
+      bcontract eA eB bm bn bk wm wn skew #sqc #sq_bcon nthr nblk _bid ptrs);
     barrier_count = (fun _bid -> SZ.v k / SZ.v bk);
     barrier_ok = (fun _bid ptrs ->
-      pipe_p_to_q_transform bm bn bk skew
+      let num_n = SZ.v n / SZ.v bn in
+      bok_bounds (SZ.v m) (SZ.v n) (SZ.v bm) (SZ.v bn) (SZ.v nblk) _bid;
+      pipe_p_to_q_transform_c m n k bm bn bk skew eA eB (_bid / num_n) (_bid % num_n)
         (SH.sar_a0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_a1 bm bn bk wm wn skew #sqc ptrs)
         (SH.sar_b0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_b1 bm bn bk wm wn skew #sqc ptrs)
-        (SZ.v nthr) (SZ.v k / SZ.v bk));
+        (SZ.v nthr) ());
 
     frame = pure True;
 
     block_pre  = (fun bid ->
       SH.block_pre gA eA gB eB gD bm bn wm wn #sq_blk6 fA fB nblk nthr bid);
     block_post = (fun bid ->
-      SH.block_post gA eA gB eB gD bm bn wm wn #sq_blk6 fA fB nblk nthr bid);
+      SH.block_post gA eA gB eB gD post_map_r bm bn wm wn #sq_blk6 fA fB rA rB nblk nthr bid);
 
     setup = setup #_ #et_acc #_ gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmn fA fB nblk nthr;
-    teardown = teardown #_ #et_acc #_ gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmn #sq_mn fA fB nblk nthr;
+    teardown = teardown #_ #et_acc #_ gA eA gB eB gD post_map_r bm bn bk wm wn skew #sqc #sq_bmn #sq_mn fA fB rA rB nblk nthr;
 
     block_frame = (fun ptrs _bid -> SH.block_frame bm bn bk wm wn skew #sqc ptrs);
     block_setup = (fun sh bid ->
       SH.block_setup gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmn fA fB nblk nthr sh bid);
     block_teardown = (fun sh bid ->
-      SH.block_teardown gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmnk fA fB nblk nthr sh bid);
+      SH.block_teardown gA eA gB eB gD post_map_r bm bn bk wm wn skew #sqc #sq_bmnk fA fB rA rB nblk nthr sh bid);
 
-    f = kf gA #eA gB #eB gD post_map bm bn bk wm wn skew group
+    f = kf gA #eA gB #eB gD post_map post_map_r bm bn bk wm wn skew group
           #sqc #sq_bmnk #sq_fits #sq_glob #sq_asAB #sq_asD #sq_geo #sq_vf
           fA fB nblk nthr;
 
@@ -584,7 +794,7 @@ let mk_kernel
       SH.kpre_sendable gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmn
         fA fB nblk nthr sh #sh_inv bid tid);
     kpost_sendable = (fun sh sh_inv bid tid ->
-      SH.kpost_sendable gA eA gB eB gD bm bn bk wm wn skew #sqc #sq_bmnk
-        fA fB nblk nthr sh #sh_inv bid tid);
+      SH.kpost_sendable gA eA gB eB gD post_map_r bm bn bk wm wn skew #sqc #sq_bmnk
+        fA fB rA rB nblk nthr sh #sh_inv bid tid);
   }
 #pop-options
