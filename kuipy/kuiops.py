@@ -1007,7 +1007,7 @@ class MmImpl(_MatmulFamily):
         return self._select(args, kwargs, specs)
 
     def run(self, spec, args, kwargs):
-        name = "mm_jit"
+        name = f"mm_jit_{spec['backend']}"
         fst_t, wrapper_t = self._templates.get(spec["backend"], (None, None))
         wrapper_ctx = _gemm_wrapper_ctx(spec, name)
         if spec["backend"] == "supergemm_splitk":
@@ -1132,7 +1132,7 @@ class AddmmImpl(_MatmulFamily):
         return self._select(args, kwargs, specs)
 
     def run(self, spec, args, kwargs):
-        name = "addmm_jit"
+        name = f"addmm_jit_{spec['backend']}"
         mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
                         _gemm_wrapper_ctx(spec, name))
         alpha = float(_scalar(kwargs.get("alpha", 1)))
