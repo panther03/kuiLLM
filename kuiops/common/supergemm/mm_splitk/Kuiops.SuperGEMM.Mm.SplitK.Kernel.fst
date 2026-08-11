@@ -539,3 +539,150 @@ fn kf
   fold SH.shared_thread_final bm bn bk wm wn skew sh nthr (SZ.v ks / SZ.v bk) (SZ.v tid);
 }
 #pop-options
+
+(* ---------------------------------------------------------------------- *)
+(* mk_kernel : assemble the [kernel_desc]                                  *)
+(* ---------------------------------------------------------------------- *)
+
+let geo_facts
+  (et_ab et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  : Lemma
+      (requires
+        P.constraints et_ab et_acc bm bn bk wm wn skew /\
+        (SZ.v (chunk et_ab) * P.nthr bm bn wm wn) % SZ.v bk == 0)
+      (ensures
+        geo_ok (SZ.v bm) (SZ.v bk) (SZ.v (chunk et_ab)) (P.nthr bm bn wm wn) /\
+        geo_ok (SZ.v bn) (SZ.v bk) (SZ.v (chunk et_ab)) (P.nthr bm bn wm wn))
+=
+  P.nthr_pos bm bn wm wn;
+  P.chunk_nthr_divides_ab et_ab et_acc bm bn bk wm wn skew
+
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 15 --split_queries always"
+inline_for_extraction noextract
+let mk_kernel
+  (#et_ab #et_acc : Type0)
+  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab,
+     scalar et_acc, has_vec_cpy et_acc, real_like et_acc |}
+  (#m #n #k #mws : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k)) {| T.ctlayout lA |}
+       {| str_A : strided_row_major (vtlayout_of_tlayout lA) |}
+  (gA : array2 et_ab lA { is_global gA }) (#eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (#lB : layout2 (SZ.v n) (SZ.v k)) {| T.ctlayout lB |}
+       {| str_B : strided_row_major (vtlayout_of_tlayout lB) |}
+  (gB : array2 et_ab lB { is_global gB }) (#eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (#lW : layout2 (SZ.v mws) (SZ.v n)) {| T.ctlayout lW |}
+       {| strW : strided_row_major (vtlayout_of_tlayout lW) |}
+  (gW : array2 et_acc lW { is_global gW })
+  (rA : chest2 real (SZ.v m) (SZ.v k) { eA %~ rA })
+  (rB : chest2 real (SZ.v n) (SZ.v k) { eB %~ rB })
+  (bm bn bk wm wn skew : szp)
+  (splits ks : szp)
+  (#sqc : squash (constraints et_ab et_acc bm bn bk wm wn skew))
+  (#sq_ws : squash (SZ.v mws == SZ.v splits * SZ.v m /\ SZ.v k == SZ.v splits * SZ.v ks))
+  (#sq_div : squash (SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                SZ.v wm /?+ SZ.v bm /\ SZ.v wn /?+ SZ.v bn /\
+                frag /?+ SZ.v wm /\ frag /?+ SZ.v wn /\
+                SZ.v bk /?+ SZ.v ks /\ SZ.v bk <= SZ.v ks))
+  (#sq_fits : squash (SZ.fits (SZ.v m * SZ.v ks) /\ SZ.fits (SZ.v n * SZ.v ks) /\
+                SZ.fits lA.ulen /\ SZ.fits lB.ulen /\ SZ.fits lW.ulen))
+  (#sq_al16 : squash (aligned 16 (core gA) /\ aligned 16 (core gB) /\ aligned 16 (core gW)))
+  (#sq_asAB : squash (aligned_strided_row_major (SZ.v (chunk et_ab)) str_A /\
+                aligned_strided_row_major (SZ.v (chunk et_ab)) str_B /\
+                SZ.v (chunk et_ab) /?+ SZ.v ks))
+  (#sq_cnbk : squash ((SZ.v (chunk et_ab) * P.nthr bm bn wm wn) % SZ.v bk == 0))
+  (#sq_vf : squash (valid_frag_et_dims et_ab FragA frag frag frag /\
+                valid_frag_et_dims et_ab FragB frag frag frag /\
+                valid_frag_et_dims et_acc FragAcc frag frag frag /\
+                valid_frag_et_comb et_ab et_acc /\
+                SZ.fits (SZ.v wm / frag * (SZ.v wn / frag))))
+  (fA fB : perm)
+  (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (#_ : squash (SZ.v nblk <= SZ.v max_blocks))
+  ()
+  : kernel_desc
+      (gA |-> Frac fA eA **
+       gB |-> Frac fB eB **
+       live gW)
+      (gA |-> Frac fA eA **
+       gB |-> Frac fB eB **
+       live gW)
+=
+  geo_facts et_ab et_acc bm bn bk wm wn skew;
+  P.nthr_pos bm bn wm wn;
+  P.nthr_le_max_threads et_ab et_acc bm bn bk wm wn skew;
+  P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
+  out_tiling_facts (SZ.v bm) (SZ.v bn) wm wn (SZ.v m) (SZ.v n) (SZ.v splits);
+  mws_row_blocks (SZ.v m) (SZ.v bm) (SZ.v splits);
+  ML.cancel_mul_div (SZ.v splits) (SZ.v ks);
+  let sq_out : squash (SH.out_ok (SZ.v bm) (SZ.v bn) wm wn (SZ.v mws) (SZ.v n)) = () in
+  let sq_bcon : squash (SZ.v mws == SZ.v splits * SZ.v m /\ SZ.v k == SZ.v splits * SZ.v ks /\
+                        SZ.v bm /?+ SZ.v m /\ SZ.v bn /?+ SZ.v n /\
+                        SZ.v bk /?+ SZ.v ks) = () in
+  let sq_lw : squash (SZ.fits lW.ulen) = () in
+  let sq_al : squash (aligned 16 (core gA) /\ aligned 16 (core gB) /\ aligned 16 (core gW)) = () in
+  let sq_glob : squash (is_global gA /\ is_global gB) = () in
+  let sq_geo : squash
+      (geo_ok (SZ.v bm) (SZ.v bk) (SZ.v (chunk et_ab)) (P.nthr bm bn wm wn) /\
+       geo_ok (SZ.v bn) (SZ.v bk) (SZ.v (chunk et_ab)) (P.nthr bm bn wm wn)) = () in
+  {
+    nblk;
+    nthr;
+
+    shmems_desc = SH.shmems_desc et_ab et_acc bm bn bk wm wn skew;
+
+    kpre  = (fun sh bid tid ->
+      SH.kpre gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr sh bid tid);
+    kpost = (fun sh bid tid ->
+      SH.kpost gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr
+        (SZ.v ks / SZ.v bk) sh bid tid);
+
+    barrier_contract = (fun _bid ptrs ->
+      bcontract eA eB bm bn bk wm wn skew mws splits ks #sqc #sq_bcon nthr nblk _bid ptrs);
+    barrier_count = (fun _bid -> SZ.v ks / SZ.v bk);
+    barrier_ok = (fun _bid ptrs ->
+      let num_n = SZ.v n / SZ.v bn in
+      let num_m = SZ.v m / SZ.v bm in
+      bok_bounds (SZ.v mws) (SZ.v n) (SZ.v bm) (SZ.v bn) (SZ.v nblk) _bid;
+      div_ub (_bid / num_n) (SZ.v splits) num_m;
+      pipe_p_to_q_transform_c m n ks bm bn bk skew
+        (ematrix_subtile eA (SZ.v m) (SZ.v ks) 0 (_bid / num_n / num_m))
+        (ematrix_subtile eB (SZ.v n) (SZ.v ks) 0 (_bid / num_n / num_m))
+        (_bid / num_n % num_m) (_bid % num_n)
+        (SH.sar_a0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_a1 bm bn bk wm wn skew #sqc ptrs)
+        (SH.sar_b0 bm bn bk wm wn skew #sqc ptrs) (SH.sar_b1 bm bn bk wm wn skew #sqc ptrs)
+        (SZ.v nthr) ());
+
+    frame = pure True;
+
+    block_pre  = (fun bid ->
+      SH.block_pre gA eA gB eB gW bm bn wm wn #sq_out fA fB nblk nthr bid);
+    block_post = (fun bid ->
+      SH.block_pre gA eA gB eB gW bm bn wm wn #sq_out fA fB nblk nthr bid);
+
+    setup = setup #_ #et_acc #_ gA eA gB eB gW bm bn wm wn #sq_out #sq_al fA fB nblk nthr;
+    teardown = teardown #_ #et_acc #_ gA eA gB eB gW bm bn wm wn #sq_out #sq_lw fA fB nblk nthr;
+
+    block_frame = (fun ptrs _bid -> SH.block_frame bm bn bk wm wn skew #sqc ptrs);
+    block_setup = (fun sh bid ->
+      SH.block_setup gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr sh bid);
+    block_teardown = (fun sh bid ->
+      SH.block_teardown gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr
+        (SZ.v ks / SZ.v bk) sh bid);
+
+    f = kf gA #eA gB #eB gW rA rB bm bn bk wm wn skew splits ks
+          #sqc #sq_ws #sq_div #sq_out #sq_fits #sq_glob #sq_asAB #sq_geo #sq_vf
+          fA fB nblk nthr;
+
+    block_pre_sendable = solve;
+    block_post_sendable = solve;
+    kpre_sendable = (fun sh sh_inv bid tid ->
+      SH.kpre_sendable gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out
+        fA fB nblk nthr sh #sh_inv bid tid);
+    kpost_sendable = (fun sh sh_inv bid tid ->
+      SH.kpost_sendable gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out
+        fA fB nblk nthr (SZ.v ks / SZ.v bk) sh #sh_inv bid tid);
+  }
+#pop-options
