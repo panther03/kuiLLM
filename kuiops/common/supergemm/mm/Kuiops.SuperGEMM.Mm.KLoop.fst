@@ -199,7 +199,7 @@ let lemma_tile_index_bound (bigR oR iR : pos) (obr ibr : nat)
 
 (* nested subtile composition (general): the inner tile of an outer tile is one
    subtile at the fine granularity with a composed index. *)
-#push-options "--fuel 0 --ifuel 0 --z3rlimit 30"
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 30 --split_queries always"
 let ematrix_subtile_compose
   (#et : Type) (#bigR #bigC : nat)
   (m : chest2 et bigR bigC)
