@@ -233,6 +233,42 @@ def test_addmm_tensorcore2d(alpha, beta):
     _assert_close(out, ref, torch.float32)
 
 
+@pytest.mark.parametrize("cshape", ["dense", "bcast"])
+@pytest.mark.parametrize("alpha,beta", [(1.0, 1.0), (0.5, 2.0), (-1.5, 3.25)])
+def test_addmm_supergemm(cshape, alpha, beta):
+    """SuperGEMM reads C through a generic read-only view, so one verified
+    kernel serves both an (M, N) matrix and a broadcast row bias."""
+    _need_tensor_cores(torch.bfloat16)
+    impl = kuiops.AddmmImpl()
+    torch.manual_seed(0)
+    M, K, N = 128, 128, 128
+    A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    B = torch.randn(N, K, device="cuda", dtype=torch.bfloat16).t()
+    bias = torch.randn(*((M, N) if cshape == "dense" else (N,)),
+                       device="cuda", dtype=torch.bfloat16)
+    kw = dict(alpha=alpha, beta=beta, impl="supergemm")
+    spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
+    assert spec is not None and spec["backend"] == "supergemm"
+    assert spec["cbcast"] == (cshape == "bcast")
+    out = impl.run(spec, (bias, A, B), kw)
+    ref = torch.addmm(bias, A, B, alpha=alpha, beta=beta)
+    assert out.shape == ref.shape
+    _assert_close(out, ref, torch.bfloat16)
+
+
+def test_addmm_supergemm_rejects_unaligned_a():
+    _need_tensor_cores(torch.bfloat16)
+    impl = kuiops.AddmmImpl()
+    # The staging pipeline reads A with 128-bit loads, so a row that is not a
+    # whole number of 16-byte chunks is out of reach.
+    M, K, N = 128, 132, 128
+    A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    B = torch.randn(N, K, device="cuda", dtype=torch.bfloat16).t()
+    bias = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
+    kw = dict(impl="supergemm")
+    assert impl.supported(aten.addmm.default, (bias, A, B), kw) is None
+
+
 def test_addmm_rejects_f64():
     _need_cuda()
     impl = kuiops.AddmmImpl()
