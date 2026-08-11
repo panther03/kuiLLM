@@ -34,7 +34,7 @@ module SZ = Kuiper.SizeT
 
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.Array2.Layout.Skewed { skew_residual }
-open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live }
+open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, ws_warp_approximates }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_live, pipe_q }
 module T = Kuiper.Tensor
@@ -141,8 +141,8 @@ let shared_thread_final
 (* ---- global-side per-thread pre/post (sh-free) ----
    [gW] is the whole [(mws, n)] workspace; the output capability is the warp's
    [1/warp_size] share of its [(wm, wn)] tile, which is what [mma_store]
-   consumes.  Step 1 leaves the workspace contents unspecified, so [kpost1] and
-   [kpre1] coincide. *)
+   consumes.  [kpre1] leaves the contents unspecified; [kpost1] pins them to
+   the corresponding tile of [rW]. *)
 unfold
 let kpre1
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
@@ -164,6 +164,35 @@ let kpre1
 = gA |-> Frac (fA /. (nblk * nthr)) eA **
   gB |-> Frac (fB /. (nblk * nthr)) eB **
   ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn) bid tid **
+  pure (aligned 16 (core gA)) **
+  pure (aligned 16 (core gB)) **
+  pure (aligned 16 (core gW))
+
+(* The functional counterpart of [kpre1]: the same capabilities, but the
+   workspace share now approximates [rW]. *)
+unfold
+let kpost1
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_acc : Type0) {| scalar et_acc |} {| real_like et_acc |}
+  (#m #n #k #mws : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k))
+  (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lW : layout2 (SZ.v mws) (SZ.v n))
+  (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (gW : array2 et_acc lW)
+  (bm bn wm wn : szp)
+  (#_ : squash (out_ok (SZ.v bm) (SZ.v bn) wm wn (SZ.v mws) (SZ.v n)))
+  (fA fB : perm)
+  (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (bid : natlt nblk) (tid : natlt nthr)
+  : slprop
+= gA |-> Frac (fA /. (nblk * nthr)) eA **
+  gB |-> Frac (fB /. (nblk * nthr)) eB **
+  ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+    bid tid rW **
   pure (aligned 16 (core gA)) **
   pure (aligned 16 (core gB)) **
   pure (aligned 16 (core gW))
@@ -195,6 +224,7 @@ unfold
 let kpost
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -210,9 +240,10 @@ let kpost
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (ktiles : pos)
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (bid : natlt nblk) (tid : natlt nthr)
   : slprop
-= kpre1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid tid **
+= kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid **
   shared_thread_final bm bn bk wm wn skew sh nthr ktiles tid
 
 (* ---- block-level pre/post (sh-free) and frame ---- *)
@@ -237,6 +268,29 @@ let block_pre
   : slprop
 = forall+ (tid : natlt nthr).
     kpre1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid tid
+
+(* The functional block-level postcondition. *)
+unfold
+let block_post
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_acc : Type0) {| scalar et_acc |} {| real_like et_acc |}
+  (#m #n #k #mws : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k))
+  (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lW : layout2 (SZ.v mws) (SZ.v n))
+  (gA : array2 et_ab lA) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (gB : array2 et_ab lB) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (gW : array2 et_acc lW)
+  (bm bn wm wn : szp)
+  (#_ : squash (out_ok (SZ.v bm) (SZ.v bn) wm wn (SZ.v mws) (SZ.v n)))
+  (fA fB : perm)
+  (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (bid : natlt nblk)
+  : slprop
+= forall+ (tid : natlt nthr).
+    kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid
 
 let block_frame
   (#et_ab #et_acc : Type0)
@@ -284,6 +338,7 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -299,15 +354,16 @@ fn block_teardown
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (ktiles : pos)
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (bid : natlt nblk)
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh bid tid) **
+      kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh rW bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_pre gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid
+    block_post gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid
 
 (* ---- block-sendability of the per-thread pre/post ---- *)
 
@@ -336,6 +392,7 @@ val kpre_sendable
 val kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -352,9 +409,10 @@ val kpost_sendable
   (ktiles : pos)
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (c_shmems_inv sh))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh bid tid)
+      (kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh rW bid tid)
 
 (* ---- shared-buffer 16-byte alignment (for cp.async in [kloop]) ---- *)
 val shared_buffers_aligned16

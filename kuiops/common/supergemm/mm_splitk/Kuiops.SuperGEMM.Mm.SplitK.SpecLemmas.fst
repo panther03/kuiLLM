@@ -85,16 +85,16 @@ let splitk_decomposition
 
 #push-options "--fuel 2 --ifuel 0 --z3rlimit 10"
 
-let rec sum_upto (#et : Type) {| scalar et |} (f : nat -> et) (t : nat)
-  : Tot et (decreases t)
+let rec sum_upto (#et : Type) {| scalar et |} (f : nat -> GTot et) (t : nat)
+  : GTot et (decreases t)
 = if t = 0 then zero else add (sum_upto f (t - 1)) (f (t - 1))
 
-let rec rsum_upto (f : nat -> real) (t : nat) : Tot real (decreases t)
+let rec rsum_upto (f : nat -> GTot real) (t : nat) : GTot real (decreases t)
 = if t = 0 then 0.0R else rsum_upto f (t - 1) +. f (t - 1)
 
 let rec sum_upto_approx
   (#et : Type) {| scalar et |} {| real_like et |}
-  (f : nat -> et) (g : nat -> real) (t : nat)
+  (f : nat -> GTot et) (g : nat -> GTot real) (t : nat)
   : Lemma (requires forall (i : nat). i < t ==> f i %~ g i)
           (ensures sum_upto f t %~ rsum_upto g t)
           (decreases t)

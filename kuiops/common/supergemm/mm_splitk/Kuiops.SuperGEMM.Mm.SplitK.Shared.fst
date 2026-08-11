@@ -17,7 +17,8 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, precip }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_split, skew_join }
-open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live }
+open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, ws_warp_approximates }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q,
   unfold_pipe_q_even, unfold_pipe_q_odd }
@@ -298,6 +299,7 @@ ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -313,20 +315,21 @@ fn block_teardown
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
   (ktiles : pos)
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (bid : natlt nblk)
   ()
   requires
     (forall+ (tid : natlt nthr).
-      kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh bid tid) **
+      kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh rW bid tid) **
     block_frame bm bn bk wm wn skew sh
   ensures
     live_c_shmems sh **
-    block_pre gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid
+    block_post gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid
 {
   P.bm_ldt_fits et_ab et_acc bm bn bk wm wn skew;
 
   forevery_unzip #(natlt (SZ.v nthr))
-    (fun tid -> kpre1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid tid)
+    (fun tid -> kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid)
     (fun tid -> shared_thread_final bm bn bk wm wn skew sh nthr ktiles tid);
 
   forevery_map #(natlt (SZ.v nthr))
@@ -563,6 +566,97 @@ let kpre1_sendable
     is_send_across_star pB (pOutput ** pPure) #sendB #sendOutputPure in
   is_send_across_star pA (pB ** pOutput ** pPure) #sendA #sendBOutput
 
+let ws_warp_approximates_sendable
+  (#et : Type0) {| scalar et |} {| real_like et |}
+  (#mws #n : szp)
+  (#lW : layout2 (SZ.v mws) (SZ.v n))
+  (gW : array2 et lW { is_global gW })
+  (bm bn : pos) (wm wn : szp)
+  (#_ : squash (out_ok bm bn wm wn (SZ.v mws) (SZ.v n)))
+  (nblk : szp{SZ.v nblk == SZ.v mws / bm * (SZ.v n / bn)})
+  (nthr : szp{SZ.v nthr == bm / (mfrag wm * frag) * (bn / (nfrag wn * frag)) * warp_size})
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (bid : natlt nblk)
+  (tid : natlt nthr)
+  : is_send_across block_of
+      (ws_warp_approximates gW bm bn frag frag (mfrag wm) (nfrag wn) bid tid rW)
+=
+  let wid : natlt (bm / (mfrag wm * frag) * (bn / (nfrag wn * frag))) = tid / warp_size in
+  let rm = epilogue_warp_input rW bm bn frag frag (mfrag wm) (nfrag wn) bid tid in
+  let tl = warp_tile (block_tile gW bm bn bid) (mfrag wm * frag) (nfrag wn * frag) wid in
+  let ff (em : chest2 et (mfrag wm * frag) (nfrag wn * frag))
+    : is_send_across block_of
+        (warp_tile_pts_to gW bm bn frag frag (mfrag wm) (nfrag wn) bid wid em **
+         pure (em %~ rm)) =
+    is_send_across_star
+      (warp_tile_pts_to gW bm bn frag frag (mfrag wm) (nfrag wn) bid wid em)
+      (pure (em %~ rm))
+      #(send_across_if_send_across_gpu
+          (warp_tile_pts_to gW bm bn frag frag (mfrag wm) (nfrag wn) bid wid em)
+          (is_send_across_global_tensor tl #(precip warp_size) em))
+      #(is_send_across_placeless (pure (em %~ rm)) #(placeless_pure (em %~ rm))) in
+  is_send_across_exists
+    (fun em ->
+      warp_tile_pts_to gW bm bn frag frag (mfrag wm) (nfrag wn) bid wid em **
+      pure (em %~ rm))
+    #ff
+
+let kpost1_sendable
+  (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
+  (#et_acc : Type0) {| scalar et_acc |} {| real_like et_acc |}
+  (#m #n #k #mws : szp)
+  (#lA : layout2 (SZ.v m) (SZ.v k))
+  (#lB : layout2 (SZ.v n) (SZ.v k))
+  (#lW : layout2 (SZ.v mws) (SZ.v n))
+  (gA : array2 et_ab lA { is_global gA }) (eA : chest2 et_ab (SZ.v m) (SZ.v k))
+  (gB : array2 et_ab lB { is_global gB }) (eB : chest2 et_ab (SZ.v n) (SZ.v k))
+  (gW : array2 et_acc lW { is_global gW })
+  (bm bn wm wn : szp)
+  (#_ : squash (out_ok (SZ.v bm) (SZ.v bn) wm wn (SZ.v mws) (SZ.v n)))
+  (fA fB : perm)
+  (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (bid : natlt nblk) (tid : natlt nthr)
+  : is_send_across block_of (
+      kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid)
+=
+  let output_send =
+    ws_warp_approximates_sendable gW (SZ.v bm) (SZ.v bn) wm wn #_ nblk nthr rW bid tid in
+  let pA = gA |-> Frac (fA /. (nblk * nthr)) eA in
+  let pB = gB |-> Frac (fB /. (nblk * nthr)) eB in
+  let pOutput =
+    ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+      bid tid rW in
+  let pAlignedA = pure (aligned 16 (core gA)) in
+  let pAlignedB = pure (aligned 16 (core gB)) in
+  let pAlignedW = pure (aligned 16 (core gW)) in
+  let pPure = pAlignedA ** pAlignedB ** pAlignedW in
+  let sendA : is_send_across block_of pA =
+    send_across_if_send_across_gpu pA
+      (is_send_across_global_tensor gA #(fA /. (nblk * nthr)) eA) in
+  let sendB : is_send_across block_of pB =
+    send_across_if_send_across_gpu pB
+      (is_send_across_global_tensor gB #(fB /. (nblk * nthr)) eB) in
+  let sendAlignedA : is_send_across block_of pAlignedA =
+    is_send_across_placeless pAlignedA
+      #(placeless_pure (aligned 16 (core gA))) in
+  let sendAlignedB : is_send_across block_of pAlignedB =
+    is_send_across_placeless pAlignedB
+      #(placeless_pure (aligned 16 (core gB))) in
+  let sendAlignedW : is_send_across block_of pAlignedW =
+    is_send_across_placeless pAlignedW
+      #(placeless_pure (aligned 16 (core gW))) in
+  let sendPure =
+    is_send_across_star pAlignedA (pAlignedB ** pAlignedW)
+      #sendAlignedA
+      #(is_send_across_star pAlignedB pAlignedW #sendAlignedB #sendAlignedW) in
+  let sendOutputPure =
+    is_send_across_star pOutput pPure #output_send #sendPure in
+  let sendBOutput =
+    is_send_across_star pB (pOutput ** pPure) #sendB #sendOutputPure in
+  is_send_across_star pA (pB ** pOutput ** pPure) #sendA #sendBOutput
+
 let kpre_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
@@ -597,6 +691,7 @@ let kpre_sendable
 let kpost_sendable
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -613,16 +708,17 @@ let kpost_sendable
   (ktiles : pos)
   (sh : c_shmems (shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (#_ : squash (c_shmems_inv sh))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (bid : natlt nblk) (tid : natlt nthr)
   : is_send_across block_of
-      (kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh bid tid)
+      (kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr ktiles sh rW bid tid)
 =
   let base_send =
-    kpre1_sendable gA eA gB eB gW bm bn wm wn #_ fA fB nblk nthr bid tid in
+    kpost1_sendable gA eA gB eB gW bm bn wm wn #_ fA fB nblk nthr rW bid tid in
   let shared_send =
     shared_thread_final_sendable bm bn bk wm wn skew nthr sh #_ ktiles tid in
   is_send_across_star
-    (kpre1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid tid)
+    (kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid)
     (shared_thread_final bm bn bk wm wn skew sh nthr ktiles tid)
     #base_send #shared_send
 

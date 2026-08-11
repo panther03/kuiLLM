@@ -33,9 +33,12 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Kernel.Desc { kernel_desc }
 open Kuiper.Tensor.Tiling { array2_extract_tile_ro', subtile_layout, array2_subtile }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to }
+open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
 open Kuiops.SuperGEMM.Mm.Params
-open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, split_ws_to_warps, gather_ws_warps }
+open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, ws_warp_approximates,
+  split_ws_to_warps, gather_ws_approximates }
+open Kuiops.SuperGEMM.Mm.SplitK.WsLemmas { ws_target, ws_warp_target }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 open Kuiops.SuperGEMM.Mm.SplitK.Store { store_warp_tile }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
@@ -221,6 +224,7 @@ ghost
 fn teardown
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}
+  {| real_like et_acc |}
   (#m #n #k #mws : szp)
   (#lA : layout2 (SZ.v m) (SZ.v k))
   (#lB : layout2 (SZ.v n) (SZ.v k))
@@ -234,14 +238,16 @@ fn teardown
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   ()
   requires
     (forall+ (bid : natlt nblk).
-      SH.block_pre gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid) ** pure True
+      SH.block_post gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid) ** pure True
   ensures
     (gA |-> Frac fA eA) **
     (gB |-> Frac fB eB) **
-    live gW
+    (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+       gW |-> eW ** pure (eW %~ rW))
 {
   let mfw = wm /^ frag_sz;
   let nfw = wn /^ frag_sz;
@@ -252,11 +258,12 @@ fn teardown
   forevery_map_2
     #(natlt nblk) #(natlt nthr)
     (fun bid tid ->
-      SH.kpre1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr bid tid)
+      SH.kpost1 gA eA gB eB gW bm bn wm wn fA fB nblk nthr rW bid tid)
     (fun bid tid ->
       gA |-> Frac (fA /. (nblk * nthr)) eA **
       (gB |-> Frac (fB /. (nblk * nthr)) eB **
-       ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn) bid tid))
+       ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+         bid tid rW))
     fn bid tid {
       ();
     };
@@ -266,12 +273,14 @@ fn teardown
     (fun _ _ -> gA |-> Frac (fA /. (nblk * nthr)) eA)
     (fun bid tid ->
       gB |-> Frac (fB /. (nblk * nthr)) eB **
-      ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn) bid tid);
+      ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+        bid tid rW);
   forevery_unzip_2
     #(natlt nblk) #(natlt nthr)
     (fun _ _ -> gB |-> Frac (fB /. (nblk * nthr)) eB)
     (fun bid tid ->
-      ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn) bid tid);
+      ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+        bid tid rW);
 
   forevery_unfactor' (nblk * nthr) nblk nthr
     (fun _ _ -> gA |-> Frac (fA /. (nblk * nthr)) eA);
@@ -283,7 +292,7 @@ fn teardown
   rewrite each (mfrag wm) as (SZ.v mfw);
   rewrite each (nfrag wn) as (SZ.v nfw);
   rewrite each frag as (SZ.v frag_sz);
-  gather_ws_warps gW bm bn frag_sz frag_sz mfw nfw nblk nthr ();
+  gather_ws_approximates gW bm bn frag_sz frag_sz mfw nfw nblk nthr rW ();
 }
 #pop-options
 
@@ -386,7 +395,8 @@ fn kf
   ensures
     gpu **
     SH.kpost gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr
-      (SZ.v ks / SZ.v bk) sh bid tid **
+      (SZ.v ks / SZ.v bk) sh
+      (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()) bid tid **
     thread_id (SZ.v nthr) (SZ.v tid) **
     block_id (SZ.v nblk) (SZ.v bid) **
     B.barrier_tok (bcontract eA eB bm bn bk wm wn skew mws splits ks nthr nblk (SZ.v bid) sh) **
@@ -516,6 +526,15 @@ fn kf
 
   unfold (ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
             (SZ.v bid) (SZ.v tid));
+  Kuiper.Divides.lemma_divides_product_r (SZ.v bm) (SZ.v splits) (SZ.v m);
+  Kuiper.Divides.lemma_divides_product_r (SZ.v wm) (SZ.v splits) (SZ.v m);
+  Kuiper.Divides.lemma_divides_product_r (SZ.v ks) (SZ.v splits) (SZ.v ks);
+  ML.lemma_div_mod (SZ.v brg) (SZ.v num_m);
+  assert pure (SZ.v brg == SZ.v z * (SZ.v m / SZ.v bm) + SZ.v block_row);
+  assert pure (SZ.v brg < SZ.v mws / SZ.v bm);
+  ws_warp_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB
+    (SZ.v bm) (SZ.v bn) (SZ.v wm) (SZ.v wn)
+    (SZ.v z) (SZ.v block_row) (SZ.v block_col) (SZ.v warp_m) (SZ.v warp_n) () ();
   with ews. assert (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
                       (mfrag wm) (nfrag wn) (SZ.v bid) (SZ.v tid / warp_size) ews);
   unfold (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
@@ -533,8 +552,13 @@ fn kf
   rewrite each wtile as _;
   with ews'. fold (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
                      (mfrag wm) (nfrag wn) (SZ.v bid) (SZ.v tid / warp_size) ews');
-  fold (ws_warp_live gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
-          (SZ.v bid) (SZ.v tid));
+  fold (warp_tile_approximates gW (SZ.v bm) (SZ.v bn) frag frag
+          (mfrag wm) (nfrag wn) (SZ.v bid) (SZ.v tid / warp_size)
+          (epilogue_warp_input (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ())
+            (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn) (SZ.v bid) (SZ.v tid)));
+  fold (ws_warp_approximates gW (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+          (SZ.v bid) (SZ.v tid)
+          (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()));
 
   with ems'. assert (accFrags |-> ems');
   drop_ (accFrags |-> ems');
@@ -611,7 +635,9 @@ let mk_kernel
        live gW)
       (gA |-> Frac fA eA **
        gB |-> Frac fB eB **
-       live gW)
+       (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+          gW |-> eW **
+          pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ())))
 =
   geo_facts et_ab et_acc bm bn bk wm wn skew;
   P.nthr_pos bm bn wm wn;
@@ -640,7 +666,8 @@ let mk_kernel
       SH.kpre gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr sh bid tid);
     kpost = (fun sh bid tid ->
       SH.kpost gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr
-        (SZ.v ks / SZ.v bk) sh bid tid);
+        (SZ.v ks / SZ.v bk) sh
+        (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()) bid tid);
 
     barrier_contract = (fun _bid ptrs ->
       bcontract eA eB bm bn bk wm wn skew mws splits ks #sqc #sq_bcon nthr nblk _bid ptrs);
@@ -663,17 +690,20 @@ let mk_kernel
     block_pre  = (fun bid ->
       SH.block_pre gA eA gB eB gW bm bn wm wn #sq_out fA fB nblk nthr bid);
     block_post = (fun bid ->
-      SH.block_pre gA eA gB eB gW bm bn wm wn #sq_out fA fB nblk nthr bid);
+      SH.block_post gA eA gB eB gW bm bn wm wn #sq_out fA fB nblk nthr
+        (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()) bid);
 
     setup = setup #_ #et_acc #_ gA eA gB eB gW bm bn wm wn #sq_out #sq_al fA fB nblk nthr;
-    teardown = teardown #_ #et_acc #_ gA eA gB eB gW bm bn wm wn #sq_out #sq_lw fA fB nblk nthr;
+    teardown = teardown #_ #et_acc #_ gA eA gB eB gW bm bn wm wn #sq_out #sq_lw fA fB nblk nthr
+      (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ());
 
     block_frame = (fun ptrs _bid -> SH.block_frame bm bn bk wm wn skew #sqc ptrs);
     block_setup = (fun sh bid ->
       SH.block_setup gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr sh bid);
     block_teardown = (fun sh bid ->
       SH.block_teardown gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out fA fB nblk nthr
-        (SZ.v ks / SZ.v bk) sh bid);
+        (SZ.v ks / SZ.v bk) sh
+        (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()) bid);
 
     f = kf gA #eA gB #eB gW rA rB bm bn bk wm wn skew splits ks
           #sqc #sq_ws #sq_div #sq_out #sq_fits #sq_glob #sq_asAB #sq_geo #sq_vf
@@ -686,6 +716,7 @@ let mk_kernel
         fA fB nblk nthr sh #sh_inv bid tid);
     kpost_sendable = (fun sh sh_inv bid tid ->
       SH.kpost_sendable gA eA gB eB gW bm bn bk wm wn skew #sqc #sq_out
-        fA fB nblk nthr (SZ.v ks / SZ.v bk) sh #sh_inv bid tid);
+        fA fB nblk nthr (SZ.v ks / SZ.v bk) sh #sh_inv
+        (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ()) bid tid);
   }
 #pop-options
