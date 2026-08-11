@@ -1,0 +1,35 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiops/mm_splitk/Kuiops.Mm.SplitK.Inst.fst.j2
+//
+// Split-K SuperGEMM, D = A @ B^T. Two launches with a stream synchronization
+// between them: pass 1 writes `splits` fp32 partial products into the
+// caller-supplied workspace `gW`, viewed as (splits*rows, cols); pass 2 sums
+// them and applies `post_map` (= `fcast`). Because of the sync this operator
+// cannot be captured into a CUDA graph.
+//
+// `mws` and `ks` are the workspace row count and the per-split k extent. They
+// are runtime arguments because they appear in `gW`'s layout and in the
+// k-slicing; the C++ wrapper computes them as `splits*M` and `K/splits`.
+
+open Kuiper
+open Kuiops.SuperGEMM.Mm.SplitK
+open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg { l2_row_major }
+open Kuiper.Float.Casts { fcast }
+module SZ = Kuiper.SizeT
+
+let {{ name }} (rows cols shared : szp)
+    (mws : szp { SZ.v mws == {{splits}} * SZ.v rows })
+    (ks : szp { SZ.v shared == {{splits}} * SZ.v ks })
+    (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+    (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
+    (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
+    (gW : array2 ({{ acc_et }}) (l2_row_major (SZ.v mws) (SZ.v cols)) { is_global gW }) =
+    supergemm_mm_splitk_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz
+        (fcast #({{ acc_et }}) #({{ out_et }}))
+        (fun (r:real) -> r)
+        rows shared cols {{splits}}sz mws ks gA gB gD gW

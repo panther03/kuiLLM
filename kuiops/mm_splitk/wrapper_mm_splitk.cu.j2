@@ -1,0 +1,43 @@
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include "kuiops.h"
+
+#include "{{ header }}"
+
+// JIT-GENERATED pybind glue for the verified Kuiper split-K mm kernel.
+// DO NOT EDIT. Generated from kuiops/mm_splitk/wrapper_mm_splitk.cu.j2
+
+torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
+{
+    const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+    auto Ac = A.contiguous();
+    TORCH_CHECK(B.stride(0) == 1 && B.stride(1) == K,
+                "kuiops supergemm_splitk: B must be column-major with ld == K");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0,
+                "kuiops supergemm_splitk: B must be 16-byte aligned");
+    auto &Bc = B;
+    auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
+    // The fp32 (SPLITS, M, N) partial-product workspace. Kuiper kernels never
+    // allocate, so it is materialized here and handed in; its contents need not
+    // be initialized, since pass 1 writes every cell before pass 2 reads any.
+    auto W = torch::empty({ {{splits}} * M, N }, A.options().dtype(at::kFloat));
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(Ac.data_ptr()) % 16 == 0,
+                "kuiops supergemm_splitk: A must be 16-byte aligned");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(C.data_ptr()) % 16 == 0,
+                "kuiops supergemm_splitk: D must be 16-byte aligned");
+
+    at::cuda::CUDAGuard g(A.device());
+
+    {{module}}_{{name}} (
+        (uint32_t)M, (uint32_t)N, (uint32_t)K,
+        (uint32_t)({{splits}} * M), (uint32_t)(K / {{splits}}),
+        reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
+        reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
+        reinterpret_cast<{{cpp_out_et}}*>(C.data_ptr()),
+        reinterpret_cast<float*>(W.data_ptr()),
+        kuiops::current_stream());
+
+    return C;
+}
+
+{% include "_pybind.cu.j2" %}
