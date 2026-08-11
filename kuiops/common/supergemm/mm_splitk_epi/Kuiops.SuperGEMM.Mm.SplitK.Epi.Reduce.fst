@@ -311,6 +311,7 @@ fn accumulate
       Kuiper.Divides.lemma_divides_product_r (SZ.v (chunk et_acc)) (SZ.v dj) (SZ.v (chunk et_d));
       Kuiper.Divides.lemma_divides_sum (SZ.v (chunk et_acc))
         (SZ.v dj * SZ.v (chunk et_d)) (SZ.v ev);
+      assert pure (SZ.v wcol == SZ.v dj * SZ.v (chunk et_d) + SZ.v ev);
       assert pure (SZ.v (chunk et_acc) /? SZ.v wcol);
       divides_helper (SZ.v (chunk et_acc)) strW.offset strW.stride
         (SZ.v wrow) (SZ.v wcol);
