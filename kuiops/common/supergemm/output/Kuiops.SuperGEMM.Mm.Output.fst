@@ -90,7 +90,7 @@ fn split_array2_into_lane_cells
 
 (* ==== Helper 1: layout-generic live split (upstream [split_output_to_lanes]) ==== *)
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn split_output_to_lanes'
   (#et : Type0) {| scalar et, has_vec_cpy et |}
@@ -356,7 +356,7 @@ fn join_array2_from_live_lane_cells
 
 (* ==== Helper 2: layout-generic live gather (inverse of the split) ==== *)
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_warp_live'
   (#et : Type0) {| scalar et, has_vec_cpy et |}
@@ -430,7 +430,7 @@ fn gather_warp_live'
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_block_live'
   (#et : Type0) {| scalar et, has_vec_cpy et |}
@@ -507,7 +507,7 @@ fn gather_block_live'
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_output_live'
   (#et : Type0) {| scalar et, has_vec_cpy et |}
@@ -751,7 +751,7 @@ fn array2_untile_approximates
    Follows upstream [...To.KernelDesc.Teardown.gather_warp / gather_block /
    gather_output] for the functional content, generalised off row-major. *)
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_warp_approximates'
   (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
@@ -935,7 +935,7 @@ fn gather_block_approximates'
 }
 #pop-options
 
-#push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 ghost
 fn gather_output_approximates'
   (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
