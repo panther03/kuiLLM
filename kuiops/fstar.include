@@ -28,3 +28,4 @@ common/supergemm/mm
 common/supergemm/mm_epi
 common/supergemm/mm_splitk
 common/supergemm/mm_epi_splitk
+common/band
