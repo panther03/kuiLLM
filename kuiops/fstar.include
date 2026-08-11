@@ -28,5 +28,5 @@ common/supergemm/output
 common/supergemm/mm
 common/supergemm/mm_epi
 common/supergemm/mm_splitk
-common/supergemm/mm_epi_splitk
+common/supergemm/mm_splitk_epi
 common/band

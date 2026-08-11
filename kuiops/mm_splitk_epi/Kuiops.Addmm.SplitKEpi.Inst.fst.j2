@@ -1,0 +1,56 @@
+module {{ module }}
+#lang-pulse
+
+// JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
+// Generated from kuiops/mm_splitk_epi/Kuiops.Addmm.SplitKEpi.Inst.fst.j2
+//
+// addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B^T), computed by the split-K
+// SuperGEMM: two launches with a stream synchronization between them. Pass 1
+// writes `splits` fp32 partial products into the caller-supplied workspace
+// `gW`, viewed as (splits*rows, cols); pass 2 sums them AND applies the
+// epilogue. The epilogue has to be in pass 2: `lincomb` is affine in the
+// accumulated value, so applying it to a partial sum would add `beta*C` once
+// per split. Because of the sync this operator cannot be graph-captured.
+//
+// `mws` and `ks` are the workspace row count and the per-split k extent; the
+// C++ wrapper computes them as `splits*M` and `K/splits`.
+//
+// C is taken as an arbitrary read-only view, so ONE verified function serves
+// both the dense (M,N) matrix and the broadcast row bias; they differ only in
+// the `vtlayout` chosen here.
+
+open Kuiper
+open Kuiops.Matmuls
+open Kuiops.SuperGEMM.Mm.SplitK.Epi
+open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg { l1_forward, l2_row_major }
+module RO = Kuiper.TensorRO
+module MS = Kuiper.Spec.GEMM
+module SZ = Kuiper.SizeT
+
+{% if cbcast %}
+// `cvtlayout_extended`'s dimension argument is refined (`SZ.fits e`), which
+// typeclass resolution cannot discharge on its own; name the instance here.
+inline_for_extraction noextract
+instance cvt_bcastC (rows cols : szp)
+  : RO.cvtlayout (bcastC (SZ.v rows) (SZ.v cols))
+  = RO.cvtlayout_extended (RO.vtlayout_of_tlayout (l1_forward (SZ.v cols))) (SZ.v rows)
+{% endif %}
+
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp)
+    (mws : szp { SZ.v mws == {{splits}} * SZ.v rows })
+    (ks : szp { SZ.v shared == {{splits}} * SZ.v ks })
+    (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+    (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
+{% if cbcast %}
+    (gC : RO.roarray2 ({{ out_et }}) (bcastC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+{% else %}
+    (gC : RO.roarray2 ({{ out_et }}) (rmC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+{% endif %}
+    (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD })
+    (gW : array2 ({{ acc_et }}) (l2_row_major (SZ.v mws) (SZ.v cols)) { is_global gW }) =
+    supergemm_mm_splitk_epi_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
+        (MS.rlincomb (to_real alpha) (to_real beta))
+        rows shared cols {{splits}}sz mws ks gA gB gC gD gW

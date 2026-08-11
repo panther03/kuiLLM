@@ -529,13 +529,15 @@ _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
                 "tc2d_to_bcast": "Tc2DToBcast",
                 "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D",
                 "supergemm": "SuperGEMM",
-                "supergemm_splitk": "SuperGEMMSplitK"}
+                "supergemm_splitk": "SuperGEMMSplitK",
+                "supergemm_splitk_epi": "SuperGEMMSplitKEpi"}
 
 # Backends taking B column-major (K, N) with leading dimension K.
-_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm", "supergemm_splitk")
+_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm", "supergemm_splitk",
+                "supergemm_splitk_epi")
 
 # Backends that stage A through cp.async and so need a 16-byte aligned A.
-_CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk")
+_CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk", "supergemm_splitk_epi")
 
 # Split counts the split-K backend is instantiated at. The kernel divides the
 # k tiles uniformly, so a split count is legal only when it divides K/bk; the
@@ -545,7 +547,7 @@ _CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk")
 _SPLITK_SPLITS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16)
 
 # Backends never taken by default; see `_explicit_only_filtered`.
-_EXPLICIT_ONLY_BACKENDS = ("supergemm_splitk",)
+_EXPLICIT_ONLY_BACKENDS = ("supergemm_splitk", "supergemm_splitk_epi")
 
 
 def _tc_device_supported(dtype, device):
@@ -796,7 +798,10 @@ def _tiles(backend, dtype, batch, M, N, K, acc_dtype=None, out_dtype=None):
         candidates = _bt2d_tiles(dtype, M, N, K)
     elif backend == "supergemm":
         candidates = _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K)
-    elif backend == "supergemm_splitk":
+    elif backend in ("supergemm_splitk", "supergemm_splitk_epi"):
+        # The epilogue variant lives entirely in pass 2, so pass 1's shared
+        # allocation and grid -- and hence every tiling constraint -- are
+        # identical to the no-epi kernel's.
         candidates = _supergemm_splitk_tiles(dtype, acc_dtype, out_dtype, M, N, K)
     else:
         candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend in _TN_BACKENDS))
@@ -1071,8 +1076,15 @@ class AddmmImpl(_MatmulFamily):
     # SuperGEMM is listed last for now, as in MmImpl: it is still being brought
     # up, so it is reachable only via an explicit `impl="supergemm"`.
     backends = ("tc2d_tn_bcast", "tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d",
-                "supergemm")
+                "supergemm", "supergemm_splitk_epi")
     operation = "aten.addmm.default"
+
+    # Backend-specific JIT templates; everything else uses the class defaults.
+    _templates = {
+        "supergemm_splitk_epi": (
+            "mm_splitk_epi/Kuiops.Addmm.SplitKEpi.Inst.fst.j2",
+            "mm_splitk_epi/wrapper_addmm_splitk_epi.cu.j2"),
+    }
 
     @staticmethod
     def _spec(backend, tile, in_dtype, acc_dtype, out_dtype, cbcast=False):
@@ -1111,10 +1123,11 @@ class AddmmImpl(_MatmulFamily):
             # A row bias. Only the broadcast-layout epilogues can read it; every
             # other backend needs C to have a cell per output element.
             cbcast = True
-            backends = bcast + ("supergemm",)
+            backends = bcast + ("supergemm", "supergemm_splitk_epi")
         else:
             return None
-        backends = _a_aligned_filtered(_tn_filtered(backends, B, K, N), A)
+        backends = _explicit_only_filtered(
+            _a_aligned_filtered(_tn_filtered(backends, B, K, N), A), kwargs)
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
@@ -1133,8 +1146,12 @@ class AddmmImpl(_MatmulFamily):
 
     def run(self, spec, args, kwargs):
         name = f"addmm_jit_{spec['backend']}"
-        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
-                        _gemm_wrapper_ctx(spec, name))
+        fst_t, wrapper_t = self._templates.get(spec["backend"], (None, None))
+        wrapper_ctx = _gemm_wrapper_ctx(spec, name)
+        if spec["backend"] == "supergemm_splitk_epi":
+            wrapper_ctx["splits"] = spec["tile"]["splits"]
+        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name), wrapper_ctx,
+                        fst_template=fst_t, wrapper_template=wrapper_t)
         alpha = float(_scalar(kwargs.get("alpha", 1)))
         beta = float(_scalar(kwargs.get("beta", 1)))
         return mod.run(*args, alpha, beta)
