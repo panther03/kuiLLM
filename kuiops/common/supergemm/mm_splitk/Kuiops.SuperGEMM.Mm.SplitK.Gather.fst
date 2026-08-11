@@ -17,7 +17,12 @@ module Kuiops.SuperGEMM.Mm.SplitK.Gather
 
 open Kuiper
 open Kuiper.Tensor
+open Kuiper.Tensor.Tiling
+open Kuiper.EMatrix
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiper.ForEvery
+
+module SZ = Kuiper.SizeT
 
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 10"
 
@@ -76,6 +81,65 @@ fn array2_gather_n_approximates
   unify_shares a (k - 1) #(f /. k) #(f /. k) e0;
   forevery_natlt_push k (fun (_ : natlt k) -> a |-> Frac (f /. k) e0);
   tensor_gather_n a k #f #e0;
+}
+
+#pop-options
+
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 10"
+
+(* TODO(upstream): a copy of the [array2_untile_approximates] of
+   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown], which has no
+   [.fsti] entry and so cannot be reused. *)
+ghost
+fn array2_untile_approximates
+  (#et : Type0) {| scalar et, real_like et |}
+  (#rows #cols : nat)
+  (#l : layout2 rows cols)
+  (m : array2 et l)
+  (trows : pos{trows /? rows})
+  (tcols : pos{tcols /? cols})
+  {| enumerable (natlt (rows / trows)),
+     enumerable (natlt (cols / tcols)) |}
+  (r : chest2 real rows cols)
+  (#_ : squash (SZ.fits l.ulen))
+  (#_ : squash (SZ.fits (rows / trows)))
+  (#_ : squash (SZ.fits (cols / tcols)))
+  requires
+    forall+ (tr : natlt (rows / trows))
+             (tc : natlt (cols / tcols)).
+      exists* (em : chest2 et trows tcols).
+        array2_subtile m trows tcols tr tc |-> em **
+        pure (em %~ ematrix_subtile r trows tcols tr tc)
+  ensures
+    exists* (em : chest2 et rows cols).
+      m |-> em ** pure (em %~ r)
+{
+  let ff = forevery_exists_2
+    #(natlt (rows / trows)) #_ #(natlt (cols / tcols)) #_
+    (fun tr tc (em : chest2 et trows tcols) ->
+      array2_subtile m trows tcols tr tc |-> em **
+      pure (em %~ ematrix_subtile r trows tcols tr tc));
+  forevery_extract_pure_2
+    #(natlt (rows / trows)) #(natlt (cols / tcols))
+    (fun tr tc ->
+      array2_subtile m trows tcols tr tc |-> ff tr tc **
+      pure (ff tr tc %~ ematrix_subtile r trows tcols tr tc))
+    (fun tr tc ->
+      ff tr tc %~ ematrix_subtile r trows tcols tr tc)
+    fn tr tc { () };
+  assert pure (forall (tr : natlt (rows / trows))
+                      (tc : natlt (cols / tcols)).
+    ff tr tc %~ ematrix_subtile r trows tcols tr tc);
+  forevery_map_2
+    #(natlt (rows / trows)) #(natlt (cols / tcols))
+    (fun tr tc ->
+      array2_subtile m trows tcols tr tc |-> ff tr tc **
+      pure (ff tr tc %~ ematrix_subtile r trows tcols tr tc))
+    (fun tr tc ->
+      array2_subtile m trows tcols tr tc |-> ff tr tc)
+    fn tr tc { () };
+  array2_untile' m trows tcols ff;
+  assert pure (ematrix_from_tiles trows tcols ff %~ r);
 }
 
 #pop-options

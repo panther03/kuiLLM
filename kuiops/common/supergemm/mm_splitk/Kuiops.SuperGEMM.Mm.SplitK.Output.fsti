@@ -18,7 +18,8 @@ module Kuiops.SuperGEMM.Mm.SplitK.Output
 open Kuiper
 open Kuiper.Tensor
 open Kuiper.Tensor.Tiling
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to }
+open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
+open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
@@ -75,3 +76,43 @@ fn gather_ws_warps
     forall+ (bid : natlt nblk) (tid : natlt nthr).
       ws_warp_live gW bm bn tm tn wm wn bid tid
   ensures live gW
+
+(* One thread's share of its warp's output tile, approximating the matching
+   warp tile of [rW]. *)
+let ws_warp_approximates
+  (#et : Type0) {| scalar et |} {| real_like et |}
+  (#mm #nn : nat)
+  (#lW : layout2 mm nn)
+  (gW : array2 et lW)
+  (bm bn tm tn wm wn : pos)
+  (#_ : squash (bm /?+ mm /\ bn /?+ nn /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn /\
+                tm /?+ bm /\ tn /?+ bn))
+  (bid : natlt (mm / bm * (nn / bn)))
+  (tid : natlt (bm / (wm * tm) * (bn / (wn * tn)) * warp_size))
+  (rW : chest2 real mm nn)
+  : slprop
+= warp_tile_approximates gW bm bn tm tn wm wn bid (tid / warp_size)
+    (epilogue_warp_input rW bm bn tm tn wm wn bid tid)
+
+ghost
+fn gather_ws_approximates
+  (#et : Type0) {| scalar et |} {| real_like et |}
+  (#mm #nn : szp)
+  (#lW : layout2 (SZ.v mm) (SZ.v nn)) {| T.ctlayout lW |}
+  (gW : array2 et lW)
+  (bm bn tm tn wm wn : szp)
+  (#_ : squash (bm /?+ mm /\ bn /?+ nn /\
+                wm * tm /?+ bm /\ wn * tn /?+ bn /\
+                tm /?+ bm /\ tn /?+ bn))
+  (#_ : squash (SZ.fits lW.ulen))
+  (nblk : szp{SZ.v nblk == SZ.v mm / SZ.v bm * (SZ.v nn / SZ.v bn)})
+  (nthr : szp{SZ.v nthr == SZ.v bm / (SZ.v wm * SZ.v tm) * (SZ.v bn / (SZ.v wn * SZ.v tn)) * warp_size})
+  (rW : chest2 real (SZ.v mm) (SZ.v nn))
+  ()
+  requires
+    forall+ (bid : natlt nblk) (tid : natlt nthr).
+      ws_warp_approximates gW bm bn tm tn wm wn bid tid rW
+  ensures
+    exists* (eW : chest2 et (SZ.v mm) (SZ.v nn)).
+      gW |-> eW ** pure (eW %~ rW)
