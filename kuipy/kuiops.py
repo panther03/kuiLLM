@@ -537,9 +537,12 @@ _TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm", "supergemm_splitk")
 # Backends that stage A through cp.async and so need a 16-byte aligned A.
 _CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk")
 
-# Split counts the split-K backend is instantiated at. Split-K only pays off
-# when the non-split grid underfills the GPU, so the sweep stays small.
-_SPLITK_SPLITS = (2, 4, 8)
+# Split counts the split-K backend is instantiated at. The kernel divides the
+# k tiles uniformly, so a split count is legal only when it divides K/bk; the
+# non-powers of two are here so that a shape whose tile count is not a power of
+# two still has a candidate near the split count it wants (K/bk == 28 offers 7
+# and 14, K/bk == 36 offers 3, 6, 9, 12). See etc/sweep_splitk_params.py.
+_SPLITK_SPLITS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16)
 
 # Backends never taken by default; see `_explicit_only_filtered`.
 _EXPLICIT_ONLY_BACKENDS = ("supergemm_splitk",)
