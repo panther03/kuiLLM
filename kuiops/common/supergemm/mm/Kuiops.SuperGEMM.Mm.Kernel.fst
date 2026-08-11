@@ -785,7 +785,10 @@ let output_tiling_bounds (bm bn wm wn m n : pos)
 (* mk_kernel : assemble the [kernel_desc]                                  *)
 (* ---------------------------------------------------------------------- *)
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 15 --split_queries always"
+(* [--split_queries always] is a 25x slowdown here (~1000 sub-queries) AND
+   loses hypotheses in the field-type checks; one query per field is both
+   faster and complete. *)
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 15"
 inline_for_extraction noextract
 let mk_kernel
   (#et_ab #et_acc #et_d : Type0)
