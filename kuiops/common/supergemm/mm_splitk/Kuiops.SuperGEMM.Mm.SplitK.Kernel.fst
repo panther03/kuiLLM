@@ -525,7 +525,10 @@ fn kf
                 (mfrag wm * frag) (nfrag wn * frag) (SZ.v tid / warp_size);
   rewrite each _ as wtile;
 
-  store_warp_tile (wm /^ frag_sz) (wn /^ frag_sz) wtile accFrags ();
+  store_warp_tile (wm /^ frag_sz) (wn /^ frag_sz) wtile accFrags
+    (warp_matmul (ematrix_subtile rA (SZ.v m) (SZ.v ks) 0 (SZ.v z))
+                 (ematrix_subtile rB (SZ.v n) (SZ.v ks) 0 (SZ.v z))
+                 (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol)) ();
 
   rewrite each wtile as _;
   with ews'. fold (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
