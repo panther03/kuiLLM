@@ -837,6 +837,7 @@ def _tn_out_ok(backend, N, out_dtype):
 def _gemm_fst_ctx(spec, name):
     return dict(
         module=spec["module"], name=name, backend=spec["backend"],
+        cbcast=spec.get("cbcast", False),
         in_et=torch_dtype_to_fstar(spec["in_dtype"]),
         acc_et=torch_dtype_to_fstar(spec["acc_dtype"]),
         out_et=torch_dtype_to_fstar(spec["out_dtype"]),
@@ -954,17 +955,24 @@ class AddmmImpl(_MatmulFamily):
 
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    backends = ("tc2d_tn_bcast", "tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d")
+    # SuperGEMM is listed last for now, as in MmImpl: it is still being brought
+    # up, so it is reachable only via an explicit `impl="supergemm"`.
+    backends = ("tc2d_tn_bcast", "tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d",
+                "supergemm")
     operation = "aten.addmm.default"
 
     @staticmethod
-    def _spec(backend, tile, in_dtype, acc_dtype, out_dtype):
+    def _spec(backend, tile, in_dtype, acc_dtype, out_dtype, cbcast=False):
+        # SuperGEMM reads C through a generic read-only view, so ONE verified
+        # kernel serves both C shapes; `cbcast` picks the layout it is
+        # instantiated at, and so has to distinguish the two modules.
+        shape_tag = ".Bcast" if cbcast else ""
         module = (
-            f"Kuiops.Addmm.{_BACKEND_TAG[backend]}"
+            f"Kuiops.Addmm.{_BACKEND_TAG[backend]}{shape_tag}"
             f".{torch_dtype_to_fstar(in_dtype).title()}"
             f".{torch_dtype_to_fstar(acc_dtype).title()}"
             f".{torch_dtype_to_fstar(out_dtype).title()}.P_{_tile_tag(tile)}")
-        return dict(module=module, backend=backend, tile=tile,
+        return dict(module=module, backend=backend, tile=tile, cbcast=cbcast,
                     in_dtype=in_dtype, acc_dtype=acc_dtype, out_dtype=out_dtype)
 
     def supported(self, func, args, kwargs):
@@ -981,22 +989,26 @@ class AddmmImpl(_MatmulFamily):
         if K != K2:
             return None
         cshape = tuple(int(x) for x in Cin.shape)
+        # The broadcast-only backends; SuperGEMM serves both C shapes.
         bcast = ("tc2d_tn_bcast", "tc2d_to_bcast")
         if cshape == (M, N):
+            cbcast = False
             backends = tuple(b for b in self.backends if b not in bcast)
         elif cshape in ((N,), (1, N)):
             # A row bias. Only the broadcast-layout epilogues can read it; every
             # other backend needs C to have a cell per output element.
-            backends = bcast
+            cbcast = True
+            backends = bcast + ("supergemm",)
         else:
             return None
-        backends = _tn_filtered(backends, B, K, N)
+        backends = _a_aligned_filtered(_tn_filtered(backends, B, K, N), A)
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:
             return None
         specs = [
-            self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
+            self._spec(backend, tile, A.dtype, acc_dtype, out_dtype,
+                       cbcast=cbcast)
             for backend, acc_dtype, out_dtype
             in self._plans(kwargs, A.dtype, A.device, backends)
             # C is the output buffer, so it already has to be the output type.

@@ -9,7 +9,15 @@ module {{ module }}
 
 open Kuiper
 open Kuiops.Matmuls
+{% if backend == "supergemm" %}
+open Kuiops.SuperGEMM.Mm.Epi
+open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg { l2_row_major }
+module RO = Kuiper.TensorRO
+module SZ = Kuiper.SizeT
+{% else %}
 open Kuiops.GEMM.T.TensorCore2D
+{% endif %}
 
 module MS = Kuiper.Spec.GEMM
 
@@ -46,6 +54,30 @@ let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
         (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
         rows shared cols
+{% elif backend == "supergemm" %}
+// Software-pipelined (cp.async double-buffered) TensorCore GEMM with a C
+// epilogue, D = beta*C + alpha*(A @ B^T). B is the same operand as the
+// `tc2d_tn_bcast` branch -- (K,N) with stride (1,K) -- so no `B.contiguous()`
+// copy is needed.
+//
+// `supergemm_mm_epi_async` takes C as an arbitrary read-only view: ONE verified
+// function serves both the dense (M,N) matrix and the broadcast row bias, which
+// differ only in the `vtlayout` chosen here. `lincomb_to`/`rlincomb` is the
+// instantiation of its generic combiner that gives alpha/beta.
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp)
+    (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+    (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
+{% if cbcast %}
+    (gC : RO.roarray2 ({{ out_et }}) (bcastC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+{% else %}
+    (gC : RO.roarray2 ({{ out_et }}) (rmC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
+{% endif %}
+    (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD }) =
+    supergemm_mm_epi_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz
+        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
+        (MS.rlincomb (to_real alpha) (to_real beta))
+        rows shared cols gA gB gC gD
 {% elif backend == "bt2d" %}
 // BlockTiling2D updates C in place, at batch = 1 (see Kuiops.Mm.Inst).
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =

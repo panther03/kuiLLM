@@ -1,39 +1,8 @@
 module Kuiops.SuperGEMM.Mm.Epi
 
-(* The single top-level polymorphic async launcher for the software-pipelined
-   tensor-core GEMM with a C epilogue.  Computes
-
-     D = comb C (A @ B^T)
-
-   where B is supplied as an [(cols, shared)] = [(N, K)] row-major operand (the
-   weight PyTorch hands to [aten.addmm] for [C + A @ W^T]).
-
-   A, B and C come back at their entry values: the kernel only ever reads them
-   (under a [Frac] share).  D is pinned cell-for-cell -- [%~] on a [chest2] is
-   elementwise, so no implementation can satisfy this while leaving part of D
-   untouched.
-
-   C is an arbitrary read-only (M, N) *view*: it carries only a [vtlayout] with
-   a concrete index map, with no injectivity, contiguity or alignment
-   requirement.  A bias vector broadcast along rows and a dense row-major
-   matrix are both instances of this one function; the epilogue reads C
-   scalarly through the view's [imap], which is the definition and is correct
-   for every view.  The D store stays 128-bit vectorized.
-
-   [comb] is a general binary combiner rather than a fixed [alpha]/[beta] pair:
-   [alpha * acc + beta * c] is the instantiation [MS.lincomb_to alpha beta] /
-   [MS.rlincomb], and the plain [post_map]-only kernel is the instantiation
-   that ignores its C argument.  [comb_r] is tied to [comb] by
-   [approx2 comb comb_r], exactly as [tc2d_to_async] does.
-
-   The [mtranspose] in the specification is the same one [Kuiops.SuperGEMM.Mm]
-   explains: B is [strided_row_major] over [(cols, shared)], so [eB] is
-   [chest2 _ cols shared] and the transpose has to be written down.  It is a
-   specification-level reindex only; nothing is physically transposed.
-
-   This interface deliberately declares exactly ONE [fn] and nothing else: it
-   is imported by every JIT'd operator, so anything extra costs compile time on
-   every kernel build. *)
+(* Implementation of the top-level async launcher; see the interface for the
+   contract.  The body is minimal: compute the grid/block dimensions once, then
+   [launch] the assembled [kernel_desc] under the stream's epoch pledge. *)
 
 #lang-pulse
 
@@ -46,12 +15,15 @@ open Kuiper.TensorCore
 open Kuiper.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
+open Kuiops.SuperGEMM.Mm.Epi.Kernel { mk_kernel }
 
 module MS = Kuiper.Spec.GEMM
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module RO = Kuiper.TensorRO
 module P = Kuiops.SuperGEMM.Mm.Params
+
+#set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
 inline_for_extraction noextract
 fn supergemm_mm_epi_async
@@ -110,3 +82,18 @@ fn supergemm_mm_epi_async
           (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). (gD |-> eD') **
             pure (eD' %~ MS.mmcomb comb_r (to_real_matrix eC)
                     (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
+{
+  let nblk = (rows /^ bm) *^ (cols /^ bn);
+  let nthr = (bm /^ wm) *^ (bn /^ wn) *^ warp_size;
+
+  assert pure (SZ.v nblk == SZ.v rows / SZ.v bm * (SZ.v cols / SZ.v bn));
+  assert pure (SZ.v nthr == P.nthr bm bn wm wn);
+
+  launch (
+    mk_kernel
+      gA #eA #(to_real_matrix eA) gB #eB #(to_real_matrix eB)
+      gC #eC #(to_real_matrix eC) gD comb comb_r
+      bm bn bk wm wn skew group
+      fA fB fC nblk nthr ()
+  ) s;
+}

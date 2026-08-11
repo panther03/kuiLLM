@@ -31,7 +31,7 @@ env/
 .tune_params.json.lock
 
 # local fstar installation
-inst/
+inst
 .kuiper.touch
 .depend
 
