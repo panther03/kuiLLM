@@ -14,7 +14,6 @@ sdpa
 softmax
 topk
 common/strided
-common/gemm_t_tc2d
 common/transpose2
 common/flipflop_t
 common/blockmm

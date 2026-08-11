@@ -14,7 +14,7 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
-{% if backend in ("tc2d_tn_bcast", "supergemm") %}
+{% if backend in ("supergemm",) %}
     // B is already column-major with leading dimension K, which is exactly
     // what the kernel wants, so there is NO `B.contiguous()` copy here.
     // `supported()` checked both of these; re-check rather than trust the
@@ -27,7 +27,7 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
 {% else %}
     auto Bc = B.contiguous();
 {% endif %}
-{% if backend in ("tc2d_to", "tc2d_to_bcast", "tc2d_tn_bcast", "supergemm") %}
+{% if backend in ("tc2d_to", "supergemm") %}
     auto Cin = C.contiguous();
     auto Cout = torch::empty({M, N}, torch::TensorOptions().dtype({{out_scalar}}).device(C.device()));
 {% else %}
@@ -51,7 +51,7 @@ torch::Tensor op_{{ module }} (torch::Tensor C, torch::Tensor A, torch::Tensor B
         (uint32_t)M, (uint32_t)N, (uint32_t)K,
         reinterpret_cast<{{cpp_in_et}}*>(Ac.data_ptr()),
         reinterpret_cast<{{cpp_in_et}}*>(Bc.data_ptr()),
-{% if backend in ("tc2d_to", "tc2d_to_bcast", "tc2d_tn_bcast", "supergemm") %}
+{% if backend in ("tc2d_to", "supergemm") %}
         reinterpret_cast<{{cpp_out_et}}*>(Cin.data_ptr()),
 {% endif %}
         reinterpret_cast<{{cpp_out_et}}*>(Cout.data_ptr()),

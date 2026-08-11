@@ -8,9 +8,7 @@ module {{ module }}
 // buffer's old value.
 
 open Kuiper
-{% if backend == "tc2d_tn" %}
-open Kuiops.GEMM.T.TensorCore2D
-{% elif backend == "supergemm" %}
+{% if backend == "supergemm" %}
 open Kuiops.SuperGEMM.Mm
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout.Alg { l2_row_major }
@@ -22,25 +20,9 @@ open Kuiops.Matmuls
 
 module MS = Kuiper.Spec.GEMM
 
-{% if backend == "tc2d" %}
-let {{ name }} (rows cols shared : szp) =
-    tc2d_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
-        rows shared cols
-{% elif backend == "tc2d_to" %}
+{% if backend == "tc2d_to" %}
 let {{ name }} (rows cols shared : szp) =
     tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
-        rows shared cols
-{% elif backend == "tc2d_tn" %}
-// Transposed-B ("TN") TensorCore2D: B is COLUMN-major with leading dimension
-// `shared`, which is exactly what PyTorch hands `aten.mm` for a frozen weight
-// (shape (K,N), stride (1,K)). No `B.contiguous()` copy is needed. The
-// mathematical spec is identical to the `tc2d_to` branch above.
-let {{ name }} (rows cols shared : szp) =
-    tc2d_tn_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
         rows shared cols

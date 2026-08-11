@@ -474,24 +474,23 @@ def _map_tag(entries):
 # Matmul family (mm / addmm / bmm)
 # ---------------------------------------------------------------------------
 #
-# Five Kuiper GEMM backends. All take A row-major; bt2d/tc2d/tc2d_to take B
-# row-major, tc2d_tn and supergemm take B column-major.
+# Three Kuiper GEMM backends. All take A row-major; bt2d and tc2d_to take B
+# row-major, supergemm takes B column-major.
+#   supergemm  Kuiops.SuperGEMM.Mm, cp.async double-buffered tensor cores,
+#            software-pipelined: the k-tile after next is staged into the
+#            alternate shared buffer while the current one feeds the MMAs. B is
+#            COLUMN-major with leading dimension K, which is what PyTorch hands
+#            a frozen weight, so no `B.contiguous()` copy is needed. This is the
+#            backend of choice wherever it applies.
+#   tc2d_to  Kuiper.Kernel.GEMM.TensorCore2D.To (hosted in kuiops/common/tc2d_to),
+#            accumulates in `acc` and combines into a separate `out` buffer. The
+#            choice for the non-transposed-B case.
 #   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at
-#            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one).
-#   tc2d     TensorCore2D, accumulates in `acc` and combines into `out` in place.
-#   tc2d_to  TensorCore2D.To, accumulates in `acc` and combines into a separate
-#            `out` buffer.
-#   tc2d_tn  Kuiops.GEMM.T.TensorCore2D, the transposed-B variant of tc2d_to.
-#            Same spec, but B is COLUMN-major with leading dimension K, so the
-#            `B.contiguous()` copy the other backends force is not needed.
-#            Divisibility lands on k/bk instead of n/bn.
-#   supergemm  Kuiops.SuperGEMM.Mm, cp.async double-buffered tensor cores. Same
-#            transposed B as tc2d_tn, but software-pipelined: the k-tile after
-#            next is staged into the alternate shared buffer while the current
-#            one feeds the MMAs. No C operand -- it writes `post_map acc` to D.
-#            Needs 16-byte aligned A and D on top of the usual divisibility.
-# The `_bcast` variants of tc2d_to and tc2d_tn read C through a broadcast
-# layout: it is a length-N row vector rather than an (M, N) matrix.
+#            batch = 1: an [m, n] buffer *is* a [1, m, n] batched one). The
+#            fallback when neither of the above applies.
+# Both supergemm and tc2d_to read C as an arbitrary read-only view, so a dense
+# (M, N) matrix and a broadcast length-N row bias are the same kernel at two
+# different layouts -- a `cbcast` specialization flag, not a separate backend.
 
 _SHMEM_BYTES = 101376
 _MAX_THREADS = 1024
@@ -525,16 +524,13 @@ _TC_ACC_DTYPES = {
 
 _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 
-_BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
-                "tc2d_to_bcast": "Tc2DToBcast",
-                "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D",
+_BACKEND_TAG = {"tc2d_to": "Tc2DTo", "bt2d": "Bt2D",
                 "supergemm": "SuperGEMM",
                 "supergemm_splitk": "SuperGEMMSplitK",
                 "supergemm_splitk_epi": "SuperGEMMSplitKEpi"}
 
 # Backends taking B column-major (K, N) with leading dimension K.
-_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm", "supergemm_splitk",
-                "supergemm_splitk_epi")
+_TN_BACKENDS = ("supergemm", "supergemm_splitk", "supergemm_splitk_epi")
 
 # Backends that stage A through cp.async and so need a 16-byte aligned A.
 _CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk", "supergemm_splitk_epi")
@@ -820,10 +816,6 @@ def _backend_supports(backend, in_dtype, acc_dtype, out_dtype, device):
             or not _tc_device_supported(in_dtype, device)
             or acc_dtype not in _TC_ACC_DTYPES[in_dtype]):
         return False
-    if backend == "tc2d":
-        # The epilogue stores the wmma accumulator fragment straight into C,
-        # so C's element type has to be the accumulator's.
-        return out_dtype == acc_dtype and out_dtype in _TC_FRAG_ACC_DTYPES
     return out_dtype in _VEC_CPY_DTYPES
 
 class _MatmulFamily(_Family):
@@ -963,12 +955,7 @@ def _gemm_wrapper_ctx(spec, name):
 class MmImpl(_MatmulFamily):
     fst_template = "mm/Kuiops.Mm.Inst.fst.j2"
     wrapper_template = "mm/wrapper_mm.cu.j2"
-    # SuperGEMM (cp.async software-pipelined) is listed last for now: it is
-    # still being brought up, so it is reachable only via an explicit
-    # `impl="supergemm"`. Its position here should be decided by the Qwen-shape
-    # benchmark once it is complete.
-    backends = ("supergemm", "tc2d_tn", "tc2d", "tc2d_to", "bt2d",
-                "supergemm_splitk")
+    backends = ("supergemm", "tc2d_to", "bt2d", "supergemm_splitk")
     operation = "aten.mm.default"
 
     # Backend-specific JIT templates; everything else uses the class defaults.
@@ -1073,10 +1060,7 @@ class AddmmImpl(_MatmulFamily):
 
     fst_template = "addmm/Kuiops.Addmm.Inst.fst.j2"
     wrapper_template = "addmm/wrapper_addmm.cu.j2"
-    # SuperGEMM is listed last for now, as in MmImpl: it is still being brought
-    # up, so it is reachable only via an explicit `impl="supergemm"`.
-    backends = ("tc2d_tn_bcast", "tc2d_to_bcast", "tc2d", "tc2d_to", "bt2d",
-                "supergemm", "supergemm_splitk_epi")
+    backends = ("supergemm", "tc2d_to", "bt2d", "supergemm_splitk_epi")
     operation = "aten.addmm.default"
 
     # Backend-specific JIT templates; everything else uses the class defaults.
@@ -1114,16 +1098,15 @@ class AddmmImpl(_MatmulFamily):
         if K != K2:
             return None
         cshape = tuple(int(x) for x in Cin.shape)
-        # The broadcast-only backends; SuperGEMM serves both C shapes.
-        bcast = ("tc2d_tn_bcast", "tc2d_to_bcast")
+        # Both tensor-core backends read C as a generic view, so they serve
+        # either C shape at a different layout; bt2d needs a cell per output
+        # element and so is dense-only.
         if cshape == (M, N):
             cbcast = False
-            backends = tuple(b for b in self.backends if b not in bcast)
+            backends = self.backends
         elif cshape in ((N,), (1, N)):
-            # A row bias. Only the broadcast-layout epilogues can read it; every
-            # other backend needs C to have a cell per output element.
             cbcast = True
-            backends = bcast + ("supergemm", "supergemm_splitk_epi")
+            backends = tuple(b for b in self.backends if b != "bt2d")
         else:
             return None
         backends = _explicit_only_filtered(

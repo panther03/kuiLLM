@@ -7,53 +7,35 @@ module {{ module }}
 // addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B), i.e. the GEMM combiner
 // `lincomb alpha beta`.
 
+{% import "_gc_layout.j2" as gcl %}
 open Kuiper
 open Kuiops.Matmuls
-{% if backend == "supergemm" %}
-open Kuiops.SuperGEMM.Mm.Epi
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout.Alg { l1_forward, l2_row_major }
 module RO = Kuiper.TensorRO
 module SZ = Kuiper.SizeT
-{% else %}
-open Kuiops.GEMM.T.TensorCore2D
+{% if backend == "supergemm" %}
+open Kuiops.SuperGEMM.Mm.Epi
 {% endif %}
 
 module MS = Kuiper.Spec.GEMM
 
-{% if backend == "tc2d" %}
-let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
-    tc2d_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
-        (MS.rlincomb (to_real alpha) (to_real beta))
-        rows shared cols
-{% elif backend == "tc2d_to" %}
+{% if backend == "tc2d_to" %}
 // TensorCore2D.To writes the result out of place, so the wrapper passes the
-// copied C buffer as both C and D.
-let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
-    tc2d_to_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+// copied C buffer as both C and D. C is an arbitrary read-only view: the dense
+// matrix and the broadcast row bias are this same kernel at two `vtlayout`s,
+// selected below exactly as in the `supergemm` branch.
+{{ gcl.cvt_instance(cbcast) }}
+let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp)
+    (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+    (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
+{{ gcl.gc_binder(cbcast, out_et) }}
+    (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD }) =
+    {% if cbcast %}tc2d_to_bcast_async{% else %}tc2d_to_async{% endif %} ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
         (MS.rlincomb (to_real alpha) (to_real beta))
-        rows shared cols
-{% elif backend == "tc2d_to_bcast" %}
-// C is a length-`cols` bias vector, read through a broadcast layout: no
-// materialised (rows x cols) copy, and the epilogue addresses it by column only.
-let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
-    tc2d_to_bcast_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
-        (MS.rlincomb (to_real alpha) (to_real beta))
-        rows shared cols
-{% elif backend == "tc2d_tn_bcast" %}
-// As tc2d_to_bcast, but B is column-major, so no `B.contiguous()` copy.
-let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
-    tc2d_tn_bcast_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
-        {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
-        (MS.lincomb_to #({{ acc_et }}) #({{ out_et }}) alpha beta)
-        (MS.rlincomb (to_real alpha) (to_real beta))
-        rows shared cols
+        rows shared cols gA gB gC gD
 {% elif backend == "supergemm" %}
 // Software-pipelined (cp.async double-buffered) TensorCore GEMM with a C
 // epilogue, D = beta*C + alpha*(A @ B^T). B is the same operand as the
@@ -64,22 +46,11 @@ let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp) =
 // function serves both the dense (M,N) matrix and the broadcast row bias, which
 // differ only in the `vtlayout` chosen here. `lincomb_to`/`rlincomb` is the
 // instantiation of its generic combiner that gives alpha/beta.
-{% if cbcast %}
-// `cvtlayout_extended`'s dimension argument is refined (`SZ.fits e`), which
-// typeclass resolution cannot discharge on its own; name the instance here.
-inline_for_extraction noextract
-instance cvt_bcastC (rows cols : szp)
-  : RO.cvtlayout (bcastC (SZ.v rows) (SZ.v cols))
-  = RO.cvtlayout_extended (RO.vtlayout_of_tlayout (l1_forward (SZ.v cols))) (SZ.v rows)
-{% endif %}
+{{ gcl.cvt_instance(cbcast) }}
 let {{ name }} (alpha beta : {{ acc_et }}) (rows cols shared : szp)
     (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
     (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
-{% if cbcast %}
-    (gC : RO.roarray2 ({{ out_et }}) (bcastC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
-{% else %}
-    (gC : RO.roarray2 ({{ out_et }}) (rmC (SZ.v rows) (SZ.v cols)) { RO.is_global gC })
-{% endif %}
+{{ gcl.gc_binder(cbcast, out_et) }}
     (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD }) =
     supergemm_mm_epi_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }}) ({{ out_et }})
         {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz

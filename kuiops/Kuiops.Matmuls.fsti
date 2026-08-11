@@ -222,62 +222,6 @@ fn tc2d_to_async
           pure (eD' %~ MS.mmcomb comb_r
                   (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
 
-#push-options "--split_queries always"
-inline_for_extraction noextract
-fn tc2d_async
-  (et_ab et_acc et_c : Type0)
-  {| scalar et_ab, has_vec_cpy et_ab, real_like et_ab |}
-  {| scalar et_acc, real_like et_acc |}
-  {| scalar et_c, real_like et_c |}
-  (bm bn bk : szp)
-  (#_ : squash (chunk et_ab /?+ bk))
-  (#_ : squash (chunk et_ab /?+ bn))
-  (tm : szp{tm /?+ bm})
-  (tn : szp{tn /?+ bn})
-  (tk : szp{tk /?+ bk})
-  (wm : szp{wm * tm /?+ bm})
-  (wn : szp{wn * tn /?+ bn})
-  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bm * bk)))
-  (#_ : squash (chunk et_ab * (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) /?+ (bk * bn)))
-  (#_ : squash (SZ.fits (wm * wn)))
-  (#_ : squash (SZ.fits (wm * tm)))
-  (#_ : squash (SZ.fits (wn * tn)))
-  (#_ : squash (valid_frag_et_dims et_ab FragA tm tn tk))
-  (#_ : squash (valid_frag_et_dims et_ab FragB tm tn tk))
-  (#_ : squash (valid_frag_et_dims et_acc FragAcc tm tn tk))
-  (#_ : squash (valid_frag_et_comb et_ab et_acc))
-  (#_ : squash (SZ.fits (bm*bk + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
-  (#_ : squash (SZ.fits (bk*bn + (bm/(wm*tm) * (bn/(wn*tn)) * warp_size) - 1)))
-  (#_ : squash ((bm/(wm*tm) * (bn/(wn*tn)) * (SZ.v warp_size)) <= max_threads))
-  (comb : et_c -> et_acc -> et_c)
-  (comb_r : binop real { approx2 comb comb_r })
-  (rows shared cols : szp)
-  (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
-  (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
-  (gC : array2 et_c (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gC })
-  (s : stream_t)
-  (#_ : squash (aligned 16 (core gA)))
-  (#_ : squash (aligned 16 (core gB)))
-  (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
-  (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
-  (#eC : chest2 et_c (SZ.v rows) (SZ.v cols))
-  (#fA #fB : perm)
-  (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
-  requires
-    pure ((rows/bm) * (cols/bn) <= max_blocks) **
-    pure (SZ.fits (rows * cols)) **
-    on gpu_loc (gA |-> Frac fA eA) **
-    on gpu_loc (gB |-> Frac fB eB) **
-    on gpu_loc (gC |-> eC)
-  ensures
-    pledge0 (epoch_done s e)
-      (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-        (exists* eC'. (gC |-> eC') **
-          pure (eC' %~ MS.gmmcomb (fun (x:real) -> x) (fun (x:real) -> x) comb_r
-            (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
-#pop-options
-
 inline_for_extraction noextract
 fn tc2d_to_bcast_async
   (et_ab et_acc et_cd : Type0)
