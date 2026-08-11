@@ -19,3 +19,14 @@ common/transpose2
 common/flipflop_t
 common/blockmm
 common/floataxioms
+common/skewed
+common/pipelined
+common/local_aligned
+common/vecmap
+common/shmem_aligned
+common/supergemm/output
+common/supergemm/mm
+common/supergemm/mm_epi
+common/supergemm/mm_splitk
+common/supergemm/mm_epi_splitk
+common/band

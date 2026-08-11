@@ -1,15 +1,55 @@
 // =============================================================================
-// A flattened, single-file Ampere tensor-core GEMM, written as a porting
-// reference for a Kuiper implementation.
+// A flattened, single-file Ampere tensor-core GEMM.
 //
-// This is the same algorithm as gemm_tc.cuh, with every C++ mechanism that
-// exists only to serve the JIT harness stripped out: no `Params` struct, no
-// `Tile<>` traits class, no `Desc` table of function pointers, no C++ template
-// parameters at all. Everything that was a template parameter is a macro, and
-// everything derived from those macros is a `constexpr int` computed once at
-// the top of the file. Both the pipeline depth and the B layout are specialized
-// (see "SPECIALIZATIONS" below), so the control flow is as close to
-// straight-line as this algorithm gets.
+//     D = alpha * (A @ B^T) + beta * C,  with k split SPLITS ways.
+//
+// This is a porting reference for a Kuiper implementation, not a kernel
+// kuipy dispatches to. It is the same algorithm as the templated
+// gemm_tc.cuh, with every C++ mechanism that exists only to serve the JIT
+// harness stripped out: no `Params` struct, no `Tile<>` traits class, no
+// `Desc` table of function pointers, no C++ template parameters at all.
+// Everything that was a template parameter is a macro, and everything
+// derived from those macros is a `constexpr int` computed once at the top.
+//
+// -----------------------------------------------------------------------------
+// THIS FILE IS ONE OF FOUR
+// -----------------------------------------------------------------------------
+// The GEMM is specialized along two independent axes, giving four kernels that
+// share their entire k-loop, staging, swizzle and mma sequence -- those parts
+// are byte-identical between the files -- and differ only in their k-range and
+// their epilogue:
+//
+//                      | no epilogue (D = A@B^T)      | epilogue (axpby vs C)
+//   -------------------+------------------------------+------------------------
+//   one block owns k   | gemm_tc_flat_nosplitk_noepi  | gemm_tc_flat_nosplitk_epi
+//   k split SPLITS ways| gemm_tc_flat_splitk_noepi    | gemm_tc_flat_splitk_epi
+//
+// The split-K axis. The no-split-K kernels launch (M/BM)*(N/BN) blocks, one per
+// output tile, each walking the whole k dimension. That is the right shape of
+// launch whenever it fills the GPU. When it does not -- a decode-shaped GEMM
+// like M=256, N=896, K=4864 with a 128x128 tile is 2*7 = 14 blocks on 84 SMs --
+// the work is there but it is all stacked along k, which one block traverses
+// sequentially. The split-K kernels cut k into SPLITS contiguous slices and
+// give each its own block, multiplying the block count by SPLITS, at the price
+// of an fp32 workspace and a second pass to reduce it.
+//
+// The epilogue axis. `noepi` computes D = A@B^T and nothing else; it is what
+// aten.mm needs. `epi` computes D = alpha*(A@B^T) + beta*C for a C supplied as
+// an arbitrary view (see the C VIEW section in those files); it is what
+// aten.addmm needs. Separating them removes the C pointer, the alpha/beta
+// scalars, the mode switch and the entire C read from the mm path, which is the
+// hotter of the two: in the target inference pipeline only the fused qkv
+// projection has a bias, while o_proj, gate, up, down and lm_head do not.
+//
+// Which one runs, in that pipeline (24 layers, per decode step):
+//
+//   nosplitk_noepi   o_proj, gate, up, lm_head          73 calls
+//   nosplitk_epi     fused qkv (Linear bias)            24 calls
+//   splitk_noepi     down_proj (N=896, K=4864, split 4) 24 calls
+//   splitk_epi       -- none, but addmm shapes exist elsewhere
+//
+// So the no-split-K kernels handle ~80% of calls and the no-epilogue kernels
+// ~80% of those.
 //
 // -----------------------------------------------------------------------------
 // !!! READ THIS BEFORE PORTING !!!
@@ -20,14 +60,13 @@
 // equivalent parameters are `nat`-indexed arguments that get specialized away at
 // extraction time -- which is exactly what a macro does in C.
 //
-// A Kuiper port MUST keep BM, BN, BK, WM, WN, SKEW and GROUP as parameters of
-// the kernel definition. Do NOT hardcode the values that happen to be set
-// below. The whole point of this kernel is that it is tuned per (shape, dtype,
-// GPU): the values here are one arbitrary point in that space, chosen because
-// they are a reasonable default for a 4096-cubed problem on an A6000. There are
-// forty distinct settings in gemm_tc.cu's table and the autotuner picks a
-// different one for nearly every shape in the inference pipeline. A kernel with
-// these numbers baked in would be a strictly worse kernel.
+// A Kuiper port MUST keep BM, BN, BK, WM, WN, SKEW and GROUP *and SPLITS* as
+// parameters of the kernel definition. Do NOT hardcode the values that happen
+// to be set below. The whole point of this kernel is that it is tuned per
+// (shape, dtype, GPU): the values here are one arbitrary point in that space.
+// There are forty distinct tilings in gemm_tc.cu's table and the autotuner
+// picks a different one for nearly every shape in the inference pipeline. A
+// kernel with these numbers baked in would be a strictly worse kernel.
 //
 // The same goes for the element type (`elem_t`): it is a typedef selected by a
 // macro because this file compiles to one specialization at a time, but the
@@ -38,6 +77,33 @@
 // constant, are only: the 16x16x16 WMMA fragment shape (that is the hardware's
 // shape on sm_80/sm_86), the 32-thread warp, the 16-byte cp.async granule, and
 // the fp32 accumulator type.
+//
+// -----------------------------------------------------------------------------
+// SPLITS IS A COMPILE-TIME PARAMETER
+// -----------------------------------------------------------------------------
+// In gemm_tc.cuh `splits` is a runtime `int`. Here it is a macro, i.e. the
+// generated CUDA is specialized to a fixed split count, which is the right
+// choice for a Kuiper port for three reasons:
+//
+//   1. It is chosen by the same mechanism as everything else. The tuner picks
+//      SPLITS from the shape at the same moment it picks BM/BN/BK/WM/WN, and
+//      the JIT already specializes a kernel per shape. There is no point at
+//      which SPLITS is known but BM is not, so making it the one runtime
+//      parameter buys nothing.
+//   2. It turns the reduction loop into a fully unrolled, fixed-trip-count
+//      loop -- worth having, since the reduce kernel is pure memory traffic
+//      and its loop body is the whole kernel.
+//   3. It makes `SPLITS <= K/BK` (no split may get an empty k-range, see the
+//      k-range comment) a precondition relating a compile-time constant to a
+//      runtime argument, which is the easy kind. As a runtime parameter it
+//      would be a relation between two runtime values that the kernel would
+//      have to either check or carry as a refinement through every call.
+//
+// The cost is that each distinct split count is a distinct extracted kernel.
+// Given that each distinct tiling already is, this changes nothing structural.
+//
+// Note SPLITS == 1 is deliberately rejected by a static_assert below: that is
+// not this kernel's job, it is the matching no-split-K file's.
 //
 // -----------------------------------------------------------------------------
 // SPECIALIZATIONS relative to gemm_tc.cuh
@@ -76,62 +142,108 @@
 //   A   (M, K) row-major, ld = K.   A[m, k] at A(m*K + k).
 //   B   (N, K) row-major, ld = K.   B[n, k] at B(n*K + k).
 //         Equivalently: the (K, N) matrix with column-major storage, which is
-//         how torch labels a transposed / frozen nn.Linear weight. The math
-//         performed is
-//                     D[m, n] = alpha * sum_k A[m, k]*B[n, k]  +  beta*C[...]
-//         i.e. A @ B^T in the (N, K) reading of B.
-//   D   (M, N) row-major, ld = N.   Never aliases A, B or C.
-//   C   depends on the epilogue mode, see below. Read-only.
-//   ws  (splits, M, N) fp32 row-major, only touched when splits > 1.
-//
-// The epilogue operand C is one of three shapes:
-//
-//   EPI_NONE  C is absent (null). D = alpha*(A@B^T). This is the plain-matmul
-//             path and it costs nothing extra: the C read is not merely
-//             predicated off, it is not in the instruction stream at all for
-//             the branch that gets taken.
-//   EPI_VEC   C is a length-N vector, broadcast down the rows:
-//                   D[m, n] = alpha*acc[m, n] + beta*C[n]
-//             *** This is the mode the inference pipeline actually uses. ***
-//             Every `addmm` in the model is a Linear bias, i.e. a length-N
-//             vector added to every row of an (M, N) product. A fragment-level
-//             epilogue cannot express this without first replicating the bias
-//             into shared memory, which is one of the reasons the epilogue here
-//             goes through shared scratch (see EPILOGUE below).
-//   EPI_MAT   C is a dense (M, N) row-major matrix, ld = N:
-//                   D[m, n] = alpha*acc[m, n] + beta*C[m, n]
-//
-// In a real Kuiper implementation, EPI_VEC and EPI_MAT should NOT be two modes
-// of a runtime switch. C should be a `vtensor` -- a tensor carrying an
-// arbitrary broadcast/stride view -- so that a length-N vector broadcast over
-// M rows, a full (M, N) matrix, a single scalar, and anything else expressible
-// as a strided view are all the *same* code path, with the view resolved at
-// specialization time. The three-way `epi` switch below is a C-level stand-in
-// for that, and enumerating exactly the two cases the pipeline needs is a
-// limitation of C, not a design choice. Likewise `alpha * x + beta * c` should
-// really be a generic combinator function (Kuiper's GEMMs are higher-order in
-// the epilogue op), of which axpby is one instance.
+//         how torch labels a transposed / frozen nn.Linear weight.
+//   D   (M, N) row-major, ld = N.   Never aliases any input.
+//   C   an arbitrary (M, N) VIEW, read-only. It has no layout of its own;
+//         see "THE C VIEW" below. The math performed is
+//                 D[m, n] = alpha * sum_k A[m,k]*B[n,k] + beta*C[m, n]
+//   ws  (SPLITS, M, N) fp32 row-major -- the partial-sum workspace. Caller
+//         owned, at least SPLITS*M*N floats. Written by pass 1 (each z
+//         writes exactly ws[z], so the writes are disjoint), read by pass 2.
+//         Needs no initialization: every cell is written before it is read,
+//         because the k-range partition below leaves no split empty.
 //
 // DIVISIBILITY PRECONDITIONS. This kernel does no bounds checking whatsoever;
 // every predicate that a general GEMM would evaluate per tile is discharged by
 // a precondition instead. The caller must guarantee:
 //
 //     M % BM == 0        N % BN == 0        K % BK == 0
-//     K / BK >= splits           (so no split gets an empty k-range)
-//     A, B, C, D all 16-byte aligned; K % VEC == 0 and N % VEC == 0
+//     K / BK >= SPLITS           (so no split gets an empty k-range)
+//     A, B, C, ws and D 16-byte aligned; K % VEC == 0 and N % VEC == 0
 //
 // These are checked by `assert` in the host launcher. In Kuiper they would be
 // refinements on the kernel's argument types, which is strictly better: the
 // caller would be unable to construct an out-of-range call in the first place.
 //
 // =============================================================================
+// THE C VIEW -- NO LAYOUT IS ASSUMED
+// =============================================================================
+// C is NOT a matrix with a known layout. It is an arbitrary *view*: a shape
+// (M, N) together with a function from an (m, n) index pair to an offset into
+// some underlying buffer. That function is `c_index` below, and it is the ONLY
+// place in this file that knows anything about how C is stored. Every read of C
+// goes through it.
+//
+// This mirrors Kuiper's `Kuiper.TensorRO`, where a read-only tensor is a
+// `rotensor et l` for a `vtlayout l` carrying
+//
+//     imap : abs d -> GTot (natlt ulen)
+//
+// -- an arbitrary function from the abstract index space into the base array,
+// explicitly NOT required to be an injection. `c_index` is the concrete
+// counterpart of that map (Kuiper's `cimap`). The GEMM instance that the
+// inference pipeline needs is spelled out in Kuiper as
+//
+//     bcastC rows cols = extended_layout (vtlayout_of_tlayout (l1_forward cols)) rows
+//
+// (see Klas.GEMM.TensorCore2D.To.Bcast.Inst): a contiguous length-`cols` vector
+// whose layout is *extended* over `rows`, i.e. an imap that ignores the row
+// index entirely. That non-injectivity is exactly what broadcasting is.
+//
+// Because every C access is `C[c_index(m, n)]`, the kernel is correct for ANY
+// c_index whatsoever. In particular, replacing its body changes nothing else in
+// the file. The strided form below is provided because it covers every case the
+// pipeline needs with two integers:
+//
+//     CS_M = 0, CS_N = 1   length-N bias vector broadcast down the rows.
+//                          *** This is what every addmm in the model uses. ***
+//                          It is Kuiper's `bcastC`, and it is the default here.
+//     CS_M = N, CS_N = 1   dense (M, N) row-major matrix.
+//     CS_M = 1, CS_N = 0   length-M vector broadcast across the columns.
+//     CS_M = 0, CS_N = 0   a scalar broadcast to everything.
+//     CS_M = 1, CS_N = M   dense (M, N) column-major matrix.
+//
+// The strides are compile-time for the same reason everything else here is: the
+// view is resolved at specialization time, so `CS_M = 0` compiles the row index
+// out of the address computation instead of multiplying by a runtime zero.
+//
+// (The two dense-matrix rows above are written with M and N to say what the map
+// IS; they are only directly instantiable here when the extent in question is
+// known at specialization time, which in the JIT setting it is, since a kernel
+// is compiled per shape. Nothing in the kernel depends on the strides being
+// compile-time -- making them runtime `int`s costs one multiply per granule and
+// forces the scalar path -- so a port is free to take them as arguments. In
+// Kuiper the question does not arise: the layout comes in with the tensor.)
+//
+// >>> THE ONE PLACE LAYOUT LEAKS, AND HOW IT IS FENCED OFF.
+// >>> A GEMM epilogue would like to read C with 128-bit loads, and that is only
+// >>> meaningful if C's elements are contiguous and aligned along n. So there
+// >>> are two read paths below, selected by `if constexpr` on
+// >>> C_CONTIGUOUS_ALIGNED_N -- a compile-time predicate, so exactly one of
+// >>> them is emitted and there is no runtime branch:
+// >>>
+// >>>   * the vectorized path, taken when the view happens to be contiguous and
+// >>>     aligned along n (CS_N == 1 and CS_M a multiple of VEC, which covers
+// >>>     the bias and row-major-matrix cases);
+// >>>   * the scalar path, which calls c_index once per element and is
+// >>>     therefore correct for EVERY view, including ones with no contiguity
+// >>>     at all.
+// >>>
+// >>> The scalar path is the definition; the vectorized path is an
+// >>> optimization that must be *proved* equal to it under its guard. A port
+// >>> that only implements the scalar path is correct and simpler, and only
+// >>> gives up bandwidth on the C read -- which for the broadcast case is a few
+// >>> hundred bytes that stay in L1 anyway.
+//
+// =============================================================================
 // ALGORITHM
 // =============================================================================
-// Blocking. A thread block owns one BM x BN tile of D and walks the whole k
-// dimension in steps of BK. The block tile is partitioned into WM x WN warp
-// tiles, one per warp; each warp holds its entire (WM/16) x (WN/16) grid of
-// fp32 accumulator fragments in registers for the duration of the k-loop, so
-// the accumulators are never spilled or re-read. This is the reason for the
+// Blocking. A thread block owns one BM x BN tile of D *and one of SPLITS
+// contiguous slices of k*, which it
+// walks in steps of BK. The block tile is partitioned into WM x WN warp tiles,
+// one per warp; each warp holds its entire (WM/16) x (WN/16) grid of fp32
+// accumulator fragments in registers for the duration of the k-loop, so the
+// accumulators are never spilled or re-read. This is the reason for the
 // register-pressure ceiling noted at WM/WN below.
 //
 // Data movement. Each k-step stages a BM x BK slab of A and a BN x BK slab of B
@@ -162,53 +274,60 @@
 //   (3) that same `__syncthreads()` is also what makes the *other* buffer safe
 //       to overwrite: its last reader was iteration kt-1, which is ordered
 //       before the barrier.
-// The epilogue's reuse of the same shared allocation is guarded by a fourth
-// `__syncthreads()` after the k-loop, and its reuse of the per-warp scratch
-// across the MFRAG bands by `__syncwarp()` (warp-local, because the scratch
-// band is warp-private).
+//
+// The epilogue needs no barrier at all -- see the argument at the epilogue
+// itself. This is a direct consequence of it touching no shared memory.
+//
+// Correctness of the split itself: the SPLITS k-ranges are contiguous,
+// disjoint and cover [0, K/BK), so summing the SPLITS partials reproduces
+// the full k reduction. Each (z, m, n) workspace cell is written by exactly
+// one thread and read by exactly one thread of the reduce kernel, and the
+// two kernels are ordered by being on the same stream -- so there is no
+// inter-block synchronization anywhere in this design.
 //
 // Numerically, accumulation is fp32 throughout -- the mma accumulator, the
-// shared scratch, and the split-K workspace -- and the single rounding to
-// elem_t happens once, on the final result, in `from_float`. Split-K changes
-// the summation order of the k reduction (it becomes a two-level tree) and so
-// is not bitwise identical to splits == 1, but it is no less accurate.
+// workspace, and the reduce kernel's running sum -- and the single rounding
+// to elem_t happens once, on the final result. Split-K changes the
+// summation order of the k reduction (it becomes a two-level tree) and so is
+// NOT bitwise identical to the no-split-K kernel, but it is no less accurate
+// -- if anything slightly more, since a tree reduction has shallower error
+// growth than a single sequential pass. It is still deterministic and
+// reproducible across launches of the same configuration.
 //
 // =============================================================================
 // KUIPER-EXPRESSIBILITY NOTES
 // =============================================================================
 // Deliberately absent, because Kuiper cannot express them:
 //   * inline PTX of any kind;
-//   * warp shuffles (`__shfl_*`) -- which is why the epilogue and the split-K
-//     reduction both go through memory rather than through registers;
-//   * atomics -- which is why split-K needs a separate reduction kernel and an
-//     fp32 workspace instead of an atomic accumulate into D;
+//   * warp shuffles (`__shfl_*`);
+//   * atomics -- which is the whole reason split-K needs a separate
+//     reduction kernel and an fp32 workspace instead of an atomic
+//     accumulate into D;
 //   * indexing into the individual registers of a WMMA fragment (fragment `.x[]`
 //     under an inferred lane->element mapping). The accumulators are only ever
 //     touched through `fill_fragment`, `mma_sync` and `store_matrix_sync`.
 //
 // Used, and expressible: `nvcuda::wmma` (load_matrix_sync / mma_sync /
 // store_matrix_sync / fill_fragment), cp.async via the `__pipeline_*`
-// intrinsics, 128-bit vectorized loads and stores, `__syncthreads`, `__syncwarp`.
+// intrinsics, 128-bit vectorized loads and stores, `__syncthreads`.
 //
 // One caveat that a port cannot fix and should not be surprised by: CUDA lowers
 // the *bf16* `load_matrix_sync` through a different builtin than the fp16 one,
 // and that builtin does not emit `ldmatrix` -- it emits four generic loads plus
 // a register transpose per fragment. bf16 therefore runs ~15% behind fp16 here
 // for reasons entirely outside this kernel.
+//
 // =============================================================================
 // BUILDING
 // =============================================================================
 // Standalone, one specialization per translation unit. Not in kuipy's
-// _SOURCES: this file is a reference, not a kernel kuipy dispatches to.
+// _SOURCES.
 //
 //   nvcc -O3 --use_fast_math -std=c++17 --expt-relaxed-constexpr \
 //        -gencode=arch=compute_86,code=sm_86 \
-//        -DGEMM_BF16=1 -DBM=128 -DBN=128 -DBK=64 -DWM=64 -DWN=64 \
-//        -c gemm_tc_flat.cu
-//
-// Verified against a naive fp32 reference for 9 tilings x {fp16, bf16} x
-// {EPI_NONE, EPI_VEC, EPI_MAT} x {1, 2, 4} splits x 5 shapes, and measured to
-// be within 1-3% of the templated gemm_tc.cuh on identical configurations.
+//        -DGEMM_BF16=1 -DSPLITS=4 -DBM=64 -DBN=64 -DBK=64 -DWM=32 -DWN=32 \
+//        -DCS_M=0 -DCS_N=1 \
+//        -c gemm_tc_flat_splitk_epi.cu
 // =============================================================================
 
 #include <cuda_bf16.h>
@@ -223,7 +342,7 @@ using namespace nvcuda;
 // =============================================================================
 // CONFIGURATION -- ALL OF THESE ARE TUNING PARAMETERS, NOT CONSTANTS.
 // See the warning at the top of the file. In Kuiper these are kernel
-// parameters; the values here are one tuned point out of forty, not "the"
+// parameters; the values here are one tuned point out of many, not "the"
 // values.
 // =============================================================================
 
@@ -234,18 +353,27 @@ using namespace nvcuda;
 #define GEMM_BF16 0
 #endif
 
+// --- Number of k-slices, i.e. blocks per output tile. See "SPLITS IS A
+// --- COMPILE-TIME PARAMETER" above. Must be >= 2 (use the matching no-split-K
+// --- file for 1) and <= K/BK (checked at launch). Larger SPLITS fills more SMs
+// --- but linearly increases the workspace traffic the reduce kernel must move,
+// --- so it is a real optimum, not a monotone knob.
+#ifndef SPLITS
+#define SPLITS 4
+#endif
+
 // --- Block tile: the BM x BN piece of D one thread block computes, and the BK
 // --- depth of one k-step. Bigger BM*BN means more arithmetic per byte staged
 // --- (ratio BM*BN/(BM+BN)); bigger BK means fewer barriers per unit of work,
 // --- but all three multiply into the shared-memory footprint.
 #ifndef BM
-#define BM 128
+#define BM 64
 #endif
 #ifndef BN
-#define BN 128
+#define BN 64
 #endif
 #ifndef BK
-#define BK 32
+#define BK 64
 #endif
 
 // --- Warp tile: the WM x WN piece of the block tile one warp owns. This fixes
@@ -253,10 +381,10 @@ using namespace nvcuda;
 // --- at (WM/16)*(WN/16)*8 per thread. 64x64 is the practical ceiling on
 // --- sm_86: 128 accumulator registers/thread, ~210-235 total, no spills.
 #ifndef WM
-#define WM 64
+#define WM 32
 #endif
 #ifndef WN
-#define WN 64
+#define WN 32
 #endif
 
 // --- Shared-tile row padding, in elements. NOT cosmetic and NOT free to set to
@@ -270,6 +398,22 @@ using namespace nvcuda;
 // --- the kernel. Purely a scheduling hint; any value >= 1 is correct.
 #ifndef GROUP
 #define GROUP 8
+#endif
+
+// --- The C view's index map, as strides. See "THE C VIEW" above: these two are
+// --- one instance of an arbitrary imap, not an assumption about C's layout.
+// --- The default is Kuiper's `bcastC` -- a length-N vector broadcast down the
+// --- rows, i.e. a Linear bias, which is what every addmm in the pipeline is.
+#ifndef CS_M
+#define CS_M 0
+#endif
+#ifndef CS_N
+#define CS_N 1
+#endif
+
+// --- Reduce kernel block size. Pure memory traffic, so this is not sensitive.
+#ifndef REDUCE_THREADS
+#define REDUCE_THREADS 256
 #endif
 
 #if GEMM_BF16
@@ -319,45 +463,19 @@ constexpr int B_ELEMS = BN * LDT;  // one B buffer, in elements
 constexpr int STAGES = 2;
 constexpr int PIPE_BYTES = STAGES * (A_ELEMS + B_ELEMS) * (int)sizeof(elem_t);
 
-// Epilogue scratch, in its own storage rather than aliased on top of the
-// pipeline buffers -- see SMEM_BYTES below, this is a deliberate choice and a
-// measurable cost. One FRAG-row band of every warp's tile, in fp32, padded for
-// the same bank-conflict reason as LDT.
-constexpr int ESKEW = 4;
-constexpr int LDE = WN + ESKEW;
-constexpr int EPI_BYTES = WARPS * FRAG * LDE * (int)sizeof(float);
-
-// >>> THE TWO USES DO NOT ALIAS, ON PURPOSE. This is `+`, not `max`.
+// >>> The pipeline buffers are the ONLY use of shared memory in this kernel.
+// >>> There is no epilogue scratch to add or to alias, because the output
+// >>> element type here is fp32 -- the accumulator's own type -- so the
+// >>> accumulator fragments go straight to global memory via
+// >>> `store_matrix_sync`, with no conversion and hence nowhere to stage.
 // >>>
-// >>> The pipeline buffers are dead by the time the epilogue runs (one
-// >>> __syncthreads() after the k-loop, see the epilogue), so the epilogue
-// >>> scratch *could* be laid on top of them at offset 0, reinterpreting one
-// >>> allocation from elem_t to float partway through the kernel. gemm_tc.cuh
-// >>> does exactly that. This file does not, because Kuiper is not expected to
-// >>> be able to express a lifetime-based reuse of a single shared allocation
-// >>> at two different element types, and the point of this file is to be
-// >>> faithful to what a port can actually do.
-// >>>
-// >>> Do not "optimize" this back to `max` unless the port really can express
-// >>> the aliasing -- but do know what it costs, because it is not nothing.
-// >>> Shared memory is the occupancy currency on sm_86 (100 KB per SM): for the
-// >>> default tiling `max` is 40960 bytes and `+` is 58368, which is the
-// >>> difference between 2 resident blocks per SM and 1. Measured cost of NOT
-// >>> aliasing (bf16, same tiling, aliased -> un-aliased):
-// >>>     4096^3, 128x128x32 : 94.6 -> 73.1 TF/s   (-29%)
-// >>>     4096^3,  32x128x64 : 41.9 -> 39.2 TF/s   (-7%)
-// >>>     256x4864x896       : no change
-// >>>     256x896x4864, sp4  : no change
-// >>>   Qwen2.5-0.5B decode, whole pipeline : 143.4 -> 141.6 tok/s/seq (-1.3%)
-// >>> Large shapes pay heavily; the skinny decode shapes do not notice, because
-// >>> they never launch enough blocks to fill the machine in the first place.
-// >>> So the tax is workload-dependent: ~1% for LLM decode, ~30% for anything
-// >>> big and square.
-// >>>
-// >>> Note the tuner partly compensates: when the scratch stops being free, two
-// >>> of the 29 tuned pipeline entries move to a smaller footprint (a shallower
-// >>> BK, or a larger warp tile needing fewer warps) to buy the occupancy back.
-constexpr int SMEM_BYTES = PIPE_BYTES + EPI_BYTES;
+// >>> Contrast the no-split-K files, which must narrow fp32 -> elem_t, need a
+// >>> shared fp32 scratch to do it in, and (because a Kuiper port is not
+// >>> expected to be able to reuse one shared allocation at two element types)
+// >>> pay for that scratch on top of their pipeline buffers rather than
+// >>> aliasing it over them. That costs them up to 29% on large shapes. This
+// >>> kernel does not pay it.
+constexpr int SMEM_BYTES = PIPE_BYTES;
 
 // 128-bit access granule, in elements: 8 for both fp16 and bf16. This is the
 // widest load/store the ISA has and the required granule for cp.async's
@@ -382,31 +500,56 @@ static_assert(BM % ROW_STEP == 0 && BN % ROW_STEP == 0,
               "sweeps must tile the staged slabs exactly");
 static_assert(THREADS <= 1024, "block tile needs too many warps");
 
-// Epilogue: a warp writes its WM x WN tile FRAG rows at a time, and each thread
-// stores VEC elements per step.
-constexpr int BAND_VECS = FRAG * WN / VEC;
-static_assert(BAND_VECS % WARP_SIZE == 0,
-              "the epilogue band must divide evenly over a warp");
-
-// Epilogue mode, see SHAPES AND LAYOUTS at the top. Runtime, so that one
-// compiled kernel serves mm and addmm; in Kuiper this is a specialization-time
-// choice of a broadcast view plus a combinator, not a switch.
-enum { EPI_NONE = 0, EPI_MAT = 1, EPI_VEC = 2 };
+static_assert(SPLITS >= 2,
+              "SPLITS == 1 is the matching no-split-K file's job; using this "
+              "kernel for it would add a pointless workspace round trip");
 
 // -----------------------------------------------------------------------------
-// Scalar conversion. Round-to-nearest-even in both directions; these are the
-// only places the fp32 accumulator meets the narrow element type.
+// Scalar conversion. Round-to-nearest-even; this is the only place the fp32
+// accumulation meets the narrow element type, and it happens exactly once per
+// output element.
+//
+// Note there is no fragment-level alternative for bf16: CUDA defines no
+// `wmma::fragment<accumulator, 16, 16, 16, __nv_bfloat16>` at all (only fp16
+// has an accumulator fragment of the narrow type), so the trick Kuiper's
+// KPR_STORE_COMB uses -- declare a second accumulator fragment typed by the
+// destination, convert register-wise, store it -- is simply unavailable when
+// the output is bf16. That is why the narrowing has to happen on ordinary
+// floats, and hence why the accumulators must be spilled to shared scratch
+// first.
 // -----------------------------------------------------------------------------
-__device__ __forceinline__ float to_float(half v) { return __half2float(v); }
-__device__ __forceinline__ float to_float(__nv_bfloat16 v) {
-    return __bfloat162float(v);
-}
 __device__ __forceinline__ half to_elem(float v, half) {
     return __float2half_rn(v);
 }
 __device__ __forceinline__ __nv_bfloat16 to_elem(float v, __nv_bfloat16) {
     return __float2bfloat16_rn(v);
 }
+
+__device__ __forceinline__ float to_float(half v) { return __half2float(v); }
+__device__ __forceinline__ float to_float(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+
+// -----------------------------------------------------------------------------
+// c_index: the C view's index map. THE ONLY PLACE THAT KNOWS HOW C IS STORED.
+//
+// This is the concrete counterpart of a Kuiper `vtlayout`'s `imap` (its
+// `cimap`). Every read of C in this file is `C[c_index(m, n)]`, so the kernel
+// is correct for any function whatsoever here -- including non-injective ones,
+// which is what broadcasting is. See "THE C VIEW" at the top.
+//
+// In Kuiper this is not a function the kernel defines; it is a parameter,
+// supplied by the `rotensor`'s layout and inlined at specialization time.
+// -----------------------------------------------------------------------------
+__device__ __forceinline__ size_t c_index(int m, int n) {
+    return (size_t)m * (size_t)(CS_M) + (size_t)n * (size_t)(CS_N);
+}
+
+// Is this particular view contiguous and 16-byte-alignable along n? If so the
+// epilogue may read C with 128-bit loads; if not it falls back to calling
+// c_index per element, which is correct for every view. Compile-time, so only
+// one of the two paths is ever emitted. See the ">>>" block in "THE C VIEW".
+constexpr bool C_CONTIGUOUS_ALIGNED_N = ((CS_N) == 1) && ((CS_M) % VEC == 0);
 
 // =============================================================================
 // stage_tiles: issue one k-step's worth of global -> shared cp.async.
@@ -465,35 +608,36 @@ __device__ __forceinline__ void stage_tiles(elem_t* a_dst, const elem_t* a_src,
 }
 
 // =============================================================================
-// The GEMM kernel.
+// Pass 1: the partial-sum kernel.
 // =============================================================================
 // Grid:   x = (M/BM)*(N/BN) block tiles, flattened and then swizzled below
-//         z = splits (the k-split index)
+//         z = SPLITS, the k-slice index
 // Block:  THREADS threads, 1-D
 // Shared: SMEM_BYTES, dynamic
+//
+// Writes ws[blockIdx.z] and nothing else. Takes no C, no alpha, no beta and
+// no D: the epilogue belongs to pass 2 and nothing here needs to know it
+// exists. This kernel is in fact IDENTICAL in the epi and noepi files --
+// splitting k moves the entire epilogue into pass 2, so pass 1 cannot tell
+// the two apart. Only the reduce kernel below differs.
 //
 // Arguments are passed flat rather than in a `Params` struct; there is no
 // __grid_constant__ struct to unpack, so every scalar arrives in constant bank
 // 0 exactly as it would in a Kuiper-generated signature.
-extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
-    const elem_t* __restrict__ A,   // (M, K) row-major
-    const elem_t* __restrict__ B,   // (N, K) row-major  == (K, N) column-major
-    const elem_t* __restrict__ C,   // null | (N,) | (M, N) row-major, per `epi`
-    elem_t* __restrict__ D,         // (M, N) row-major
-    float* __restrict__ ws,         // null | (splits, M, N) fp32
-    int M, int N, int K, float alpha, float beta, int splits, int epi) {
+extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_splitk_epi_kernel(
+    const elem_t* __restrict__ A,  // (M, K) row-major
+    const elem_t* __restrict__ B,  // (N, K) row-major  == (K, N) col-major
+    float* __restrict__ ws,        // (SPLITS, M, N) fp32
+    int M, int N, int K) {
     extern __shared__ __align__(16) char smem_raw[];
-    // Layout of the dynamic allocation:
-    //   [ A buf0 | A buf1 | B buf0 | B buf1 | fp32 epilogue scratch ]
-    //     \------------- PIPE_BYTES -------------/\-- EPI_BYTES --/
-    // The epilogue scratch gets its own storage rather than being laid over the
-    // (by then dead) pipeline buffers; see SMEM_BYTES for why.
+    // Layout of the dynamic allocation, in full:
+    //   [ A buf0 | A buf1 | B buf0 | B buf1 ]
+    //     \------------ PIPE_BYTES ---------/
     elem_t* sA = reinterpret_cast<elem_t*>(smem_raw);
     elem_t* sB = sA + STAGES * A_ELEMS;
 
     const int tid = threadIdx.x;
     const int warp = tid / WARP_SIZE;
-    const int lane = tid % WARP_SIZE;
     // Position of this warp's WM x WN tile inside the block's BM x BN tile.
     const int warp_m = warp / WARPS_N;
     const int warp_n = warp % WARPS_N;
@@ -521,19 +665,22 @@ extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
     }
 
     // ------------------------------------------------------------- k-range
-    // Split-K: blockIdx.z takes a contiguous, BK-aligned slice of the k tiles.
-    // The slice bounds are computed by proportional division rather than
-    // `ceil(ktiles/splits)` per split, because the latter can leave a trailing
+    // blockIdx.z takes a contiguous, BK-aligned slice of the k tiles. The
+    // slice bounds are computed by proportional division rather than
+    // `ceil(ktiles/SPLITS)` per split, because the latter can leave a trailing
     // split with an EMPTY range -- and an empty split writes nothing into its
     // workspace slice, which the reduction then reads as uninitialized memory.
     // That was a real, nondeterministic bug in an earlier version. This form
-    // gives every split either floor or ceil of ktiles/splits tiles, so no
-    // split is empty as long as splits <= ktiles, which the launcher enforces.
+    // gives every split either floor or ceil of ktiles/SPLITS tiles, so no
+    // split is empty as long as SPLITS <= ktiles, which the launcher enforces.
+    //
+    // The ranges are contiguous, disjoint and cover [0, ktiles): split z gets
+    // [ktiles*z/SPLITS, ktiles*(z+1)/SPLITS). Summing the SPLITS partials
+    // therefore reproduces the full k reduction exactly.
     const int ktiles_all = K / BK;
-    const int kt0 = (int)((long long)ktiles_all * blockIdx.z / splits);
-    const int kt1 = (int)((long long)ktiles_all * (blockIdx.z + 1) / splits);
+    const int kt0 = (int)((long long)ktiles_all * blockIdx.z / SPLITS);
+    const int kt1 = (int)((long long)ktiles_all * (blockIdx.z + 1) / SPLITS);
     const int ktiles = kt1 - kt0;
-
     // -------------------------------------------------------- accumulators
     // (WM/16) x (WN/16) fp32 fragments, live in registers across the entire
     // k-loop. Only ever touched via fill/mma/store -- never by indexing .x[].
@@ -564,7 +711,7 @@ extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
     // -------------------------------------------------------------- prologue
     // With STAGES == 2 the general `for (s = 0; s < STAGES-1; s++)` prologue is
     // exactly one iteration: fill buffer 0 and start the pipeline. `ktiles >= 1`
-    // is a precondition (splits <= K/BK), so this is unconditional.
+    // is a precondition (SPLITS <= K/BK), so this is unconditional.
     stage_tiles(sA + t_dst, a_src, sB + t_dst, b_src, K);
     a_src += BK;
     b_src += BK;
@@ -645,117 +792,70 @@ extern "C" __global__ __launch_bounds__(THREADS) void gemm_tc_flat_kernel(
     }
 
     // ================================================================ epilogue
-    // The accumulators have to become elem_t in global memory, combined with C.
-    // Doing that by indexing the accumulator registers would require knowing
-    // which lane holds which (m, n) -- an inferred fragment layout, which is
-    // exactly what is off-limits (and is unspecified by the WMMA API anyway).
+    // There isn't one. The destination is fp32 and so is the accumulator, so
+    // the fragments are simply stored where they belong. `store_matrix_sync`
+    // accepts a global pointer, and mem_row_major with ldm = N is exactly the
+    // workspace's layout, so this is a direct spill of registers to memory with
+    // no conversion, no staging and no index arithmetic beyond the base
+    // address. (Kuiper's KPR_STORE_COMB does the same thing -- store a fragment
+    // to a global pointer with ldm -- so this is expressible.)
     //
-    // So: `store_matrix_sync` one FRAG-row band of the warp tile into shared
-    // scratch, which is the API's own sanctioned way out of the fragment
-    // abstraction, then read it back as ordinary floats. Everything after that
-    // -- alpha/beta, the C broadcast, the narrowing -- is plain arithmetic on
-    // plain floats, and the global stores come out 128-bit and coalesced
-    // because consecutive lanes take consecutive VEC-element chunks of a row.
+    // Measured against routing these values through the shared scratch the way
+    // the no-split-K kernels must: bitwise identical, and 0-3% faster
+    // (256x896x4864 sp4 66.8 -> 66.1us, 128x896x4864 sp8 38.8 -> 37.7us,
+    // 256x1152x896 sp2 18.3 -> 17.9us, 256x4864x896 sp2 81.1 -> 78.8us).
     //
-    // Going through memory also costs nothing: this happens once per block, not
-    // once per k-step.
+    // NO BARRIER IS NEEDED HERE, unlike in the no-split-K kernels, and the
+    // reason is worth stating because it is easy to add one "just in case":
+    //   * no shared memory is touched below, so there is nothing to order
+    //     against the k-loop's reads and writes of sA/sB;
+    //   * no cp.async is outstanding. The prologue committed one batch and each
+    //     iteration except the last committed one more, and every iteration
+    //     begins with `wait_prior(0)`, which drains all of them. The last
+    //     iteration commits nothing (its `kt + 1 < ktiles` is false), so on
+    //     exit the count is zero;
+    //   * each thread writes only registers it owns, to addresses no other
+    //     thread writes.
     //
-    // The scratch lives past the pipeline buffers, so this barrier is not
-    // needed for storage safety the way it would be if the two aliased (see
-    // SMEM_BYTES). It is still needed: the block is about to leave the k-loop,
-    // and every warp must have issued its last fragment load before any thread
-    // proceeds, so that no warp races ahead into the epilogue while another is
-    // still reading a buffer that a straggler could otherwise refill.
-    __syncthreads();
-    float* scratch =
-        reinterpret_cast<float*>(smem_raw + PIPE_BYTES) + warp * FRAG * LDE;
-
-    // Top-left corner of this warp's tile in D.
-    const int row_base = block_row * BM + warp_m * WM;
-    const int col_base = block_col * BN + warp_n * WN;
-
+    // Each block writes the BM x BN sub-block of ws[z] that it owns, and
+    // distinct (block, z) own disjoint sub-blocks, so the SPLITS slices are
+    // filled independently with no synchronization between them anywhere.
+    float* wsz = ws + (size_t)blockIdx.z * M * N +
+                 (size_t)(block_row * BM + warp_m * WM) * N +
+                 (block_col * BN + warp_n * WN);
     #pragma unroll
-    for (int i = 0; i < MFRAG; i++) {
-        // Band i occupies rows [row_base + i*FRAG, +FRAG). The scratch is
-        // warp-private, so warp-level barriers suffice: this one waits for the
-        // previous band's reads before the stores below clobber the scratch.
-        __syncwarp();
+    for (int i = 0; i < MFRAG; i++)
         #pragma unroll
         for (int j = 0; j < NFRAG; j++)
-            wmma::store_matrix_sync(scratch + j * FRAG, acc[i][j], LDE,
-                                    wmma::mem_row_major);
-        // ... and this one makes those stores visible to the whole warp, since
-        // lane L below reads elements written by other lanes.
-        __syncwarp();
-
-        #pragma unroll
-        for (int v = lane; v < BAND_VECS; v += WARP_SIZE) {
-            // v enumerates VEC-element chunks of the FRAG x WN band.
-            const int r = (v * VEC) / WN;   // row within the band
-            const int c = (v * VEC) % WN;   // column within the warp tile
-            const int gr = row_base + i * FRAG + r;  // row in D
-            const int gc = col_base + c;             // column in D
-
-            float val[VEC];
-            #pragma unroll
-            for (int e = 0; e < VEC; e++) val[e] = scratch[r * LDE + c + e];
-
-            if (splits > 1) {
-                // Partial-sum path: no epilogue here, no narrowing. Write raw
-                // fp32 into this split's slice of the workspace and let
-                // gemm_tc_flat_reduce_kernel finish the job. There is no
-                // atomic-add alternative available to us.
-                float* dst = ws + (size_t)blockIdx.z * M * N +
-                             (size_t)gr * N + gc;
-                #pragma unroll
-                for (int e = 0; e < VEC; e += 4)
-                    *reinterpret_cast<float4*>(dst + e) =
-                        make_float4(val[e], val[e + 1], val[e + 2], val[e + 3]);
-                continue;
-            }
-
-            elem_t out[VEC];
-            if (epi == EPI_NONE) {
-                #pragma unroll
-                for (int e = 0; e < VEC; e++)
-                    out[e] = to_elem(alpha * val[e], elem_t());
-            } else {
-                // EPI_VEC broadcasts C[n] down the rows; EPI_MAT reads C[m, n].
-                // The only difference is the address, which is why a proper
-                // broadcast-aware vtensor collapses these into one case. Both
-                // reads are 16-byte aligned because gc is a multiple of VEC.
-                const elem_t* src = (epi == EPI_VEC) ? C + gc
-                                                     : C + (size_t)gr * N + gc;
-                elem_t cv[VEC];
-                *reinterpret_cast<int4*>(cv) =
-                    *reinterpret_cast<const int4*>(src);
-                #pragma unroll
-                for (int e = 0; e < VEC; e++)
-                    out[e] = to_elem(alpha * val[e] + beta * to_float(cv[e]),
-                                     elem_t());
-            }
-            elem_t* dst = D + (size_t)gr * N + gc;
-            *reinterpret_cast<int4*>(dst) = *reinterpret_cast<const int4*>(out);
-        }
-    }
+            wmma::store_matrix_sync(wsz + (size_t)(i * FRAG) * N + j * FRAG,
+                                    acc[i][j], N, wmma::mem_row_major);
 }
 
 // =============================================================================
-// Split-K reduction.
+// Pass 2: the reduction, and the only place the epilogue happens.
 // =============================================================================
-// Sums the `splits` fp32 partials in `ws` and applies the epilogue that the
-// main kernel skipped. A separate kernel (rather than an atomic accumulate into
-// D from the main kernel) because atomics are off-limits, and separate rather
-// than a device-wide sync because there is no portable way to do the latter.
+// Sums the SPLITS fp32 partials in `ws`, applies alpha/beta and C, narrows to elem_t, writes D.
+// This is the first point at which a complete k reduction exists for an
+// output element, which is why the epilogue must be here and can only be
+// here: it is affine in the accumulated value, so applying it to a partial
+// sum in each of SPLITS blocks would add beta*C once per split instead of
+// once in total. That constraint -- not a preference -- is what the
+// no-epi/epi split makes structural rather than a runtime branch.
 //
-// Grid-stride over 128-bit output granules, one thread per granule. Cost is a
-// (splits+1) * M * N * 4-byte pass over memory, which is why the tuner only
-// considers splits > 1 when the M/N tiling alone leaves SMs idle.
-extern "C" __global__ void gemm_tc_flat_reduce_kernel(
-    const float* __restrict__ ws,  // (splits, M, N) fp32
-    const elem_t* __restrict__ C,  // null | (N,) | (M, N), per `epi`
+// Grid-stride over 128-bit output granules, one thread per granule, so the grid
+// size is decoupled from M*N and the kernel is correct for any launch
+// configuration. Cost is a (SPLITS + 1) * M * N * 4-byte pass over memory --
+// entirely bandwidth-bound, no math worth speaking of -- which is the price of
+// split-K and the reason the tuner is conservative about using it.
+//
+// The `for (s...)` loop has a compile-time trip count because SPLITS is a
+// macro, so it fully unrolls into SPLITS independent load streams; that is one
+// of the reasons to make SPLITS compile-time (see the header).
+extern "C" __global__ void gemm_tc_reduce_epi_kernel(
+    const float* __restrict__ ws,  // (SPLITS, M, N) fp32
+    const elem_t* __restrict__ C,  // an (M, N) view, via c_index
     elem_t* __restrict__ D,        // (M, N)
-    int M, int N, float alpha, float beta, int splits, int epi) {
+    int M, int N, float alpha, float beta) {
     const size_t total = (size_t)M * N / VEC;  // number of 128-bit granules
     const size_t stride = (size_t)M * N;       // distance between splits
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total;
@@ -765,10 +865,14 @@ extern "C" __global__ void gemm_tc_flat_reduce_kernel(
         float val[VEC];
         #pragma unroll
         for (int e = 0; e < VEC; e++) val[e] = 0.0f;
-        for (int s = 0; s < splits; s++) {
+        #pragma unroll
+        for (int s = 0; s < SPLITS; s++) {
             const float* src = ws + s * stride + off;
             #pragma unroll
             for (int e = 0; e < VEC; e += 4) {
+                // float4, not VEC floats: the workspace is fp32 while D is
+                // elem_t, so one 128-bit granule of D is VEC elements but
+                // VEC/4 float4s of workspace.
                 const float4 v = *reinterpret_cast<const float4*>(src + e);
                 val[e] += v.x;
                 val[e + 1] += v.y;
@@ -778,20 +882,27 @@ extern "C" __global__ void gemm_tc_flat_reduce_kernel(
         }
 
         elem_t out[VEC];
-        if (epi == EPI_NONE) {
-            #pragma unroll
-            for (int e = 0; e < VEC; e++)
-                out[e] = to_elem(alpha * val[e], elem_t());
-        } else {
-            // off % N is the column, which is all EPI_VEC needs; EPI_MAT wants
-            // the flat index itself since C and D have the same (M, N) shape.
-            const elem_t* src = (epi == EPI_VEC) ? C + (off % N) : C + off;
+        // This granule's (m, n). The row is needed even for a view that
+        // ignores it, because c_index -- not this kernel -- decides whether it
+        // matters; a bias view compiles the multiply by CS_M == 0 away.
+        const int gr = (int)(off / (size_t)N);
+        const int gc = (int)(off % (size_t)N);
+        // Two paths, chosen at compile time by the view's own index map. See
+        // "THE C VIEW" at the top; the scalar one assumes nothing at all.
+        if constexpr (C_CONTIGUOUS_ALIGNED_N) {
             elem_t cv[VEC];
-            *reinterpret_cast<int4*>(cv) = *reinterpret_cast<const int4*>(src);
+            *reinterpret_cast<int4*>(cv) =
+                *reinterpret_cast<const int4*>(C + c_index(gr, gc));
             #pragma unroll
             for (int e = 0; e < VEC; e++)
                 out[e] = to_elem(alpha * val[e] + beta * to_float(cv[e]),
                                  elem_t());
+        } else {
+            #pragma unroll
+            for (int e = 0; e < VEC; e++)
+                out[e] = to_elem(
+                    alpha * val[e] + beta * to_float(C[c_index(gr, gc + e)]),
+                    elem_t());
         }
         *reinterpret_cast<int4*>(D + off) =
             *reinterpret_cast<const int4*>(out);
@@ -804,50 +915,47 @@ extern "C" __global__ void gemm_tc_flat_reduce_kernel(
 // Flat on purpose: the general version dispatches through a table of function
 // pointers so that one compiled extension can pick any of forty tilings at run
 // time without a JIT step. That table is JIT-harness machinery, not part of the
-// algorithm, so here there is exactly one kernel and a direct launch.
+// algorithm, so here there are exactly two kernels and two direct launches.
 //
-// `ws` must be at least splits*M*N floats when splits > 1, and may be null
-// otherwise. The caller owns it; the kernel neither allocates nor frees (this
-// matches the convention that Kuiper kernels never allocate).
-extern "C" cudaError_t gemm_tc_flat_launch(const elem_t* A, const elem_t* B,
-                                           const elem_t* C, elem_t* D,
-                                           float* ws, int M, int N, int K,
-                                           float alpha, float beta, int splits,
-                                           int epi, cudaStream_t stream) {
-    // The divisibility preconditions the kernel relies on instead of bounds
+// `ws` must be at least SPLITS*M*N floats and is required, not optional. The
+// caller owns it; neither kernel allocates or frees (this matches the
+// convention that Kuiper kernels never allocate). Its contents need not be
+// initialized: pass 1 writes every cell before pass 2 reads any.
+//
+// Both launches go on the same stream, which is what orders pass 2 after
+// pass 1 -- there is no other synchronization, and in particular nothing
+// device-wide inside either kernel.
+extern "C" cudaError_t gemm_tc_flat_splitk_epi_launch(
+    const elem_t* A, const elem_t* B, const elem_t* C, elem_t* D, float* ws,
+    int M, int N, int K, float alpha, float beta, cudaStream_t stream) {
+    // The divisibility preconditions the kernels rely on instead of bounds
     // checks. In Kuiper these are refinements on the argument types.
     assert(M % BM == 0 && N % BN == 0 && K % BK == 0);
     assert(N % VEC == 0 && K % VEC == 0);
-    assert(epi == EPI_NONE || C != nullptr);
-
-    // A split can never be empty: see the k-range comment in the kernel.
-    const int ktiles = K / BK;
-    if (splits < 1) splits = 1;
-    if (splits > ktiles) splits = ktiles;
-    assert(splits == 1 || ws != nullptr);
+    assert(C != nullptr);
+    assert(ws != nullptr);
+    // No split may be empty; see the k-range comment. Note this is the one
+    // precondition that could not be a static_assert, since K is runtime --
+    // but because SPLITS is compile-time it is still just a bound on K.
+    assert(K / BK >= SPLITS);
 
     // Past 48 KB the larger shared-memory carveout is opt-in per kernel.
     if (SMEM_BYTES > 48 * 1024) {
         cudaError_t e = cudaFuncSetAttribute(
-            gemm_tc_flat_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+            gemm_tc_splitk_epi_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
             SMEM_BYTES);
         if (e != cudaSuccess) return e;
     }
 
-    dim3 grid((M / BM) * (N / BN), 1, splits);
-    gemm_tc_flat_kernel<<<grid, THREADS, SMEM_BYTES, stream>>>(
-        A, B, C, D, ws, M, N, K, alpha, beta, splits, epi);
+    dim3 grid((M / BM) * (N / BN), 1, SPLITS);
+    gemm_tc_splitk_epi_kernel<<<grid, THREADS, SMEM_BYTES, stream>>>(A, B, ws, M, N, K);
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) return e;
 
-    if (splits > 1) {
-        const size_t granules = (size_t)M * N / VEC;
-        const int threads = 256;
-        int blocks = (int)((granules + threads - 1) / threads);
-        if (blocks > 65535) blocks = 65535;  // grid-stride handles the rest
-        gemm_tc_flat_reduce_kernel<<<blocks, threads, 0, stream>>>(
-            ws, C, D, M, N, alpha, beta, splits, epi);
-        e = cudaGetLastError();
-    }
-    return e;
+    const size_t granules = (size_t)M * N / VEC;
+    int blocks = (int)((granules + REDUCE_THREADS - 1) / REDUCE_THREADS);
+    if (blocks > 65535) blocks = 65535;  // grid-stride handles the rest
+    gemm_tc_reduce_epi_kernel<<<blocks, REDUCE_THREADS, 0, stream>>>(
+        ws, C, D, M, N, alpha, beta);
+    return cudaGetLastError();
 }

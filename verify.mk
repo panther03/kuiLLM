@@ -35,9 +35,17 @@ mkobj:
 
 include .depend
 
+ifneq ($(ADMIT),)
+OTHERFLAGS += --admit_smt_queries true
+endif
+
 $(OBJ)/%.checked:
+ifneq ($(ADMIT),)
+	@$(call msg,"CHECK(A)")
+else
 	@$(call msg,"CHECK")
-	@$(CURDIR)/fstar.sh --already_cached '*' -c $< -o $@
+endif
+	@$(CURDIR)/fstar.sh --already_cached '*' $(OTHERFLAGS) -c $< -o $@
 	@touch -c $@
 
 verify-kuiops: .depend $(CHECKED_FILES)

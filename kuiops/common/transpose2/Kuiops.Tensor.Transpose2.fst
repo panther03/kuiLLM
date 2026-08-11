@@ -98,6 +98,28 @@ let lemma_aligned_srm_of_scm (#rows #cols : erased nat) (#l : layout2 rows cols)
           (ensures aligned_strided_row_major n (srm_of_scm scm))
 = ()
 
+(* Dual bridge: a row-major layout is column-major when transposed.  This is
+   what lets a shared B tile staged as [bn x bk] row-major be handed to
+   [mma_loadB_map_cm] as a [bk x bn] column-major operand, which is the whole
+   point of storing B transposed: the tensor core sees it transposed for free,
+   by the choice of fragment layout tag rather than by moving any data. *)
+inline_for_extraction noextract
+let scm_of_srm (#rows #cols : erased nat) (#l : layout2 rows cols)
+  (srm : strided_row_major (vtlayout_of_tlayout l))
+  : strided_col_major (vtlayout_of_tlayout (ltranspose l))
+= {
+    offset = srm.offset;
+    stride = srm.stride;
+    pf = (fun (j : natlt cols) (i : natlt rows) ->
+            ltranspose_cell l i j; srm.pf i j);
+  }
+
+let lemma_aligned_scm_of_srm (#rows #cols : erased nat) (#l : layout2 rows cols)
+  (srm : strided_row_major (vtlayout_of_tlayout l)) (n : pos)
+  : Lemma (requires aligned_strided_row_major n srm)
+          (ensures aligned_strided_col_major n (scm_of_srm srm))
+= ()
+
 (* ------------------------------------------------------------------ *)
 (* Concrete index map for the transposed layout.                       *)
 (* ------------------------------------------------------------------ *)

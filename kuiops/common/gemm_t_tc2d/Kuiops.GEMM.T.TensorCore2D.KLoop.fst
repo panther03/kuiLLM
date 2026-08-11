@@ -139,6 +139,24 @@ ensures
   ()
 }
 
+(* TODO(upstream): [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Epilogue]
+   has this lemma but does not export it from its interface. *)
+let ematrix_subtile_approximates
+  (#et : Type0) {| scalar et, real_like et |}
+  (#rows #cols : nat)
+  (e : chest2 et rows cols)
+  (r : chest2 real rows cols)
+  (trows : pos{trows /?+ rows})
+  (tcols : pos{tcols /?+ cols})
+  (tr : natlt (rows / trows))
+  (tc : natlt (cols / tcols))
+  : Lemma
+      (requires e %~ r)
+      (ensures
+        ematrix_subtile e trows tcols tr tc
+          %~ ematrix_subtile r trows tcols tr tc)
+= ()
+
 #push-options "--z3rlimit 30"
 inline_for_extraction noextract
 fn k_loop_step
@@ -363,6 +381,8 @@ fn k_loop_step
 
   let rA_sub = ematrix_subtile rA bm bk mrow v;
   let rB_sub = ematrix_subtile rB bk bn v mcol;
+  ematrix_subtile_approximates eA rA (SZ.v bm) (SZ.v bk) (SZ.v mrow) (SZ.v v);
+  ematrix_subtile_approximates eB rB (SZ.v bk) (SZ.v bn) (SZ.v v) (SZ.v mcol);
   with rAcc. assert fragarrayAcc_approximates wm wn accFrags rAcc;
   subproducts_tc_2d bm bn bk tm tn tk wm wn
     aFrags bFrags accFrags sA sB

@@ -10,6 +10,12 @@ module {{ module }}
 open Kuiper
 {% if backend == "tc2d_tn" %}
 open Kuiops.GEMM.T.TensorCore2D
+{% elif backend == "supergemm" %}
+open Kuiops.SuperGEMM.Mm
+open Kuiper.Tensor
+open Kuiper.Tensor.Layout.Alg { l2_row_major }
+open Kuiper.Float.Casts { fcast }
+module SZ = Kuiper.SizeT
 {% else %}
 open Kuiops.Matmuls
 {% endif %}
@@ -38,6 +44,27 @@ let {{ name }} (rows cols shared : szp) =
         {{bm}}sz {{bn}}sz {{bk}}sz {{tm}}sz {{tn}}sz {{tk}}sz {{wm}}sz {{wn}}sz
         (MS.comb2_to #({{ acc_et }}) #({{ out_et }})) (MS.comb2 #real)
         rows shared cols
+{% elif backend == "supergemm" %}
+// Software-pipelined (cp.async double-buffered) TensorCore GEMM, D = A @ B^T.
+// B is the same operand as the `tc2d_tn` branch -- (K,N) with stride (1,K),
+// i.e. an (N,K) row-major matrix -- so no `B.contiguous()` copy is needed.
+// There is no C operand: the accumulator is cast to D's element type by
+// `post_map`, which is exactly `fcast`.
+//
+// `supergemm_mm_async` is layout-generic (A, B and D are any `strided_row_major`
+// layout), so specializing it is where the layouts get chosen. Naming the
+// operands here pins them to plain row-major, which is what the wrapper hands
+// over; the alternative -- baking `l2_row_major` into the kernel's own
+// signature -- would throw the genericity away for every other caller.
+let {{ name }} (rows cols shared : szp)
+    (gA : array2 ({{ in_et }}) (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
+    (gB : array2 ({{ in_et }}) (l2_row_major (SZ.v cols) (SZ.v shared)) { is_global gB })
+    (gD : array2 ({{ out_et }}) (l2_row_major (SZ.v rows) (SZ.v cols)) { is_global gD }) =
+    supergemm_mm_async ({{ in_et }}) ({{ acc_et }}) ({{ out_et }})
+        {{bm}}sz {{bn}}sz {{bk}}sz {{wm}}sz {{wn}}sz {{skew}}sz {{group}}sz
+        (fcast #({{ acc_et }}) #({{ out_et }}))
+        (fun (r:real) -> r)
+        rows shared cols gA gB gD
 {% elif backend == "bt2d" %}
 // BlockTiling2D is batched; an [m, n] row-major buffer *is* a [1, m, n] batched
 // row-major one, so this runs it at batch = 1 over the very same pointers.

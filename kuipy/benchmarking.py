@@ -50,7 +50,8 @@ def time_call(fn, iters=50, warmup=10):
 
 
 def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
-                 reference, flops=None, iters=50, warmup=10, warmup_ms=300):
+                 reference, flops=None, iters=50, warmup=10, warmup_ms=300,
+                 settle_ms=50):
     """Benchmark ``impls`` against ``reference`` over ``cases``.
 
     ``cases`` are ``(name, *data)`` tuples; ``make_inputs``, ``case_columns`` and
@@ -62,7 +63,17 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
     ``impls`` is a list of ``(name, callable)``. Each contender is timed once;
     the output of its last timed call is what its error is measured on, against
     the reference's. ``warmup_ms`` of dummy load precedes the whole run to pin
-    the GPU clocks (see ``warm_up``).
+    the GPU clocks (see ``warm_up``), and ``settle_ms`` re-pins them before each
+    individual measurement: a single up-front ramp leaves the first contender of
+    the first case still climbing, which read 6x slow on a 35us kernel and made
+    the first row of the table meaningless.
+
+    Even with both of those, the *whole* first case still read slow -- the dummy
+    ``torch.mm`` load ramps the clocks but does not prime the contenders' own
+    code paths (module load, shared-memory carveout, first-launch JIT), and on a
+    ~40us kernel that residue was a 25% error, large enough to look like a real
+    regression. The first case is therefore run once and discarded before any
+    timing is taken.
 
     Returns a ``pandas.DataFrame``, one row per case.
     """
@@ -70,11 +81,18 @@ def bench_matrix(cases, make_inputs, case_columns, case_column_names, impls,
 
     warm_up(warmup_ms)
     contenders = list(impls) + [("ref", reference)]
+    if cases:
+        prime_args, prime_kwargs = make_inputs(*cases[0][1:])
+        for _, fn in contenders:
+            time_call(lambda: fn(*prime_args, **prime_kwargs),
+                      iters=iters, warmup=warmup)
     rows = []
     for name, *data in cases:
         args, kwargs = make_inputs(*data)
         times, outs = {}, {}
         for label, fn in contenders:
+            if settle_ms:
+                warm_up(settle_ms)
             times[label], outs[label] = time_call(
                 lambda: fn(*args, **kwargs), iters=iters, warmup=warmup)
 

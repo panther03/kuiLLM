@@ -23,8 +23,17 @@ _DT = {
 
 
 def set_enabled(on: bool):
+    """Enable/disable graph tracing.
+
+    Tracing only sees graphs the post-grad pass actually walks, and Inductor
+    replays cached FX graphs without re-running the pass -- a warm cache would
+    silently produce an empty trace. Disable the caches while tracing.
+    """
     global enabled
     enabled = on
+    if on:
+        import torch._inductor.config as _ind_config
+        _ind_config.force_disable_caches = True
 
 
 def reset():

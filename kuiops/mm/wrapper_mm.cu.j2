@@ -11,22 +11,31 @@ torch::Tensor op_{{ module }} (torch::Tensor A, torch::Tensor B)
 {
     const int64_t M = A.size(0), K = A.size(1), N = B.size(1);
     auto Ac = A.contiguous();
-{% if backend == "tc2d_tn" %}
-    // The whole point of the TN backend: B is already column-major with
+{% if backend in ("tc2d_tn", "supergemm") %}
+    // The whole point of the TN backends: B is already column-major with
     // leading dimension K, which is what the kernel wants, so there is NO
     // `B.contiguous()` copy here. `supported()` has already checked
     // B.stride() == (1, K) and 16-byte alignment of B.data_ptr(); both are
     // preconditions of the verified kernel, so re-check them cheaply rather
     // than trusting the dispatcher.
     TORCH_CHECK(B.stride(0) == 1 && B.stride(1) == K,
-                "kuiops tc2d_tn: B must be column-major with ld == K");
+                "kuiops {{backend}}: B must be column-major with ld == K");
     TORCH_CHECK(reinterpret_cast<uintptr_t>(B.data_ptr()) % 16 == 0,
-                "kuiops tc2d_tn: B must be 16-byte aligned");
+                "kuiops {{backend}}: B must be 16-byte aligned");
     auto &Bc = B;
 {% else %}
     auto Bc = B.contiguous();
 {% endif %}
     auto C = torch::empty({M, N}, A.options().dtype({{out_scalar}}));
+{% if backend == "supergemm" %}
+    // The pipelined kernel stages A through cp.async and drains D with 128-bit
+    // stores, so both need the same 16-byte alignment already checked for B.
+    // `torch::empty` is over-aligned, but `Ac` may still be an offset view.
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(Ac.data_ptr()) % 16 == 0,
+                "kuiops supergemm: A must be 16-byte aligned");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(C.data_ptr()) % 16 == 0,
+                "kuiops supergemm: D must be 16-byte aligned");
+{% endif %}
 
     at::cuda::CUDAGuard g(A.device());
 
