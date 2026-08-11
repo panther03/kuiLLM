@@ -39,10 +39,11 @@ class _Family:
     # They stay callable directly (e.g. from the unit tests).
     graph_safe = True
 
-    def _mod(self, module, fst_ctx, wrapper_ctx, fst_template=None):
+    def _mod(self, module, fst_ctx, wrapper_ctx, fst_template=None,
+             wrapper_template=None):
         return _compile.build_kernel(module,
             fst_template or self.fst_template, fst_ctx,
-            self.wrapper_template, wrapper_ctx)
+            wrapper_template or self.wrapper_template, wrapper_ctx)
 
 def torch_dtype_to_fstar(dt):
     return {
@@ -527,10 +528,24 @@ _TC_FRAG_ACC_DTYPES = (torch.float16, torch.float32)
 _BACKEND_TAG = {"tc2d": "Tc2D", "tc2d_to": "Tc2DTo", "tc2d_tn": "Tc2DTn",
                 "tc2d_to_bcast": "Tc2DToBcast",
                 "tc2d_tn_bcast": "Tc2DTnBcast", "bt2d": "Bt2D",
-                "supergemm": "SuperGEMM"}
+                "supergemm": "SuperGEMM",
+                "supergemm_splitk": "SuperGEMMSplitK"}
 
 # Backends taking B column-major (K, N) with leading dimension K.
-_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm")
+_TN_BACKENDS = ("tc2d_tn", "tc2d_tn_bcast", "supergemm", "supergemm_splitk")
+
+# Backends that stage A through cp.async and so need a 16-byte aligned A.
+_CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk")
+
+# Split counts the split-K backend is instantiated at. The kernel divides the
+# k tiles uniformly, so a split count is legal only when it divides K/bk; the
+# non-powers of two are here so that a shape whose tile count is not a power of
+# two still has a candidate near the split count it wants (K/bk == 28 offers 7
+# and 14, K/bk == 36 offers 3, 6, 9, 12). See etc/sweep_splitk_params.py.
+_SPLITK_SPLITS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16)
+
+# Backends never taken by default; see `_explicit_only_filtered`.
+_EXPLICIT_ONLY_BACKENDS = ("supergemm_splitk",)
 
 
 def _tc_device_supported(dtype, device):
@@ -704,17 +719,91 @@ def _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K):
     return tiles
 
 
+def _supergemm_splitk_tiles(dtype, acc_dtype, out_dtype, M, N, K):
+    """Legal split-K SuperGEMM parameterizations, tiling x split count.
+
+    Same tuning parameters as ``_supergemm_tiles`` plus ``splits``, and the same
+    rule that a candidate is listed iff the verified kernel accepts it. The
+    differences from the non-split kernel are:
+
+      * the k loop runs over ``ks = K // splits``, so the divisibility
+        obligations on K become obligations on ``ks``;
+      * there is no epilogue, so the shared allocation drops the accumulator
+        scratch and the grid is ``splits`` times taller;
+      * the reduction pass needs ``chunk_acc | chunk_d`` and one thread per
+        128-bit granule of D.
+    """
+    tiles = []
+    chunk = 16 // dtype.itemsize
+    chunk_acc = 16 // acc_dtype.itemsize
+    chunk_d = 16 // out_dtype.itemsize
+    if N % chunk_d or chunk_d % chunk_acc:
+        return tiles
+    granules = M * (N // chunk_d)
+    if granules > _MAX_BLOCKS * _MAX_THREADS:
+        return tiles
+    for splits in _SPLITK_SPLITS:
+        if K % splits:
+            continue
+        ks = K // splits
+        for bm in (128, 64):
+            if M % bm:
+                continue
+            for bn in (128, 64):
+                if N % bn:
+                    continue
+                if splits * (M // bm) * (N // bn) > _MAX_BLOCKS:
+                    continue
+                for bk in (32, 64, 16):
+                    if ks % bk or bk > ks or bk % _FRAG or bk % chunk:
+                        continue
+                    if ks % chunk:
+                        continue
+                    inner = []
+                    for wm in (64, 32, 16, 128):
+                        if wm % _FRAG or bm % wm:
+                            continue
+                        for wn in (64, 32, 16, 128):
+                            if wn % _FRAG or bn % wn:
+                                continue
+                            warps = (bm // wm) * (bn // wn)
+                            nthr = warps * _WARP
+                            if nthr > _MAX_THREADS:
+                                continue
+                            fill = chunk * nthr
+                            if (bm * bk) % fill or (bn * bk) % fill or fill % bk:
+                                continue
+                            skew = chunk
+                            ldt = bk + skew
+                            smem = 2 * (bm + bn) * ldt * dtype.itemsize
+                            if smem > _SHMEM_BYTES:
+                                continue
+                            if _tc2d_frag_regs(wm // _FRAG, wn // _FRAG) > _REG_BUDGET:
+                                continue
+                            inner.append(
+                                ((abs(warps - _PREFERRED_WARPS), -wn),
+                                 dict(bm=bm, bn=bn, bk=bk, wm=wm, wn=wn,
+                                      skew=skew, group=_SUPERGEMM_GROUP,
+                                      splits=splits)))
+                    inner.sort(key=lambda w: w[0])
+                    tiles.extend(t for _, t in inner)
+    return tiles
+
+
 def _tiles(backend, dtype, batch, M, N, K, acc_dtype=None, out_dtype=None):
     """Legal tilings, in priority order, whose grid also fits in one launch."""
     if backend == "bt2d":
         candidates = _bt2d_tiles(dtype, M, N, K)
     elif backend == "supergemm":
         candidates = _supergemm_tiles(dtype, acc_dtype, out_dtype, M, N, K)
+    elif backend == "supergemm_splitk":
+        candidates = _supergemm_splitk_tiles(dtype, acc_dtype, out_dtype, M, N, K)
     else:
         candidates = _tc2d_tiles(dtype, M, N, K, tn=(backend in _TN_BACKENDS))
     return [
         tile for tile in candidates
-        if batch * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
+        if batch * tile.get("splits", 1)
+           * (M // tile["bm"]) * (N // tile["bn"]) <= _MAX_BLOCKS
     ]
 
 
@@ -826,7 +915,7 @@ def _a_aligned_filtered(backends, A):
     error under `KUIPY_JIT_STRICTNESS=0`."""
     if _ptr_aligned16(A):
         return tuple(backends)
-    return tuple(b for b in backends if b != "supergemm")
+    return tuple(b for b in backends if b not in _CPASYNC_BACKENDS)
 
 
 def _tn_out_ok(backend, N, out_dtype):
@@ -842,6 +931,18 @@ def _gemm_fst_ctx(spec, name):
         acc_et=torch_dtype_to_fstar(spec["acc_dtype"]),
         out_et=torch_dtype_to_fstar(spec["out_dtype"]),
         **spec["tile"])
+
+
+def _explicit_only_filtered(backends, kwargs):
+    """Drop backends that must be asked for by name.
+
+    ``supergemm_splitk`` launches two kernels and synchronizes the stream in
+    between (Kuiper does not model stream queue ordering), so it is illegal
+    under CUDA graph capture -- which is how the inference pipeline runs. It
+    stays reachable through an explicit ``impl="supergemm_splitk"``."""
+    if kwargs.get("impl") in _EXPLICIT_ONLY_BACKENDS:
+        return tuple(backends)
+    return tuple(b for b in backends if b not in _EXPLICIT_ONLY_BACKENDS)
 
 
 def _gemm_wrapper_ctx(spec, name):
@@ -861,8 +962,15 @@ class MmImpl(_MatmulFamily):
     # still being brought up, so it is reachable only via an explicit
     # `impl="supergemm"`. Its position here should be decided by the Qwen-shape
     # benchmark once it is complete.
-    backends = ("supergemm", "tc2d_tn", "tc2d", "tc2d_to", "bt2d")
+    backends = ("supergemm", "tc2d_tn", "tc2d", "tc2d_to", "bt2d",
+                "supergemm_splitk")
     operation = "aten.mm.default"
+
+    # Backend-specific JIT templates; everything else uses the class defaults.
+    _templates = {
+        "supergemm_splitk": ("mm_splitk/Kuiops.Mm.SplitK.Inst.fst.j2",
+                             "mm_splitk/wrapper_mm_splitk.cu.j2"),
+    }
 
     @staticmethod
     def _spec(backend, tile, in_dtype, acc_dtype, out_dtype):
@@ -886,7 +994,8 @@ class MmImpl(_MatmulFamily):
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
-        backends = _a_aligned_filtered(_tn_filtered(self.backends, B, K, N), A)
+        backends = _explicit_only_filtered(
+            _a_aligned_filtered(_tn_filtered(self.backends, B, K, N), A), kwargs)
         plans = self._plans(kwargs, A.dtype, A.device, backends)
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
@@ -899,8 +1008,12 @@ class MmImpl(_MatmulFamily):
 
     def run(self, spec, args, kwargs):
         name = "mm_jit"
-        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name),
-                        _gemm_wrapper_ctx(spec, name))
+        fst_t, wrapper_t = self._templates.get(spec["backend"], (None, None))
+        wrapper_ctx = _gemm_wrapper_ctx(spec, name)
+        if spec["backend"] == "supergemm_splitk":
+            wrapper_ctx["splits"] = spec["tile"]["splits"]
+        mod = self._mod(spec["module"], _gemm_fst_ctx(spec, name), wrapper_ctx,
+                        fst_template=fst_t, wrapper_template=wrapper_t)
         return mod.run(*args)
 
 

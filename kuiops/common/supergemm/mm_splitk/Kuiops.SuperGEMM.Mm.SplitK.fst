@@ -1,32 +1,9 @@
 module Kuiops.SuperGEMM.Mm.SplitK
 
-(* The single top-level polymorphic async launcher for the split-K variant of
-   the software-pipelined tensor-core GEMM.  Computes D = A @ B^T with B
-   supplied as an [(cols, shared)] = [(N, K)] row-major operand, exactly as
-   [Kuiops.SuperGEMM.Mm.supergemm_mm_async] does; the split-K decomposition is
-   an implementation strategy and is invisible in the specification.
-
-   Two kernels are launched.  The first partitions the k range into [splits]
-   contiguous, disjoint, covering blocks of [ks = shared / splits] and writes
-   the [splits] fp32 partial products into the caller-supplied workspace [gW],
-   viewed as a [(splits * rows, cols)] matrix.  The second sums the partials
-   for each 128-bit granule of D and applies [post_map] on the way out.
-
-   Signature deviation.  Kuiper does not model the queue ordering of a CUDA
-   stream, so a later launch cannot observe an earlier launch's writes.  The
-   launcher therefore synchronizes the stream between the two launches: it
-   CONSUMES [epoch_live s e] and RETURNS a fresh epoch [e'], rather than
-   preserving one as [Kuiops.SuperGEMM.Mm.supergemm_mm_async] does.  The
-   consequence is that this operator cannot run under CUDA graph capture.
-
-   The workspace [gW] is caller-allocated (Kuiper kernels never allocate) and
-   comes back live but with unspecified contents.
-
-   Specification.  The postcondition is character for character the one of
-   [Kuiops.SuperGEMM.Mm.supergemm_mm_async] -- split-K is an implementation
-   strategy and does not leak into the spec.  The mathematical core it rests on
-   is [Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas] and
-   [Kuiops.SuperGEMM.Mm.SplitK.Compose]. *)
+(* Implementation of the split-K async launcher; see the interface for the
+   contract.  Launch pass 1, synchronize the stream to obtain a fresh epoch
+   under which pass 1's workspace writes are visible, then launch the
+   reduction on that epoch. *)
 
 #lang-pulse
 
@@ -40,11 +17,18 @@ open Kuiper.TensorCore
 open Kuiper.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
+open Kuiops.SuperGEMM.Mm.SplitK.Kernel { mk_kernel }
+open Kuiops.SuperGEMM.Mm.SplitK.Reduce { mk_reduce_kernel, gran_ub_lemma, gcols }
+open Kuiops.SuperGEMM.Mm.SplitK.WsLemmas { ws_target }
+open Kuiops.SuperGEMM.Mm.SplitK.ReduceLemmas { gran_target }
+open Kuiops.SuperGEMM.Mm.SplitK.Compose { gran_target_matmul }
 
 module MS = Kuiper.Spec.GEMM
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module P = Kuiops.SuperGEMM.Mm.Params
+
+#set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
 inline_for_extraction noextract
 fn supergemm_mm_splitk_async
@@ -120,3 +104,68 @@ fn supergemm_mm_splitk_async
            (gW |-> eW') ** (gD |-> eD') **
            pure (eD' %~ chest_map post_map_r
                    (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
+{
+  let nblk = (mws /^ bm) *^ (cols /^ bn);
+  let nthr = (bm /^ wm) *^ (bn /^ wn) *^ warp_size;
+
+  assert pure (SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v cols / SZ.v bn));
+  assert pure (SZ.v nthr == P.nthr bm bn wm wn);
+
+  launch (
+    mk_kernel gA #eA gB #eB gW (to_real_matrix eA) (to_real_matrix eB)
+      bm bn bk wm wn skew splits ks fA fB nblk nthr ()
+  ) s;
+
+  let e' = sync_stream s;
+  redeem_pledge emp_inames (epoch_done s e)
+    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+                 (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
+                    (gW |-> eW) **
+                    pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                                  (to_real_matrix eA) (to_real_matrix eB) ()))));
+
+  with eW. assert (on gpu_loc (gW |-> eW));
+
+  let njobs = rows *^ (cols /^ chunk et_d);
+  gran_ub_lemma (SZ.v rows) (SZ.v cols / SZ.v (chunk et_d));
+  assert pure (SZ.v njobs == SZ.v rows * gcols et_d cols);
+
+  launch (mk_reduce_kernel gW gD splits post_map post_map_r () njobs 1.0R eW
+            (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+               (to_real_matrix eA) (to_real_matrix eB) ()) ()) s;
+
+  gran_target_matmul (SZ.v mws) (SZ.v splits) (SZ.v ks)
+    (to_real_matrix eA) (to_real_matrix eB) post_map_r ();
+
+  return_pledge (epoch_done s e') (on gpu_loc (gA |-> Frac fA eA)) #solve;
+  return_pledge (epoch_done s e') (on gpu_loc (gB |-> Frac fB eB)) #solve;
+  join_pledge (on gpu_loc (gA |-> Frac fA eA)) (on gpu_loc (gB |-> Frac fB eB));
+  join_pledge
+    ((on gpu_loc (gA |-> Frac fA eA)) ** (on gpu_loc (gB |-> Frac fB eB)))
+    (on gpu_loc ((gW |-> Frac 1.0R eW) **
+                 (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
+                    (gD |-> eD) **
+                    pure (eD %~ gran_target (SZ.v rows) (SZ.v splits)
+                                  (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                                     (to_real_matrix eA) (to_real_matrix eB) ())
+                                  post_map_r))));
+  rewrite_pledge
+    (((on gpu_loc (gA |-> Frac fA eA)) ** (on gpu_loc (gB |-> Frac fB eB))) **
+     (on gpu_loc ((gW |-> Frac 1.0R eW) **
+                  (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
+                     (gD |-> eD) **
+                     pure (eD %~ gran_target (SZ.v rows) (SZ.v splits)
+                                   (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                                      (to_real_matrix eA) (to_real_matrix eB) ())
+                                   post_map_r)))))
+    (on gpu_loc
+      (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
+               (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
+         (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+         (gW |-> eW') ** (gD |-> eD') **
+         pure (eD' %~ chest_map post_map_r
+                 (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
+    #emp_inames fn () { () };
+  drop_ (epoch_done s e);
+  e'
+}
