@@ -20,7 +20,14 @@ module Kuiops.SuperGEMM.Mm.SplitK
    consequence is that this operator cannot run under CUDA graph capture.
 
    The workspace [gW] is caller-allocated (Kuiper kernels never allocate) and
-   comes back live but with unspecified contents. *)
+   comes back live but with unspecified contents.
+
+   Specification.  Character for character the postcondition of
+   [Kuiops.SuperGEMM.Mm.supergemm_mm_async], including the [mtranspose] that
+   B's [(cols, shared)] layout forces and the [post_map]/[post_map_r]
+   correspondence -- see that module's header for both.  Split-K must not leak
+   into the spec: [splits], [ks] and [gW] appear only in the preconditions
+   that make the decomposition legal. *)
 
 #lang-pulse
 
@@ -111,4 +118,6 @@ fn supergemm_mm_splitk_async
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
            (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-           (gW |-> eW') ** (gD |-> eD')))
+           (gW |-> eW') ** (gD |-> eD') **
+           pure (eD' %~ chest_map post_map_r
+                   (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
