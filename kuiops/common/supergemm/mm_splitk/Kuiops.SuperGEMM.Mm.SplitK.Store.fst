@@ -34,39 +34,41 @@ module ML = FStar.Math.Lemmas
 inline_for_extraction noextract
 fn store_frag_row
   (#et_acc : Type0) {| scalar et_acc |}
-  (wm wn : szp)
-  (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
-  (#lT : layout2 (SZ.v wm) (SZ.v wn)) {| T.ctlayout lT |}
+  (#a #b : erased nat)
+  (asz : szp { SZ.v asz == reveal a })
+  (bsz : szp { SZ.v bsz == reveal b })
+  (#lT : layout2 (a * frag) (b * frag)) {| T.ctlayout lT |}
        {| strT : strided_row_major (vtlayout_of_tlayout lT) |}
   (tile : array2 et_acc lT)
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#em0 : erased (seq (value_for et_acc FragAcc frag frag frag)))
-  (i_sz : szlt (mfrag wm))
-  (nfrag_sz : szp { SZ.v nfrag_sz == nfrag wn })
-  (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
+  (i_sz : szlt asz)
+  (#_ : squash (Pulse.Lib.Array.length accFrags == reveal a * reveal b))
   (#_ : squash (SZ.fits lT.ulen))
-  (#_ : squash (SZ.fits (mfrag wm * nfrag wn)))
+  (#_ : squash (SZ.fits (reveal a * reveal b)))
   ()
   preserves gpu
   preserves array_fragment_pts_to accFrags #1.0R em0
-  requires exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+  requires exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
     tile |-> Frac (1.0R /. warp_size) e
-  ensures exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+  ensures exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
     tile |-> Frac (1.0R /. warp_size) e
 {
+  ML.cancel_mul_div (reveal a) frag;
+  ML.cancel_mul_div (reveal b) frag;
   let mut j = 0sz;
-  while (!j <^ nfrag_sz)
+  while (!j <^ bsz)
     invariant live j
-    invariant exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+    invariant exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
       tile |-> Frac (1.0R /. warp_size) e **
       array_fragment_pts_to accFrags #1.0R em0 **
-      pure (SZ.v !j <= nfrag wn)
-    decreases (nfrag wn - SZ.v !j)
+      pure (SZ.v !j <= reveal b)
+    decreases (reveal b - SZ.v !j)
   {
     let jv = !j;
     let sTile = array2_extract_tile_st tile frag frag (SZ.v i_sz) (SZ.v jv);
-    ML.lemma_mult_le_right (nfrag wn) (SZ.v i_sz + 1) (mfrag wm);
-    let idx : szlt (mfrag wm * nfrag wn) = i_sz *^ nfrag_sz +^ jv;
+    ML.lemma_mult_le_right (reveal b) (SZ.v i_sz + 1) (reveal a);
+    let idx : szlt (reveal a * reveal b) = i_sz *^ bsz +^ jv;
     array_fragment_pts_to_ref accFrags;
     array_fragment_extract_ro accFrags idx;
     mma_store accFrags.(idx) #_
@@ -83,37 +85,36 @@ fn store_frag_row
 inline_for_extraction noextract
 fn store_warp_tile
   (#et_acc : Type0) {| scalar et_acc |}
-  (wm wn : szp)
-  (#_ : squash (frag /?+ SZ.v wm /\ frag /?+ SZ.v wn))
-  (#lT : layout2 (SZ.v wm) (SZ.v wn)) {| T.ctlayout lT |}
+  (#a #b : erased nat)
+  (asz : szp { SZ.v asz == reveal a })
+  (bsz : szp { SZ.v bsz == reveal b })
+  (#lT : layout2 (a * frag) (b * frag)) {| T.ctlayout lT |}
        {| strT : strided_row_major (vtlayout_of_tlayout lT) |}
   (tile : array2 et_acc lT)
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#em0 : erased (seq (value_for et_acc FragAcc frag frag frag)))
-  (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
+  (#_ : squash (Pulse.Lib.Array.length accFrags == reveal a * reveal b))
   (#_ : squash (SZ.fits lT.ulen))
-  (#_ : squash (SZ.fits (mfrag wm * nfrag wn)))
+  (#_ : squash (SZ.fits (reveal a * reveal b)))
   ()
   preserves gpu
   preserves array_fragment_pts_to accFrags #1.0R em0
-  requires exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+  requires exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
     tile |-> Frac (1.0R /. warp_size) e
-  ensures exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+  ensures exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
     tile |-> Frac (1.0R /. warp_size) e
 {
-  let mfrag_sz : szp = wm /^ frag_sz;
-  let nfrag_sz : szp = wn /^ frag_sz;
   let mut i = 0sz;
-  while (!i <^ mfrag_sz)
+  while (!i <^ asz)
     invariant live i
-    invariant exists* (e : chest2 et_acc (SZ.v wm) (SZ.v wn)).
+    invariant exists* (e : chest2 et_acc (reveal a * frag) (reveal b * frag)).
       tile |-> Frac (1.0R /. warp_size) e **
       array_fragment_pts_to accFrags #1.0R em0 **
-      pure (SZ.v !i <= mfrag wm)
-    decreases (mfrag wm - SZ.v !i)
+      pure (SZ.v !i <= reveal a)
+    decreases (reveal a - SZ.v !i)
   {
     let iv = !i;
-    store_frag_row wm wn tile accFrags iv nfrag_sz ();
+    store_frag_row asz bsz tile accFrags iv ();
     i := !i +^ 1sz;
   };
 }
