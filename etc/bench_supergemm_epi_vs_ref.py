@@ -43,10 +43,11 @@ def make_inputs(m, k, n):
     return (c, a, bt.t()), dict(alpha=ALPHA, beta=BETA)
 
 
-def ref_epi(m, k, n, group=8):
+def ref_epi(m, k, n, group=8, force_scalar_c=False):
     """The unverified kernel, adapted to the driver's calling convention."""
     fn = load_ref(stem="gemm_tc_flat_nosplitk_epi", group=group, **TILE,
-                  cs_m=0 if BCAST else n, cs_n=1)
+                  cs_m=0 if BCAST else n, cs_n=1,
+                  force_scalar_c=force_scalar_c)
     return lambda c, a, bt, alpha, beta: fn(c, a, bt, alpha, beta)
 
 
@@ -64,6 +65,10 @@ def impls_for(m, k, n):
         # GROUP=1 degenerates the reference's L2 swizzle to the plain
         # row-major block decode SuperGEMM currently uses.
         ("cuda_ref_g1", ref_epi(m, k, n, group=1)),
+        # ... and with its vectorized C read patched out, so the only
+        # remaining difference from SuperGEMM is Kuiper/extraction overhead.
+        ("cuda_ref_g1_scalarc",
+         ref_epi(m, k, n, group=1, force_scalar_c=True)),
     ]
 
 
