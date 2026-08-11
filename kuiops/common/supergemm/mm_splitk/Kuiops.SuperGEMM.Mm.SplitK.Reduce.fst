@@ -32,6 +32,8 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module A = Pulse.Lib.Array
 module ML = FStar.Math.Lemmas
+module RL = Kuiops.SuperGEMM.Mm.SplitK.ReduceLemmas
+module SL = Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
@@ -126,6 +128,20 @@ let d_gran
 = exists* (v : chest2 et_d 1 (SZ.v (chunk et_d))).
     array2_subtile gD 1 (SZ.v (chunk et_d)) di dj |-> v
 
+(* The same granule, pinned to the real matrix pass 2 must produce. *)
+let d_gran_at
+  (#et_d : Type0) {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
+  (#m #n : szp)
+  (#lD : layout2 (SZ.v m) (SZ.v n))
+  (gD : array2 et_d lD)
+  (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
+  (rD : chest2 real (SZ.v m) (SZ.v n))
+  (di : natlt (SZ.v m)) (dj : natlt (gcols et_d n))
+  : slprop
+= exists* (v : chest2 et_d 1 (SZ.v (chunk et_d))).
+    (array2_subtile gD 1 (SZ.v (chunk et_d)) di dj |-> v) **
+    pure (v %~ ematrix_subtile rD 1 (SZ.v (chunk et_d)) di dj)
+
 #push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
 ghost
 fn rsetup
@@ -174,7 +190,8 @@ fn rsetup
 ghost
 fn rteardown
   (#et_acc #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc, sized et_d, has_vec_cpy et_d |}
+  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
   (#lD : layout2 (SZ.v m) (SZ.v n))
@@ -183,6 +200,7 @@ fn rteardown
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
+  (rD : chest2 real (SZ.v m) (SZ.v n))
   (#_ : squash (SZ.fits lD.ulen))
   (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
   ()
@@ -190,29 +208,35 @@ fn rteardown
   requires
     (forall+ (i : natlt njobs).
       (gW |-> Frac (fW /. njobs) eW) **
-      d_gran gD () (i / gcols et_d n) (i % gcols et_d n)) ** pure True
-  ensures (gW |-> Frac fW eW) ** live gD
+      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n)) ** pure True
+  ensures (gW |-> Frac fW eW) **
+          (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
+             gD |-> eD ** pure (eD %~ rD))
 {
   forevery_unzip
     (fun (i : natlt njobs) -> gW |-> Frac (fW /. njobs) eW)
     (fun (i : natlt njobs) ->
-      d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
+      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n));
   tensor_gather_n gW (SZ.v njobs);
   forevery_map
     (fun (i : natlt njobs) ->
-      d_gran gD () (i / gcols et_d n) (i % gcols et_d n))
+      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
     (fun (i : natlt njobs) ->
       exists* (v : chest2 et_d 1 (SZ.v (chunk et_d))).
-        array2_subtile gD 1 (SZ.v (chunk et_d))
-          (i / gcols et_d n) (i % gcols et_d n) |-> v)
+        (array2_subtile gD 1 (SZ.v (chunk et_d))
+          (i / gcols et_d n) (i % gcols et_d n) |-> v) **
+        pure (v %~ ematrix_subtile rD 1 (SZ.v (chunk et_d))
+                     (i / gcols et_d n) (i % gcols et_d n)))
     fn i {
-      unfold (d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
+      unfold (d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n));
     };
   forevery_factor' (SZ.v njobs) (SZ.v m / 1) (gcols et_d n)
     (fun (tr : natlt (SZ.v m / 1)) (tc : natlt (gcols et_d n)) ->
       exists* (v : chest2 et_d 1 (SZ.v (chunk et_d))).
-        array2_subtile gD 1 (SZ.v (chunk et_d)) tr tc |-> v);
-  array2_untile_underspec gD 1 (SZ.v (chunk et_d)) #1.0R;
+        (array2_subtile gD 1 (SZ.v (chunk et_d)) tr tc |-> v) **
+        pure (v %~ ematrix_subtile rD 1 (SZ.v (chunk et_d)) tr tc));
+  Kuiops.SuperGEMM.Mm.SplitK.Gather.array2_untile_approximates
+    gD 1 (SZ.v (chunk et_d)) rD;
 }
 #pop-options
 
@@ -246,8 +270,8 @@ let rk_sq
 inline_for_extraction noextract
 fn rkf
   (#et_acc #et_d : Type0)
-  {| scalar et_acc, has_vec_cpy et_acc |}
-  {| scalar et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n)) {| T.ctlayout lW |}
        {| strW : strided_row_major (vtlayout_of_tlayout lW) |}
@@ -257,15 +281,20 @@ fn rkf
   (gD : array2 et_d lD)
   (splits : szp)
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (sq : squash (rk_sq gW gD splits))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
   (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (rW : chest2 real (SZ.v mws) (SZ.v n) { eW %~ rW })
   (i : szlt njobs)
   ()
   preserves gpu
   preserves gW |-> Frac (fW /. njobs) eW
-  preserves d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+  requires d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+  ensures d_gran_at gD ()
+            (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
+            (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
 {
   let gc : szp = n /^ chunk et_d;
   let di : szlt m = i /^ gc;
@@ -292,7 +321,13 @@ fn rkf
       sc |-> sv ** abuf |-> av ** vbuf |-> bv **
       pure (SZ.v sv <= SZ.v splits /\
             Seq.length av == SZ.v (chunk et_d) /\
-            Seq.length bv == SZ.v (chunk et_acc))
+            Seq.length bv == SZ.v (chunk et_acc) /\
+            (forall (e : natlt (SZ.v (chunk et_d))).
+               Seq.index av e
+               == SL.sum_upto
+                    (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                       (SZ.v dj * SZ.v (chunk et_d) + e))
+                    (SZ.v sv)))
     decreases (SZ.v splits - SZ.v !sc)
   {
     let sv = !sc;
@@ -303,7 +338,13 @@ fn rkf
         ec |-> ev ** abuf |-> av ** vbuf |-> bv **
         pure (SZ.v ev <= SZ.v (chunk et_d) /\ SZ.v (chunk et_acc) /? SZ.v ev /\
               Seq.length av == SZ.v (chunk et_d) /\
-              Seq.length bv == SZ.v (chunk et_acc))
+              Seq.length bv == SZ.v (chunk et_acc) /\
+              (forall (e : natlt (SZ.v (chunk et_d))).
+                 Seq.index av e
+                 == SL.sum_upto
+                      (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                         (SZ.v dj * SZ.v (chunk et_d) + e))
+                      (if e < SZ.v ev then SZ.v sv + 1 else SZ.v sv)))
       decreases (SZ.v (chunk et_d) - SZ.v !ec)
     {
       let ev = !ec;
@@ -316,13 +357,22 @@ fn rkf
         (SZ.v wrow) (SZ.v wcol);
       cell_aligned16 lW gW (SZ.v wrow) (SZ.v wcol);
       array2_vec_read gW wrow wcol vbuf;
+      RL.ws_row_bound (SZ.v m) (SZ.v splits) (SZ.v mws) (SZ.v sv) (SZ.v di);
       let mut xc = 0sz;
       while (!xc <^ chunk et_acc)
         invariant exists* (xv : SZ.t) (av bv : seq et_acc).
           xc |-> xv ** abuf |-> av ** vbuf |-> bv **
           pure (SZ.v xv <= SZ.v (chunk et_acc) /\
                 Seq.length av == SZ.v (chunk et_d) /\
-                Seq.length bv == SZ.v (chunk et_acc))
+                Seq.length bv == SZ.v (chunk et_acc) /\
+                (forall (x : natlt (SZ.v (chunk et_acc))).
+                   Seq.index bv x == acc2 eW (SZ.v wrow) (SZ.v wcol + x)) /\
+                (forall (e : natlt (SZ.v (chunk et_d))).
+                   Seq.index av e
+                   == SL.sum_upto
+                        (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                           (SZ.v dj * SZ.v (chunk et_d) + e))
+                        (if e < SZ.v ev + SZ.v xv then SZ.v sv + 1 else SZ.v sv)))
         decreases (SZ.v (chunk et_acc) - SZ.v !xc)
       {
         let xv = !xc;
@@ -347,7 +397,15 @@ fn rkf
       yc |-> yv ** abuf |-> av ** obuf |-> ov **
       pure (SZ.v yv <= SZ.v (chunk et_d) /\
             Seq.length av == SZ.v (chunk et_d) /\
-            Seq.length ov == SZ.v (chunk et_d))
+            Seq.length ov == SZ.v (chunk et_d) /\
+            (forall (e : natlt (SZ.v (chunk et_d))).
+               Seq.index av e
+               == SL.sum_upto
+                    (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                       (SZ.v dj * SZ.v (chunk et_d) + e))
+                    (SZ.v splits)) /\
+            (forall (y : natlt (SZ.v (chunk et_d))).
+               y < SZ.v yv ==> Seq.index ov y == post_map (Seq.index av y)))
     decreases (SZ.v (chunk et_d) - SZ.v !yc)
   {
     let yv = !yc;
@@ -367,7 +425,13 @@ fn rkf
   array2_vec_write (array2_subtile gD 1 (SZ.v (chunk et_d)) (SZ.v di) (SZ.v dj))
     0sz 0sz obuf ov ();
 
-  fold (d_gran gD () (SZ.v di) (SZ.v dj));
+  with v'. assert
+    (array2_subtile gD 1 (SZ.v (chunk et_d)) (SZ.v di) (SZ.v dj) |-> v');
+  RL.gran_approx (SZ.v m) (SZ.v splits) eW rW post_map post_map_r
+    (SZ.v (chunk et_d)) v' (SZ.v di) (SZ.v dj) ();
+  fold (d_gran_at gD ()
+          (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
+          (SZ.v di) (SZ.v dj));
   rewrite each (SZ.v di) as (SZ.v i / gcols et_d n);
   rewrite each (SZ.v dj) as (SZ.v i % gcols et_d n);
 }
@@ -391,6 +455,25 @@ let d_gran_sendable
   = is_send_across_global_tensor tl #1.0R v in
   is_send_across_exists (fun (v : chest2 et_d 1 (SZ.v (chunk et_d))) -> tl |-> v) #ff
 
+let d_gran_at_sendable
+  (#et_d : Type0) {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
+  (#m #n : szp)
+  (#lD : layout2 (SZ.v m) (SZ.v n))
+  (gD : array2 et_d lD { is_global gD })
+  (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
+  (rD : chest2 real (SZ.v m) (SZ.v n))
+  (di : natlt (SZ.v m)) (dj : natlt (gcols et_d n))
+  : is_send_across gpu_of (d_gran_at gD () rD di dj)
+= let tl = array2_subtile gD 1 (SZ.v (chunk et_d)) di dj in
+  let rt = ematrix_subtile rD 1 (SZ.v (chunk et_d)) di dj in
+  let ff (v : chest2 et_d 1 (SZ.v (chunk et_d)))
+    : is_send_across gpu_of ((tl |-> v) ** pure (v %~ rt))
+  = is_send_across_star (tl |-> v) (pure (v %~ rt))
+      #(is_send_across_global_tensor tl #1.0R v)
+      #(is_send_across_placeless (pure (v %~ rt)) #(placeless_pure (v %~ rt))) in
+  is_send_across_exists
+    (fun (v : chest2 et_d 1 (SZ.v (chunk et_d))) -> (tl |-> v) ** pure (v %~ rt)) #ff
+
 let rk_sendable
   (#et_acc #et_d : Type0)
   {| sized et_acc, has_vec_cpy et_acc, sized et_d, has_vec_cpy et_d |}
@@ -413,12 +496,36 @@ let rk_sendable
     #(is_send_across_global_tensor gW #(fW /. njobs) eW)
     #(d_gran_sendable gD () (i / gcols et_d n) (i % gcols et_d n))
 
+let rk_post_sendable
+  (#et_acc #et_d : Type0)
+  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
+  (#m #n #mws : szp)
+  (#lW : layout2 (SZ.v mws) (SZ.v n))
+  (#lD : layout2 (SZ.v m) (SZ.v n))
+  (gW : array2 et_acc lW { is_global gW })
+  (gD : array2 et_d lD { is_global gD })
+  (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
+  (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
+                 gran_ub (SZ.v m) (gcols et_d n) })
+  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (rD : chest2 real (SZ.v m) (SZ.v n))
+  (i : natlt njobs)
+  : is_send_across gpu_of
+      ((gW |-> Frac (fW /. njobs) eW) **
+       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
+= is_send_across_star
+    (gW |-> Frac (fW /. njobs) eW)
+    (d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
+    #(is_send_across_global_tensor gW #(fW /. njobs) eW)
+    #(d_gran_at_sendable gD () rD (i / gcols et_d n) (i % gcols et_d n))
+
 #push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
 inline_for_extraction noextract
 let mk_reduce_kernel
   (#et_acc #et_d : Type0)
-  {| scalar et_acc, has_vec_cpy et_acc |}
-  {| scalar et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n)) {| T.ctlayout lW |}
        {| strW : strided_row_major (vtlayout_of_tlayout lW) |}
@@ -428,15 +535,20 @@ let mk_reduce_kernel
   (gD : array2 et_d lD { is_global gD })
   (splits : szp)
   (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
   (sq : squash (rk_sq gW gD splits))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) /\
                  njobs <= max_blocks * max_threads })
   (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (rW : chest2 real (SZ.v mws) (SZ.v n) { eW %~ rW })
   ()
   : kernel_desc
       ((gW |-> Frac fW eW) ** live gD)
-      ((gW |-> Frac fW eW) ** live gD)
+      ((gW |-> Frac fW eW) **
+       (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
+          gD |-> eD **
+          pure (eD %~ RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)))
 = {
     nthr = njobs;
     frame = pure True;
@@ -445,11 +557,14 @@ let mk_reduce_kernel
       d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
     kpost = (fun (i : natlt njobs) ->
       (gW |-> Frac (fW /. njobs) eW) **
-      d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
+      d_gran_at gD () (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
+        (i / gcols et_d n) (i % gcols et_d n));
     setup = rsetup gW gD () njobs #fW #eW;
-    teardown = rteardown gW gD () njobs #() #fW #eW;
-    f = rkf gW gD splits post_map () njobs #fW #eW;
+    teardown = rteardown gW gD () njobs
+      (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r) #() #fW #eW;
+    f = rkf gW gD splits post_map post_map_r () njobs #fW #eW rW;
     kpre_sendable = rk_sendable gW gD () njobs fW eW;
-    kpost_sendable = rk_sendable gW gD () njobs fW eW;
+    kpost_sendable = rk_post_sendable gW gD () njobs fW eW
+      (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r);
   } <: kernel_desc_n _ _
 #pop-options

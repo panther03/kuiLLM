@@ -6,6 +6,7 @@ module Kuiops.SuperGEMM.Mm.SplitK.ReduceLemmas
 open Kuiper
 open Kuiper.Chest
 open Kuiper.EMatrix
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas { sum_upto, rsum_upto, sum_upto_approx }
 
 module ML = FStar.Math.Lemmas
@@ -78,3 +79,35 @@ let ws_row_bound (rows splits mws : nat) (z i : nat)
           (ensures z * rows + i < mws)
 = ML.lemma_mult_le_right rows (z + 1) splits;
   ML.distributivity_add_left z 1 rows
+
+(* What pass 2 must land in D: the reduced workspace, post-mapped. *)
+let gran_target
+  (#mws #cols : nat) (rows splits : nat)
+  (rW : chest2 real mws cols) (post_map_r : real -> real)
+  : GTot (chest2 real rows cols)
+= chest_map post_map_r (reduce_ws rows splits rW)
+
+(* One [1 x c] granule of D approximates the matching tile of [gran_target] as
+   soon as each of its cells is the post-mapped fold of that output column. *)
+let gran_approx
+  (#et_acc #et_d : Type0)
+  {| scalar et_acc, real_like et_acc |} {| scalar et_d, real_like et_d |}
+  (#mws #cols : nat) (rows splits : nat)
+  (eW : chest2 et_acc mws cols) (rW : chest2 real mws cols)
+  (post_map : et_acc -> et_d) (post_map_r : real -> real { post_map %~ post_map_r })
+  (c : pos { c /? cols })
+  (v : chest2 et_d 1 c)
+  (di : natlt rows) (dj : natlt (cols / c))
+  (_ : squash (1 /? rows))
+  : Lemma
+      (requires eW %~ rW /\
+                (forall (y : natlt c).
+                   dj * c + y < cols /\
+                   acc2 v 0 y
+                   == post_map (sum_upto (ws_cell rows splits eW di (dj * c + y)) splits)))
+      (ensures v %~ ematrix_subtile (gran_target rows splits rW post_map_r) 1 c di dj)
+= introduce forall (a : natlt 1) (b : natlt c).
+    acc2 v a b %~ acc2 (ematrix_subtile (gran_target rows splits rW post_map_r) 1 c di dj) a b
+  with reduce_ws_cell_approx rows splits eW rW di (dj * c + b);
+  lemma_approximates_intro v
+    (ematrix_subtile (gran_target rows splits rW post_map_r) 1 c di dj)

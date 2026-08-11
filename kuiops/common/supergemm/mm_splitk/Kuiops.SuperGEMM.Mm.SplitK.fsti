@@ -22,16 +22,11 @@ module Kuiops.SuperGEMM.Mm.SplitK
    The workspace [gW] is caller-allocated (Kuiper kernels never allocate) and
    comes back live but with unspecified contents.
 
-   Specification.  The target postcondition is character for character the one
-   of [Kuiops.SuperGEMM.Mm.supergemm_mm_async] -- split-K is an implementation
-   strategy and must not leak into the spec:
-
-     pure (eD' %~ chest_map post_map_r
-             (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))
-
-   It is not carried below yet; the mathematical core it rests on is proved in
-   [Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas] and the per-warp half in
-   [Kuiops.SuperGEMM.Mm.SplitK.Store]. *)
+   Specification.  The postcondition is character for character the one of
+   [Kuiops.SuperGEMM.Mm.supergemm_mm_async] -- split-K is an implementation
+   strategy and does not leak into the spec.  The mathematical core it rests on
+   is [Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas] and
+   [Kuiops.SuperGEMM.Mm.SplitK.Compose]. *)
 
 #lang-pulse
 
@@ -122,4 +117,6 @@ fn supergemm_mm_splitk_async
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
            (gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-           (gW |-> eW') ** (gD |-> eD')))
+           (gW |-> eW') ** (gD |-> eD') **
+           pure (eD' %~ chest_map post_map_r
+                   (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
