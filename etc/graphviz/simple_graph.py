@@ -25,9 +25,7 @@ INTERESTING = ("mm", "matmul", "bmm", "addmm")
 
 def net(x, w, b):
     """A linear layer and an activation, written as bare operator calls."""
-    h = torch.mm(x, w)
-    h = h + b
-    return torch.relu(h)
+    return torch.relu(b +torch.mm(x, w))
 
 
 def label_of(node, names):
@@ -55,7 +53,15 @@ def dot_source(graph, names, rankdir):
              ' fontname="Helvetica", fontsize=18, margin="0.20,0.11",'
              ' penwidth=2.0];',
              '  edge [color="#90a4ae", arrowsize=0.8, penwidth=1.6];']
-    for node in graph.nodes:
+    # Declare sources feeding a highlighted op last: dot orders same-rank nodes
+    # by declaration, so this pushes that op to the right of the figure and
+    # leaves its side clear to annotate.
+    def feeds_highlight(node):
+        return any(label_of(c, names) in INTERESTING for c in node.users)
+
+    order = sorted(graph.nodes,
+                   key=lambda n: (n.op == "placeholder" and feeds_highlight(n)))
+    for node in order:
         label = label_of(node, names)
         if node.op in ("placeholder", "get_attr"):
             fill, line = SRC_FILL, SRC_LINE
@@ -68,7 +74,11 @@ def dot_source(graph, names, rankdir):
             label += f"\\n{shape}"
         lines.append(f'  "{node.name}" [label="{label}", fillcolor="{fill}",'
                      f' color="{line}"];')
-        for inp in node.all_input_nodes:
+        # Draw edges from highlighted producers last so dot puts them on the
+        # right, keeping that side of the figure free to annotate.
+        inputs = sorted(node.all_input_nodes,
+                        key=lambda n: label_of(n, names) in INTERESTING)
+        for inp in inputs:
             lines.append(f'  "{inp.name}" -> "{node.name}";')
     lines.append("}")
     return "\n".join(lines)
