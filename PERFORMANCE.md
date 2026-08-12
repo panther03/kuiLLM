@@ -163,6 +163,51 @@ like any other backend.
 proof, so the wide-N GEMMs (`lm_head` especially) are leaving some L2 reuse on
 the table.
 
+## Why SuperGEMM trails the non-pipelined references
+
+On a square compute-bound shape (4096³, fp16 in / fp32 accumulate / fp16 out)
+SuperGEMM reaches 70.8 TFLOP/s where the unverified `gemm_tc` reaches 90.0 and
+upstream `TensorCore2D` reaches ~88. A software-pipelined kernel losing to
+non-pipelined ones is surprising, so the gap was profiled directly. It is not
+the k-loop: at a matched tile the two kernels emit the same mainloop work (64
+`HMMA.16816`, 16 `LDGSTS.E.BYPASS.128` each), neither spills, and both are
+limited to 8 warps/SM at their respective tuned configurations. Three
+independent causes account for it, in descending order.
+
+**1. The epilogue scratch is not aliased with the pipeline buffers.**
+`gemm_tc` sizes its dynamic allocation `max(pipe, epilogue)`; SuperGEMM must
+sum them, because Kuiper's `SHMem` has no overlay descriptor and so cannot
+express lifetime-based retyping of one allocation (`Mm.Shared.fsti`). The extra
+band is what decides occupancy:
+
+| bm128 bn128 bk32, fp16 | shared bytes | blocks/SM | TFLOP/s |
+| --- | ---: | ---: | ---: |
+| SuperGEMM `wm64 wn64` | 58368 (40960 pipe + 17408 band) | 1 | 56.3 |
+| SuperGEMM `wm128 wn32` | 50176 (40960 + 9216) | 2 | 70.8 |
+| SuperGEMM `wm32 wn64 bk64` | 108544 | — | exceeds the 101376 limit |
+| `gemm_tc`, same tile, aliased | 37888 | 2 | 80.3 |
+
+The square warp tile — the one `gemm_tc` prefers — drops SuperGEMM to one block
+per SM, which is why autotuning walks away from it to the lopsided `wm128 wn32`
+whose band is small enough to keep two. Aliasing would make the square tile cost
+`max(40960, 17408) = 40960` and fit two blocks. It also currently costs whole
+regions of the tile space outright, as the third row shows.
+
+**2. The L2 swizzle is disabled.** `gemm_tc` takes `group` at run time, so the
+swizzle can be priced on an otherwise identical kernel: 90.0 TFLOP/s at
+`group=8` against 79.3 at `group=1`, or 13%. `Mm.Swizzle.fsti` already provides
+the proven permutation and its bijection bridge; only the ownership reindex in
+`Mm.Kernel.fst` is outstanding.
+
+**3. SuperGEMM has two pipeline stages, not three.** `gemm_tc` at `STAGES=3`
+beats itself at `STAGES=2` by 6.6% (90.0 against 84.4, both at `group=8`).
+SuperGEMM's flip-flop barrier is fixed at two buffers.
+
+So the honest apples-to-apples baseline is `gemm_tc` at two stages and
+`group=1`, which is 80.3 TFLOP/s; SuperGEMM's 70.8 sits about 12% under it, and
+that 12% is the shared-memory band consuming the occupancy headroom. The
+remaining distance to 90 is the swizzle and the third stage.
+
 ## Notes on measurement
 
 * All numbers are from CUDA graph replay, so host launch overhead is out of the
