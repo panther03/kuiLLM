@@ -68,15 +68,19 @@ def test_mm_splitk_matches_nonsplit():
 
 
 def test_mm_splitk_selectable():
-    """Split-K is a candidate but not the default: ``supergemm`` is ahead of it
-    in the backend list, and split-K is reached by asking for it by name."""
+    """Split-K is an ordinary candidate: it is reached by asking for it by name,
+    and it is behind ``supergemm`` in the untuned priority order.
+
+    The default is not asserted on a K-heavy shape, because that is exactly the
+    shape autotuning picks split-K for, and ``supported()`` honours a tuned
+    entry over the priority order."""
     _need_bf16_tensor_cores()
     impl = kuiops.MmImpl()
     A = torch.randn(256, 4864, device="cuda", dtype=torch.bfloat16)
     B = torch.randn(896, 4864, device="cuda", dtype=torch.bfloat16).t()
 
-    spec = impl.supported(aten.mm.default, (A, B), {})
-    assert spec is not None and spec["backend"] != "supergemm_splitk"
+    assert impl.backends.index("supergemm") \
+        < impl.backends.index("supergemm_splitk")
 
     spec = impl.supported(aten.mm.default, (A, B),
                           {"impl": "supergemm_splitk"})
