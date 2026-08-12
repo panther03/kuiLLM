@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=LR, dpi=96, nodesep=0.35, ranksep=0.45, bgcolor="white"];
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=18, margin="0.20,0.11", penwidth=2.0];
+  edge [color="#90a4ae", arrowsize=0.8, penwidth=1.6];
+  "x_1" [label="x\n8x64", fillcolor="#e3f2fd", color="#1565c0"];
+  "w_1" [label="W\n64x64", fillcolor="#e3f2fd", color="#1565c0"];
+  "b_1" [label="b\n64", fillcolor="#e3f2fd", color="#1565c0"];
+  "mm" [label="mm\n8x64", fillcolor="#ffe0b2", color="#ef6c00"];
+  "x_1" -> "mm";
+  "w_1" -> "mm";
+  "add" [label="add\n8x64", fillcolor="#eceff1", color="#78909c"];
+  "mm" -> "add";
+  "b_1" -> "add";
+  "relu" [label="relu\n8x64", fillcolor="#eceff1", color="#78909c"];
+  "add" -> "relu";
+  "output" [label="output", fillcolor="#eceff1", color="#78909c"];
+  "relu" -> "output";
+}
