@@ -167,9 +167,12 @@ the table.
 
 * All numbers are from CUDA graph replay, so host launch overhead is out of the
   loop in both configurations.
-* Autotuning candidates are timed the same way — recorded into a CUDA graph and
-  replayed. Timed eagerly, a Python dispatch (tens of µs) costs more than a
-  decode-shaped GEMM does on the device, and the winner is picked out of host
-  noise rather than kernel time.
+* The committed `tune_params.json` these numbers were taken with was produced
+  by the eager timing loop. Autotuning now times candidates the same way the
+  model runs them — recorded into a CUDA graph and replayed — because a Python
+  dispatch (tens of µs) costs more than a decode-shaped GEMM does on the device,
+  so eager timing picks winners out of host noise. Re-tuning under graph timing
+  already changes the `o_proj` winner (19.9 µs against the 20.9 µs tile eager
+  timing chose), so these figures are a floor, not a ceiling.
 * The profiled runs use 128 generated tokens rather than 256 to keep the trace
   small; the per-step device time is unchanged.
