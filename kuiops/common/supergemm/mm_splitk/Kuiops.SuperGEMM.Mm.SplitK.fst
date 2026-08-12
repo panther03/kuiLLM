@@ -1,9 +1,8 @@
 module Kuiops.SuperGEMM.Mm.SplitK
 
 (* Implementation of the split-K async launcher; see the interface for the
-   contract.  Launch pass 1, synchronize the stream to obtain a fresh epoch
-   under which pass 1's workspace writes are visible, then launch the
-   reduction on that epoch. *)
+   contract.  Launch pass 1, then launch the reduction directly on the pledge
+   pass 1 produced -- no synchronization, so the pair is graph-safe. *)
 
 #lang-pulse
 
@@ -19,6 +18,8 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.SplitK.Kernel { mk_kernel }
 open Kuiops.SuperGEMM.Mm.SplitK.Reduce { mk_reduce_kernel, gran_ub_lemma, gcols }
+open Kuiops.Approx.Share { approx_pts_to }
+open Kuiops.Kernel.Frame { desc_frame }
 open Kuiops.SuperGEMM.Mm.SplitK.WsLemmas { ws_target }
 open Kuiops.SuperGEMM.Mm.SplitK.ReduceLemmas { gran_target }
 open Kuiops.SuperGEMM.Mm.SplitK.Compose { gran_target_matmul }
@@ -115,51 +116,61 @@ fn supergemm_mm_splitk_async
       bm bn bk wm wn skew splits ks fA fB nblk nthr ()
   ) s;
 
-  pledge_flushed_done s (epoch_next e);
-  sync_stream s;
-  redeem_pledge emp_inames (epoch_done s (epoch_next e))
-    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
-                 (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
-                    (gW |-> eW) **
-                    pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
-                                  (to_real_matrix eA) (to_real_matrix eB) ()))));
-
-  with eW. assert (on gpu_loc (gW |-> eW));
-
   let njobs = rows *^ (cols /^ chunk et_d);
   gran_ub_lemma (SZ.v rows) (SZ.v cols / SZ.v (chunk et_d));
   assert pure (SZ.v njobs == SZ.v rows * gcols et_d cols);
 
-  launch (mk_reduce_kernel gW gD splits post_map post_map_r () njobs 1.0R eW
-            (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
-               (to_real_matrix eA) (to_real_matrix eB) ()) ()) s;
+  (* Bring the reduce kernel's precondition to the queue position pass 1 left
+     behind: [live gD] is owned outright, so it is injected with a trivial
+     pledge and joined onto pass 1's.  A and B ride along as a frame -- pass 2
+     never touches them, but [launch_pledged] consumes the whole pledge. *)
+  return_pledge (epoch_flushed s (epoch_next e)) (on gpu_loc (live gD))
+    #(is_send_placeless (on gpu_loc (live gD)) #(placeless_on gpu_loc (live gD)));
+  join_pledge
+    (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+                 (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
+                    (gW |-> eW) **
+                    pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                                  (to_real_matrix eA) (to_real_matrix eB) ()))))
+    (on gpu_loc (live gD));
+  rewrite_pledge
+    ((on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
+                  (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
+                     (gW |-> eW) **
+                     pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                                   (to_real_matrix eA) (to_real_matrix eB) ())))) **
+     (on gpu_loc (live gD)))
+    (on gpu_loc
+      (((gA |-> Frac fA eA) ** (gB |-> Frac fB eB)) **
+       ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
+           (gW |-> Frac 1.0R eW) **
+           pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                         (to_real_matrix eA) (to_real_matrix eB) ())) **
+        live gD)))
+    #emp_inames fn () { () };
 
-  pledge_flushed_done s (epoch_next (epoch_next e));
+  launch_pledged
+    (desc_frame ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB))
+       (mk_reduce_kernel gW gD splits post_map post_map_r () njobs 1.0R
+          (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+             (to_real_matrix eA) (to_real_matrix eB) ()) ())) s;
 
   gran_target_matmul (SZ.v mws) (SZ.v splits) (SZ.v ks)
     (to_real_matrix eA) (to_real_matrix eB) post_map_r ();
 
-  return_pledge (epoch_done s (epoch_next (epoch_next e))) (on gpu_loc (gA |-> Frac fA eA)) #solve;
-  return_pledge (epoch_done s (epoch_next (epoch_next e))) (on gpu_loc (gB |-> Frac fB eB)) #solve;
-  join_pledge (on gpu_loc (gA |-> Frac fA eA)) (on gpu_loc (gB |-> Frac fB eB));
-  join_pledge
-    ((on gpu_loc (gA |-> Frac fA eA)) ** (on gpu_loc (gB |-> Frac fB eB)))
-    (on gpu_loc ((gW |-> Frac 1.0R eW) **
-                 (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
-                    (gD |-> eD) **
-                    pure (eD %~ gran_target (SZ.v rows) (SZ.v splits)
-                                  (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
-                                     (to_real_matrix eA) (to_real_matrix eB) ())
-                                  post_map_r))));
   rewrite_pledge
-    (((on gpu_loc (gA |-> Frac fA eA)) ** (on gpu_loc (gB |-> Frac fB eB))) **
-     (on gpu_loc ((gW |-> Frac 1.0R eW) **
-                  (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
-                     (gD |-> eD) **
-                     pure (eD %~ gran_target (SZ.v rows) (SZ.v splits)
-                                   (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
-                                      (to_real_matrix eA) (to_real_matrix eB) ())
-                                   post_map_r)))))
+    (on gpu_loc
+      (((gA |-> Frac fA eA) ** (gB |-> Frac fB eB)) **
+       ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
+           (gW |-> Frac 1.0R eW) **
+           pure (eW %~ ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                         (to_real_matrix eA) (to_real_matrix eB) ())) **
+        (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
+           (gD |-> eD) **
+           pure (eD %~ gran_target (SZ.v rows) (SZ.v splits)
+                         (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
+                            (to_real_matrix eA) (to_real_matrix eB) ())
+                         post_map_r)))))
     (on gpu_loc
       (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
@@ -168,6 +179,4 @@ fn supergemm_mm_splitk_async
          pure (eD' %~ chest_map post_map_r
                  (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
     #emp_inames fn () { () };
-  drop_ (epoch_done s (epoch_next e));
-  epoch_next (epoch_next e)
 }

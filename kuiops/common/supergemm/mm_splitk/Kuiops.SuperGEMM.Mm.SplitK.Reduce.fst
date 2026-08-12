@@ -590,8 +590,10 @@ let mk_reduce_kernel
   (rW : chest2 real (SZ.v mws) (SZ.v n))
   ()
   : kernel_desc
-      (approx_pts_to gW fW rW ** live gD)
-      (approx_pts_to gW fW rW **
+      ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+          (gW |-> Frac fW eW) ** pure (eW %~ rW)) ** live gD)
+      ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+          (gW |-> Frac fW eW) ** pure (eW %~ rW)) **
        (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
           gD |-> eD **
           pure (eD %~ RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)))
