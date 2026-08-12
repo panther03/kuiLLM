@@ -542,10 +542,6 @@ _CPASYNC_BACKENDS = ("supergemm", "supergemm_splitk", "supergemm_splitk_epi")
 # and 14, K/bk == 36 offers 3, 6, 9, 12). See etc/sweep_splitk_params.py.
 _SPLITK_SPLITS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16)
 
-# Backends never taken by default; see `_explicit_only_filtered`.
-_EXPLICIT_ONLY_BACKENDS = ("supergemm_splitk", "supergemm_splitk_epi")
-
-
 def _tc_device_supported(dtype, device):
     cc = _config.cuda_device_capability(device)
     return cc is not None and cc >= _TC_INPUT_DTYPES[dtype]
@@ -930,21 +926,6 @@ def _gemm_fst_ctx(spec, name):
         **spec["tile"])
 
 
-def _explicit_only_filtered(backends, kwargs):
-    """Drop backends that must be asked for by name.
-
-    ``supergemm_splitk`` launches two kernels and synchronizes the stream in
-    between, so it is illegal under CUDA graph capture -- which is how the
-    inference pipeline runs. Chaining the two launches without a host
-    synchronization needs a kernel description whose precondition is
-    existentially quantified (the workspace contents are only pledged up to
-    ``%~``), which Kuiper cannot express yet. It stays reachable through an
-    explicit ``impl="supergemm_splitk"``."""
-    if kwargs.get("impl") in _EXPLICIT_ONLY_BACKENDS:
-        return tuple(backends)
-    return tuple(b for b in backends if b not in _EXPLICIT_ONLY_BACKENDS)
-
-
 def _gemm_wrapper_ctx(spec, name):
     return dict(
         module=spec["module"].replace(".", "_"), name=name,
@@ -989,8 +970,8 @@ class MmImpl(_MatmulFamily):
         K2, N = (int(x) for x in B.shape)
         if K != K2:
             return None
-        backends = _explicit_only_filtered(
-            _a_aligned_filtered(_tn_filtered(self.backends, B, K, N), A), kwargs)
+        backends = _a_aligned_filtered(
+            _tn_filtered(self.backends, B, K, N), A)
         plans = self._plans(kwargs, A.dtype, A.device, backends)
         specs = [
             self._spec(backend, tile, A.dtype, acc_dtype, out_dtype)
@@ -1112,8 +1093,7 @@ class AddmmImpl(_MatmulFamily):
             backends = tuple(b for b in self.backends if b != "bt2d")
         else:
             return None
-        backends = _explicit_only_filtered(
-            _a_aligned_filtered(_tn_filtered(backends, B, K, N), A), kwargs)
+        backends = _a_aligned_filtered(_tn_filtered(backends, B, K, N), A)
         alpha = _scalar(kwargs.get("alpha", 1))
         beta = _scalar(kwargs.get("beta", 1))
         if alpha is None or beta is None:

@@ -5,12 +5,12 @@ module {{ module }}
 // Generated from kuiops/mm_splitk_epi/Kuiops.Addmm.SplitKEpi.Inst.fst.j2
 //
 // addmm(C, A, B, alpha, beta) = beta*C + alpha*(A@B^T), computed by the split-K
-// SuperGEMM: two launches with a stream synchronization between them. Pass 1
-// writes `splits` fp32 partial products into the caller-supplied workspace
-// `gW`, viewed as (splits*rows, cols); pass 2 sums them AND applies the
-// epilogue. The epilogue has to be in pass 2: `lincomb` is affine in the
-// accumulated value, so applying it to a partial sum would add `beta*C` once
-// per split. Because of the sync this operator cannot be graph-captured.
+// SuperGEMM: two launches chained on the stream. Pass 1 writes `splits` fp32
+// partial products into the caller-supplied workspace `gW`, viewed as
+// (splits*rows, cols); pass 2 sums them AND applies the epilogue. The epilogue
+// has to be in pass 2: `lincomb` is affine in the accumulated value, so
+// applying it to a partial sum would add `beta*C` once per split. Nothing
+// synchronizes in between, so the pair is graph-safe.
 //
 // `mws` and `ks` are the workspace row count and the per-split k extent; the
 // C++ wrapper computes them as `splits*M` and `K/splits`.

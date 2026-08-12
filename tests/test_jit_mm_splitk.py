@@ -1,10 +1,11 @@
 """Correctness tests for the split-K SuperGEMM backend.
 
-Split-K launches two kernels with a stream synchronization between them, so it
-is illegal under CUDA graph capture and must only ever be reached through an
-explicit ``impl="supergemm_splitk"``. Both halves of that are checked here,
-along with numeric agreement with ``torch.mm`` at the shapes split-K exists for
-(skinny M, large K).
+Split-K chains two kernels on the stream with no synchronization between them,
+so it is graph-safe and is an ordinary autotuning candidate. It is still not
+the default pick -- ``supergemm`` comes first in the backend list -- so both
+the default choice and reachability by name are checked here, along with
+numeric agreement with ``torch.mm`` at the shapes split-K exists for (skinny M,
+large K).
 
 The first run of each new (tiling, split count) compiles a kernel (F* + nvcc,
 tens of seconds); later runs hit the cache.
@@ -66,9 +67,9 @@ def test_mm_splitk_matches_nonsplit():
     assert _rel_fro(split, plain) < 1e-3
 
 
-def test_mm_splitk_is_explicit_only():
-    """The stream sync makes split-K illegal under graph capture, so it must
-    never be selected unless it was asked for by name."""
+def test_mm_splitk_selectable():
+    """Split-K is a candidate but not the default: ``supergemm`` is ahead of it
+    in the backend list, and split-K is reached by asking for it by name."""
     _need_bf16_tensor_cores()
     impl = kuiops.MmImpl()
     A = torch.randn(256, 4864, device="cuda", dtype=torch.bfloat16)

@@ -4,11 +4,10 @@ module {{ module }}
 // JIT-GENERATED instantiation of a verified Kuiper kernel. DO NOT EDIT.
 // Generated from kuiops/mm_splitk/Kuiops.Mm.SplitK.Inst.fst.j2
 //
-// Split-K SuperGEMM, D = A @ B^T. Two launches with a stream synchronization
-// between them: pass 1 writes `splits` fp32 partial products into the
-// caller-supplied workspace `gW`, viewed as (splits*rows, cols); pass 2 sums
-// them and applies `post_map` (= `fcast`). Because of the sync this operator
-// cannot be captured into a CUDA graph.
+// Split-K SuperGEMM, D = A @ B^T. Two launches chained on the stream: pass 1
+// writes `splits` fp32 partial products into the caller-supplied workspace
+// `gW`, viewed as (splits*rows, cols); pass 2 sums them and applies `post_map`
+// (= `fcast`). Nothing synchronizes in between, so the pair is graph-safe.
 //
 // `mws` and `ks` are the workspace row count and the per-split k extent. They
 // are runtime arguments because they appear in `gW`'s layout and in the

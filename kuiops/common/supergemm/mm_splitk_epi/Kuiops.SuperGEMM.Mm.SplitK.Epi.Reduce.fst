@@ -47,6 +47,7 @@ open Kuiops.SuperGEMM.Mm.SplitK.Reduce {
   gcols, gran_ub, gran_ub_lemma, d_gran, d_gran_at, rk_sq,
   divides_helper, div_step, cell_aligned16,
   rsetup, rteardown, d_gran_sendable, d_gran_at_sendable }
+open Kuiops.Approx.Share { approx_pts_to, approx_pts_to_sendable }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
@@ -66,7 +67,8 @@ module SL = Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas
 ghost
 fn resetup
   (#et_acc #et_c #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc, sized et_c, sized et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| sized et_c, sized et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
   (#lC : RO.vlayout2 (SZ.v m) (SZ.v n))
@@ -77,30 +79,31 @@ fn resetup
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (#fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (#fC : perm) (#eC : chest2 et_c (SZ.v m) (SZ.v n))
   ()
   norewrite
-  requires (gW |-> Frac fW eW) ** (gC |-> Frac fC eC) ** live gD
+  requires approx_pts_to gW fW rW ** (gC |-> Frac fC eC) ** live gD
   ensures
     (forall+ (i : natlt njobs).
       (gC |-> Frac (fC /. njobs) eC) **
-      ((gW |-> Frac (fW /. njobs) eW) **
-       d_gran gD () (i / gcols et_d n) (i % gcols et_d n))) ** pure True
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
+       d_gran gD () (i / gcols et_d n) (i % gcols et_d n))) **
+    approx_pts_to gW (fW /. 2) rW
 {
-  rsetup gW gD () njobs #fW #eW ();
+  rsetup gW gD () njobs #fW rW ();
   RO.tensor_share_n gC (SZ.v njobs);
   forevery_zip
     (fun (i : natlt njobs) -> gC |-> Frac (fC /. njobs) eC)
     (fun (i : natlt njobs) ->
-      (gW |-> Frac (fW /. njobs) eW) **
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
       d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
 }
 
 ghost
 fn reteardown
   (#et_acc #et_c #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| sized et_c |}
   {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
@@ -115,26 +118,27 @@ fn reteardown
                  gran_ub (SZ.v m) (gcols et_d n) })
   (rD : chest2 real (SZ.v m) (SZ.v n))
   (#_ : squash (SZ.fits lD.ulen))
-  (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (#fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (#fC : perm) (#eC : chest2 et_c (SZ.v m) (SZ.v n))
   ()
   norewrite
   requires
     (forall+ (i : natlt njobs).
       (gC |-> Frac (fC /. njobs) eC) **
-      ((gW |-> Frac (fW /. njobs) eW) **
-       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))) ** pure True
-  ensures (gW |-> Frac fW eW) ** (gC |-> Frac fC eC) **
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
+       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))) **
+    approx_pts_to gW (fW /. 2) rW
+  ensures approx_pts_to gW fW rW ** (gC |-> Frac fC eC) **
           (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
              gD |-> eD ** pure (eD %~ rD))
 {
   forevery_unzip
     (fun (i : natlt njobs) -> gC |-> Frac (fC /. njobs) eC)
     (fun (i : natlt njobs) ->
-      (gW |-> Frac (fW /. njobs) eW) **
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n));
   RO.tensor_gather_n gC (SZ.v njobs);
-  rteardown gW gD () njobs rD #() #fW #eW ();
+  rteardown gW gD () njobs rD #() #fW rW ();
 }
 
 (* [dj] indexes granules, so its column base plus any within-granule offset is
@@ -341,7 +345,7 @@ fn accumulate
 
 #push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries no"
 inline_for_extraction noextract
-fn rkf
+fn rkf_at
   (#et_acc #et_c #et_d : Type0)
   {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| scalar et_c, real_like et_c |}
@@ -369,7 +373,7 @@ fn rkf
   ()
   preserves gpu
   preserves gC |-> Frac (fC /. njobs) eC
-  preserves gW |-> Frac (fW /. njobs) eW
+  preserves gW |-> Frac fW eW
   requires d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
   ensures d_gran_at gD ()
             (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r)
@@ -460,13 +464,60 @@ fn rkf
 }
 #pop-options
 
+(* The device body as the descriptor needs it: with the workspace contents
+   existential, so that [kpre] does not have to name them.  The body itself is
+   [rkf_at], unchanged -- naming the witness here rather than inside keeps the
+   inner loops' proof context exactly as it was. *)
+inline_for_extraction noextract
+fn rkf
+  (#et_acc #et_c #et_d : Type0)
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| scalar et_c, real_like et_c |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
+  (#m #n #mws : szp)
+  (#lW : layout2 (SZ.v mws) (SZ.v n)) {| T.ctlayout lW |}
+       {| strW : strided_row_major (vtlayout_of_tlayout lW) |}
+  (#lC : RO.vlayout2 (SZ.v m) (SZ.v n)) {| RO.cvtlayout lC |}
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gW : array2 et_acc lW)
+  (gC : RO.roarray2 et_c lC)
+  (gD : array2 et_d lD)
+  (splits : szp)
+  (comb : et_c -> et_acc -> et_d)
+  (comb_r : binop real { approx2 comb comb_r })
+  (sq : squash (rk_sq gW gD splits))
+  (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
+                 gran_ub (SZ.v m) (gcols et_d n) })
+  (#fW : perm)
+  (#fC : perm) (#eC : chest2 et_c (SZ.v m) (SZ.v n))
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (rC : chest2 real (SZ.v m) (SZ.v n) { eC %~ rC })
+  (i : szlt njobs)
+  ()
+  preserves gpu
+  preserves gC |-> Frac (fC /. njobs) eC
+  preserves approx_pts_to gW ((fW /. 2) /. njobs) rW
+  requires d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+  ensures d_gran_at gD ()
+            (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r)
+            (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+{
+  unfold (approx_pts_to gW ((fW /. 2) /. njobs) rW);
+  with eW. assert (gW |-> Frac ((fW /. 2) /. njobs) eW);
+  rkf_at gW gC gD splits comb comb_r () njobs
+    #((fW /. 2) /. njobs) #eW #fC #eC rW rC i ();
+  fold (approx_pts_to gW ((fW /. 2) /. njobs) rW);
+}
+
 (* ---------------------------------------------------------------------- *)
 (* kernel descriptor                                                        *)
 (* ---------------------------------------------------------------------- *)
 
 let rk_sendable
   (#et_acc #et_c #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc, sized et_c, sized et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| sized et_c, sized et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
   (#lC : RO.vlayout2 (SZ.v m) (SZ.v n))
@@ -477,27 +528,27 @@ let rk_sendable
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (fC : perm) (eC : chest2 et_c (SZ.v m) (SZ.v n))
   (i : natlt njobs)
   : is_send_across gpu_of
       ((gC |-> Frac (fC /. njobs) eC) **
-       ((gW |-> Frac (fW /. njobs) eW) **
+       (approx_pts_to gW ((fW /. 2) /. njobs) rW **
         d_gran gD () (i / gcols et_d n) (i % gcols et_d n)))
 = is_send_across_star
     (gC |-> Frac (fC /. njobs) eC)
-    ((gW |-> Frac (fW /. njobs) eW) **
+    (approx_pts_to gW ((fW /. 2) /. njobs) rW **
      d_gran gD () (i / gcols et_d n) (i % gcols et_d n))
     #(RO.is_send_across_global_tensor gC #(fC /. njobs) eC)
     #(is_send_across_star
-        (gW |-> Frac (fW /. njobs) eW)
+        (approx_pts_to gW ((fW /. 2) /. njobs) rW)
         (d_gran gD () (i / gcols et_d n) (i % gcols et_d n))
-        #(is_send_across_global_tensor gW #(fW /. njobs) eW)
+        #(approx_pts_to_sendable gW ((fW /. 2) /. njobs) rW)
         #(d_gran_sendable gD () (i / gcols et_d n) (i % gcols et_d n)))
 
 let rk_post_sendable
   (#et_acc #et_c #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| sized et_c |}
   {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
@@ -510,23 +561,23 @@ let rk_post_sendable
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (fC : perm) (eC : chest2 et_c (SZ.v m) (SZ.v n))
   (rD : chest2 real (SZ.v m) (SZ.v n))
   (i : natlt njobs)
   : is_send_across gpu_of
       ((gC |-> Frac (fC /. njobs) eC) **
-       ((gW |-> Frac (fW /. njobs) eW) **
+       (approx_pts_to gW ((fW /. 2) /. njobs) rW **
         d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n)))
 = is_send_across_star
     (gC |-> Frac (fC /. njobs) eC)
-    ((gW |-> Frac (fW /. njobs) eW) **
+    (approx_pts_to gW ((fW /. 2) /. njobs) rW **
      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
     #(RO.is_send_across_global_tensor gC #(fC /. njobs) eC)
     #(is_send_across_star
-        (gW |-> Frac (fW /. njobs) eW)
+        (approx_pts_to gW ((fW /. 2) /. njobs) rW)
         (d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
-        #(is_send_across_global_tensor gW #(fW /. njobs) eW)
+        #(approx_pts_to_sendable gW ((fW /. 2) /. njobs) rW)
         #(d_gran_at_sendable gD () rD (i / gcols et_d n) (i % gcols et_d n)))
 
 inline_for_extraction noextract
@@ -551,34 +602,38 @@ let mk_reduce_kernel
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) /\
                  njobs <= max_blocks * max_threads })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (fW : perm)
   (fC : perm) (eC : chest2 et_c (SZ.v m) (SZ.v n))
-  (rW : chest2 real (SZ.v mws) (SZ.v n) { eW %~ rW })
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   (rC : chest2 real (SZ.v m) (SZ.v n) { eC %~ rC })
   ()
   : kernel_desc
-      ((gW |-> Frac fW eW) ** (gC |-> Frac fC eC) ** live gD)
-      ((gW |-> Frac fW eW) ** (gC |-> Frac fC eC) **
+      ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+          (gW |-> Frac fW eW) ** pure (eW %~ rW)) **
+       (gC |-> Frac fC eC) ** live gD)
+      ((exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v n)).
+          (gW |-> Frac fW eW) ** pure (eW %~ rW)) **
+       (gC |-> Frac fC eC) **
        (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
           gD |-> eD **
           pure (eD %~ EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r)))
 = {
     nthr = njobs;
-    frame = pure True;
+    frame = approx_pts_to gW (fW /. 2) rW;
     kpre = (fun (i : natlt njobs) ->
       (gC |-> Frac (fC /. njobs) eC) **
-      ((gW |-> Frac (fW /. njobs) eW) **
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
        d_gran gD () (i / gcols et_d n) (i % gcols et_d n)));
     kpost = (fun (i : natlt njobs) ->
       (gC |-> Frac (fC /. njobs) eC) **
-      ((gW |-> Frac (fW /. njobs) eW) **
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
        d_gran_at gD () (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r)
          (i / gcols et_d n) (i % gcols et_d n)));
-    setup = resetup gW gC gD () njobs #fW #eW #fC #eC;
+    setup = resetup gW gC gD () njobs #fW rW #fC #eC;
     teardown = reteardown gW gC gD () njobs
-      (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r) #() #fW #eW #fC #eC;
-    f = rkf gW gC gD splits comb comb_r () njobs #fW #eW #fC #eC rW rC;
-    kpre_sendable = rk_sendable gW gC gD () njobs fW eW fC eC;
-    kpost_sendable = rk_post_sendable gW gC gD () njobs fW eW fC eC
+      (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r) #() #fW rW #fC #eC;
+    f = rkf gW gC gD splits comb comb_r () njobs #fW #fC #eC rW rC;
+    kpre_sendable = rk_sendable gW gC gD () njobs fW rW fC eC;
+    kpost_sendable = rk_post_sendable gW gC gD () njobs fW rW fC eC
       (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r);
   } <: kernel_desc_n _ _
