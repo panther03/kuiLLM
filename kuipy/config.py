@@ -62,6 +62,9 @@ AUTOTUNE_REPEATS = int(os.environ.get("KUIPY_AUTOTUNE_REPEATS", "10"))
 # Launches per timed sample. One launch per sample would measure mostly launch
 # latency: the kernels being tuned run in tens of microseconds.
 AUTOTUNE_BATCH = int(os.environ.get("KUIPY_AUTOTUNE_BATCH", "50"))
+# Launches recorded per candidate graph. Kept well below AUTOTUNE_BATCH because
+# the capture's private memory pool holds one output tensor per launch.
+AUTOTUNE_GRAPH_BATCH = int(os.environ.get("KUIPY_AUTOTUNE_GRAPH_BATCH", "10"))
 # Threads used to build the candidate kernels before timing them. Each build is
 # an F* extraction plus an nvcc compile, so this is the difference between a
 # tuning pass that takes hours and one that takes tens of minutes.

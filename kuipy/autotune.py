@@ -192,27 +192,72 @@ def _synthesize_args(key, device):
     ]
 
 
+def _capture(spec, run_candidate, args, kwargs):
+    """Record ``AUTOTUNE_BATCH`` back-to-back launches into a CUDA graph.
+
+    Dispatching a candidate from Python costs tens of microseconds, which is
+    more than a decode-shaped GEMM takes on the device: timed eagerly, every
+    candidate measures the same and the winner is picked out of host noise.
+    Replaying a graph launches the kernels with no host in the loop, which is
+    also how they run in the model. Returns ``None`` if the candidate cannot be
+    captured, and the caller falls back to eager timing."""
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(3):
+            run_candidate(spec, args, kwargs)
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    try:
+        with torch.cuda.graph(graph):
+            for _ in range(C.AUTOTUNE_GRAPH_BATCH):
+                run_candidate(spec, args, kwargs)
+    except Exception as exc:
+        C.log(f"cuda-graph capture failed for {spec.get('module')}: {exc}")
+        return None
+    return graph
+
+
+def _time(launch, iters):
+    timings = []
+    for _ in range(C.AUTOTUNE_REPEATS):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        launch()
+        end.record()
+        end.synchronize()
+        timings.append(float(start.elapsed_time(end)) / iters)
+    # Interference from the rest of the machine can only ever make a sample
+    # slower, so the fastest one is the best estimate of the kernel's cost.
+    return min(timings)
+
+
 def _benchmark(spec, run_candidate, args, kwargs, device):
     with torch.cuda.device(device):
         run_candidate(spec, args, kwargs)
         torch.cuda.synchronize(device)
+        graph = _capture(spec, run_candidate, args, kwargs)
+        if graph is not None:
+            try:
+                graph.replay()
+                torch.cuda.synchronize(device)
+                return _time(graph.replay, C.AUTOTUNE_GRAPH_BATCH)
+            finally:
+                # Every capture owns a private pool holding one output tensor
+                # per recorded launch; on a wide GEMM that is hundreds of MB.
+                graph.reset()
+                del graph
+
         for _ in range(C.AUTOTUNE_WARMUP):
             run_candidate(spec, args, kwargs)
         torch.cuda.synchronize(device)
 
-        timings = []
-        for _ in range(C.AUTOTUNE_REPEATS):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+        def launch():
             for _ in range(C.AUTOTUNE_BATCH):
                 run_candidate(spec, args, kwargs)
-            end.record()
-            end.synchronize()
-            timings.append(float(start.elapsed_time(end)) / C.AUTOTUNE_BATCH)
-    # Interference from the rest of the machine can only ever make a sample
-    # slower, so the fastest one is the best estimate of the kernel's cost.
-    return min(timings)
+        return _time(launch, C.AUTOTUNE_BATCH)
 
 
 def _prebuild(candidates, run_candidate, args, kwargs, device):
