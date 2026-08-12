@@ -163,16 +163,22 @@ like any other backend.
 proof, so the wide-N GEMMs (`lm_head` especially) are leaving some L2 reuse on
 the table.
 
-## Why SuperGEMM trails the non-pipelined references
+## Why SuperGEMM trails the unverified reference
 
 On a square compute-bound shape (4096³, fp16 in / fp32 accumulate / fp16 out)
-SuperGEMM reaches 70.8 TFLOP/s where the unverified `gemm_tc` reaches 90.0 and
-upstream `TensorCore2D` reaches ~88. A software-pipelined kernel losing to
-non-pipelined ones is surprising, so the gap was profiled directly. It is not
-the k-loop: at a matched tile the two kernels emit the same mainloop work (64
-`HMMA.16816`, 16 `LDGSTS.E.BYPASS.128` each), neither spills, and both are
-limited to 8 warps/SM at their respective tuned configurations. Three
+SuperGEMM reaches 70.8 TFLOP/s where the unverified `gemm_tc` reaches 90.0.
+Both are pipelined and both accumulate in fp32, so this is the comparison that
+isolates what the verified implementation gives up; it was profiled directly.
+It is not the k-loop: at a matched tile the two kernels emit the same mainloop
+work (64 `HMMA.16816`, 16 `LDGSTS.E.BYPASS.128` each), neither spills, and both
+are limited to 8 warps/SM at their respective tuned configurations. Three
 independent causes account for it, in descending order.
+
+Note that `TensorCore2D` is *not* a meaningful comparison here despite reaching
+~88 TFLOP/s: it accumulates in fp16, which roughly doubles the tensor-core rate
+on this part and is not a mode anyone runs a large GEMM in. The non-pipelined
+kernel that does accumulate in fp32, `TensorCore2D.To`, reaches 67.7 tuned —
+below SuperGEMM on every shape and dtype measured in `bench_ops.ipynb`.
 
 **1. The epilogue scratch is not aliased with the pipeline buffers.**
 `gemm_tc` sizes its dynamic allocation `max(pipe, epilogue)`; SuperGEMM must
