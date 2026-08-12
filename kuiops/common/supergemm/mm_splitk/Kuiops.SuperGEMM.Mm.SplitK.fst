@@ -116,8 +116,9 @@ fn supergemm_mm_splitk_async
       bm bn bk wm wn skew splits ks fA fB nblk nthr ()
   ) s;
 
-  let e' = sync_stream s;
-  redeem_pledge emp_inames (epoch_done s e)
+  pledge_flushed_done s (epoch_next e);
+  sync_stream s;
+  redeem_pledge emp_inames (epoch_done s (epoch_next e))
     (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                  (exists* (eW : chest2 et_acc (SZ.v mws) (SZ.v cols)).
                     (gW |-> eW) **
@@ -134,11 +135,13 @@ fn supergemm_mm_splitk_async
             (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)
                (to_real_matrix eA) (to_real_matrix eB) ()) ()) s;
 
+  pledge_flushed_done s (epoch_next (epoch_next e));
+
   gran_target_matmul (SZ.v mws) (SZ.v splits) (SZ.v ks)
     (to_real_matrix eA) (to_real_matrix eB) post_map_r ();
 
-  return_pledge (epoch_done s e') (on gpu_loc (gA |-> Frac fA eA)) #solve;
-  return_pledge (epoch_done s e') (on gpu_loc (gB |-> Frac fB eB)) #solve;
+  return_pledge (epoch_done s (epoch_next (epoch_next e))) (on gpu_loc (gA |-> Frac fA eA)) #solve;
+  return_pledge (epoch_done s (epoch_next (epoch_next e))) (on gpu_loc (gB |-> Frac fB eB)) #solve;
   join_pledge (on gpu_loc (gA |-> Frac fA eA)) (on gpu_loc (gB |-> Frac fB eB));
   join_pledge
     ((on gpu_loc (gA |-> Frac fA eA)) ** (on gpu_loc (gB |-> Frac fB eB)))
@@ -166,6 +169,6 @@ fn supergemm_mm_splitk_async
          pure (eD' %~ chest_map post_map_r
                  (MS.matmul (to_real_matrix eA) (mtranspose (to_real_matrix eB))))))
     #emp_inames fn () { () };
-  drop_ (epoch_done s e);
-  e'
+  drop_ (epoch_done s (epoch_next e));
+  epoch_next (epoch_next e)
 }

@@ -558,13 +558,14 @@ fn reduce
   (#va : chest (snoc_shape d cols) et_i)
   (#vout : chest d et_o)
   (#e : epoch_t)
-  norewrite
   preserves
-    cpu ** stream_live s ** epoch_live s e
+    cpu ** stream_live s
+  requires epoch_live s e
   requires
     on gpu_loc (a |-> va) ** on gpu_loc (output |-> vout)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc (
         (a |-> va) **
         (output |-> mk d (fun i -> reduced f pre_map post_map va i))))

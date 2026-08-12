@@ -25,9 +25,11 @@ fn map_async
   (s : stream_t)
   (#sa : chest1 et lena)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires on gpu_loc (a |-> sa)
-  ensures  pledge0 (epoch_done s e) (on gpu_loc (a |-> chest_map f sa))
+  ensures  epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e)) (on gpu_loc (a |-> chest_map f sa))
 {
   launch (map_kd f lena a #sa) s;
 }
@@ -46,10 +48,12 @@ fn map_to_async
   (#so : chest1 ot lena)
   (#fi : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires on gpu_loc (input |-> Frac fi si) ** on gpu_loc (output |-> so)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((input |-> Frac fi si) **
                    (output |-> mk1 (fun i -> f (acc1 si i)))))
 {
@@ -69,10 +73,12 @@ fn map2_async
   (#sa #sb : chest1 et lena)
   (#fb : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires on gpu_loc (b |-> Frac fb sb) ** on gpu_loc (a |-> sa)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((b |-> Frac fb sb) ** (a |-> chest1_map2 f sa sb)))
 {
   launch (map2_kd f lena a b #sa #sb #fb) s;
@@ -96,12 +102,14 @@ fn map3_to_async
   (#so : chest1 ot lena)
   (#fa #fb #fc : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     on gpu_loc (a |-> Frac fa sa) ** on gpu_loc (b |-> Frac fb sb) **
     on gpu_loc (c |-> Frac fc sc) ** on gpu_loc (output |-> so)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((a |-> Frac fa sa) ** (b |-> Frac fb sb) ** (c |-> Frac fc sc) **
                    (output |-> mk1 (fun i -> f (acc1 sa i) (acc1 sb i) (acc1 sc i)))))
 {

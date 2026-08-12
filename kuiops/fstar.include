@@ -23,6 +23,7 @@ common/pipelined
 common/local_aligned
 common/vecmap
 common/shmem_aligned
+common/tc2d_to
 common/supergemm/output
 common/supergemm/mm
 common/supergemm/mm_epi

@@ -29,12 +29,14 @@ fn scatter_async
   (s : stream_t)
   (#fInp #fIdx : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires on gpu_loc (gInp |-> Frac fInp eInp) **
            on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest di (szlt (do @! (SZ.v dim))))) **
            on gpu_loc (live gOut)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((gInp |-> Frac fInp eInp) **
                    (gIdx |-> Frac fIdx (eIdx <: chest di (szlt (do @! (SZ.v dim))))) **
                    (exists* eOut. (gOut |-> eOut) **

@@ -69,14 +69,16 @@ fn supergemm_mm_epi_async
   (#eC : chest2 et_c (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc
         ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
           (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). (gD |-> eD') **

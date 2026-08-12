@@ -54,7 +54,8 @@ fn bt2d_async
   (#eC : chest3 et (SZ.v batch) (SZ.v m) (SZ.v n))
   (#fA #fB : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     pure (aligned 16 (core gA)) **
     pure (aligned 16 (core gB)) **
@@ -63,7 +64,8 @@ fn bt2d_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> eC)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gC |-> MS.gbmmcomb (fun (x:et) -> x) (fun (x:et) -> x) comb eC eA eB)))
 
@@ -146,7 +148,8 @@ fn tc2d_to_gen_async
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -155,7 +158,8 @@ fn tc2d_to_gen_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -207,7 +211,8 @@ fn tc2d_to_async
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -216,7 +221,8 @@ fn tc2d_to_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -268,7 +274,8 @@ fn tc2d_to_bcast_async
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
   (#e : epoch_t)
-  preserves cpu ** stream_live s ** epoch_live s e
+  preserves cpu ** stream_live s
+  requires epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -277,7 +284,8 @@ fn tc2d_to_bcast_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    pledge0 (epoch_done s e)
+    epoch_live s (epoch_next e) **
+    pledge0 (epoch_flushed s (epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
