@@ -1,6 +1,6 @@
 {
   "entries": {
-    "00d70a2b329c06cd58d6d7dedf322c69dd844fb31ce82348153043aadbbf9b59": {
+    "054640510f52fe58f0e95122c535ef743079cb8361bd516cdfd6c71f82e0520e": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -33,857 +33,26 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 5
+        "tuning_schema": 7
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_tn",
+        "backend": "supergemm",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn4",
-        "out_dtype": "bfloat16",
-        "tile": {
-          "bk": 32,
-          "bm": 64,
-          "bn": 64,
-          "tk": 16,
-          "tm": 16,
-          "tn": 16,
-          "wm": 2,
-          "wn": 4
-        }
-      }
-    },
-    "1750da1463d66430a87e90044db30a7a3a0f61a7c9c27741396a774b64bc93df": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              896,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 25,
-        "group": 8,
-        "splits": 1,
-        "tile": "64x64x64w32x32s4"
-      }
-    },
-    "176b94ef1e6a7419b8255e9dafe127ee45c18a176182c4e33725ccbfa6890fc7": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 10,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x256x32w64x64s2"
-      }
-    },
-    "2f6f68fe1237ea1607100118903fa9a92c5e5886013b60a628c03f261af42f6c": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              896,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 22,
-        "group": 8,
-        "splits": 1,
-        "tile": "64x64x32w32x32s4"
-      }
-    },
-    "41522983de6c81871cf66ff94fc8230a8b9a2a41e8d3cadae1ab747872c2e65b": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              896,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "64c173e642b12df00a979def9ef8221ebae4894561892d3228204cfa7fae1a77": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              896,
-              151936
-            ],
-            "strides": [
-              151936,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 11,
-        "group": 8,
-        "splits": 1,
-        "tile": "256x128x32w64x64s2"
-      }
-    },
-    "7286f26d849c95f9ff3ec45b70e5c66de56a50919a9a349a8a3967043444ce3c": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4864,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 4,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "7cf2a2dbbf7f40b82379286f227890b3742e1929d782524ad3c00aaf102a4d86": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              896,
-              151936
-            ],
-            "strides": [
-              1,
-              896
-            ]
-          }
-        ],
-        "operation": "aten.mm.default",
-        "parameters": {
-          "acc_dtype": null,
-          "impl": null,
-          "out_dtype": null
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "acc_dtype": "float32",
-        "backend": "tc2d_tn",
-        "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm128_bn128_bk64_tm16_tn16_tk16_wm4_wn4",
+        "module": "Kuiops.Mm.SuperGEMM.Bf16.F32.Bf16.P_bm128_bn128_bk64_wm64_wn32_skew8_group1",
         "out_dtype": "bfloat16",
         "tile": {
           "bk": 64,
           "bm": 128,
           "bn": 128,
-          "tk": 16,
-          "tm": 16,
-          "tn": 16,
-          "wm": 4,
-          "wn": 4
+          "group": 1,
+          "skew": 8,
+          "wm": 64,
+          "wn": 32
         }
       }
     },
-    "821f0a262489d41e41b7c5c850a0ac84a100f8cd5e1f90b045f9a46ec7155e0c": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4864,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 4,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "8684db8c5e04043577a574dced478b34f51cd55d920cc959d5464bf90af011b1": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4864,
-              896
-            ],
-            "strides": [
-              1,
-              4864
-            ]
-          }
-        ],
-        "operation": "aten.mm.default",
-        "parameters": {
-          "acc_dtype": null,
-          "impl": null,
-          "out_dtype": null
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "acc_dtype": "float32",
-        "backend": "tc2d_tn",
-        "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn64_bk64_tm16_tn16_tk16_wm2_wn2",
-        "out_dtype": "bfloat16",
-        "tile": {
-          "bk": 64,
-          "bm": 64,
-          "bn": 64,
-          "tk": 16,
-          "tm": 16,
-          "tn": 16,
-          "wm": 2,
-          "wn": 2
-        }
-      }
-    },
-    "87353701930539de53ab671996ad78e76539f9727de3ef22c8890a237d05ba64": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "b7acb8de1bd348b73786cbddb2551f221f083b89673c3b7057c5f88ac7c22316": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              896,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 25,
-        "group": 8,
-        "splits": 1,
-        "tile": "64x64x64w32x32s4"
-      }
-    },
-    "bb7d60d1fd87b22cdfdc994e6200d4178306b98a687e8169631430cf703cbf03": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              896,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 5,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x128x32w64x32s3"
-      }
-    },
-    "be06e15f928dab9d8f21f35de29c88fcd576acca8797cd9ebd749c223407120a": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 10,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x256x32w64x64s2"
-      }
-    },
-    "be44871b3b96ac32367978ee792648d640539921adcf82ca70780e7c9f192da8": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              896
-            ],
-            "strides": [
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              896,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 1
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 25,
-        "group": 8,
-        "splits": 1,
-        "tile": "64x64x64w32x32s4"
-      }
-    },
-    "bf0884d84c674ffa0ffce45b6f42bf0f2f7be1ffac9c50c59350b428b360cb86": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
-            "shape": [
-              4096
-            ],
-            "strides": [
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 1
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 10,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x256x32w64x64s2"
-      }
-    },
-    "cbb2a0a4719da7fc3c9695002f017a10f94b66952e9055225ac9850d64f2f675": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4864,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 2
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 4,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "cf4b3682736b06f6edcc0f360b28e5c0c75c0ce201a204ee3902e8ab94bb99d1": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              896,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 25,
-        "group": 8,
-        "splits": 1,
-        "tile": "64x64x64w32x32s4"
-      }
-    },
-    "d39a88b6d9873c64d6252eab7f5bff76428dd3309282c7a066e49c9e5c29668f": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              256,
-              896
-            ],
-            "strides": [
-              896,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              896,
-              151936
-            ],
-            "strides": [
-              151936,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 2,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x128x32w64x64s2"
-      }
-    },
-    "d8cc9b75840929556b7fa2cc790c35ed3602e8e75892d51522acceb97d3e2899": {
+    "147bc0904cbc300163c61f8152769555845ecd7b81c8a8f02389547c3833db21": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -925,76 +94,79 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 5
+        "tuning_schema": 7
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_tn_bcast",
+        "backend": "supergemm",
+        "cbcast": true,
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Addmm.Tc2DTnBcast.Bf16.F32.Bf16.P_bm64_bn64_bk16_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Addmm.SuperGEMM.Bcast.Bf16.F32.Bf16.P_bm128_bn64_bk64_wm64_wn32_skew8_group1",
         "out_dtype": "bfloat16",
         "tile": {
-          "bk": 16,
-          "bm": 64,
+          "bk": 64,
+          "bm": 128,
           "bn": 64,
-          "tk": 16,
-          "tm": 16,
-          "tn": 16,
-          "wm": 2,
-          "wn": 2
+          "group": 1,
+          "skew": 8,
+          "wm": 64,
+          "wn": 32
         }
       }
     },
-    "e513cf5be24dbbfbf30e43ecc12157553da121b8e062d55ec855a6551d8943fc": {
+    "1a04278ea40c9942ca4cc85807aafdb3afe926046d5ff5e671cf15a0068d7376": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
           {
-            "dtype": "float16",
-            "shape": [
-              896
-            ],
-            "strides": [
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
+            "dtype": "bfloat16",
             "shape": [
               256,
-              4864
-            ],
-            "strides": [
-              4864,
-              1
-            ]
-          },
-          {
-            "dtype": "float16",
-            "shape": [
-              4864,
               896
             ],
             "strides": [
               896,
               1
             ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              896,
+              151936
+            ],
+            "strides": [
+              1,
+              896
+            ]
           }
         ],
-        "operation": "unverified.gemm_tc",
+        "operation": "aten.mm.default",
         "parameters": {
-          "epi": 1
+          "acc_dtype": null,
+          "impl": null,
+          "out_dtype": null
         },
-        "tuning_schema": 5
+        "tuning_schema": 7
       },
       "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 4,
-        "tile": "128x128x64w64x64s2"
+        "acc_dtype": "float32",
+        "backend": "supergemm",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.SuperGEMM.Bf16.F32.Bf16.P_bm128_bn128_bk64_wm64_wn32_skew8_group1",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 64,
+          "bm": 128,
+          "bn": 128,
+          "group": 1,
+          "skew": 8,
+          "wm": 64,
+          "wn": 32
+        }
       }
     },
-    "fa3bf181ad767a178628083586c9c04f3907426ed7d334993d48bdf6cad96fa0": {
+    "33ef5e7885d26b6d836b896b10d2f289c44573f601d2ed83944d10d4ecc581e0": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
@@ -1027,72 +199,31 @@
           "impl": null,
           "out_dtype": null
         },
-        "tuning_schema": 5
+        "tuning_schema": 7
       },
       "spec": {
         "acc_dtype": "float32",
-        "backend": "tc2d_tn",
+        "backend": "supergemm",
         "in_dtype": "bfloat16",
-        "module": "Kuiops.Mm.Tc2DTn.Bf16.F32.Bf16.P_bm64_bn128_bk32_tm16_tn16_tk16_wm2_wn2",
+        "module": "Kuiops.Mm.SuperGEMM.Bf16.F32.Bf16.P_bm64_bn64_bk64_wm16_wn64_skew8_group1",
         "out_dtype": "bfloat16",
         "tile": {
-          "bk": 32,
+          "bk": 64,
           "bm": 64,
-          "bn": 128,
-          "tk": 16,
-          "tm": 16,
-          "tn": 16,
-          "wm": 2,
-          "wn": 2
+          "bn": 64,
+          "group": 1,
+          "skew": 8,
+          "wm": 16,
+          "wn": 64
         }
       }
     },
-    "fc33f47a1b0e195b9634343e9aa443dbd6536fc78edb0261cb86ab557c38ba3d": {
+    "c942d5d752eae5b4e22a4fa481e36a7129268d551fed2175293d47b161fe2309": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
         "inputs": [
           {
             "dtype": "bfloat16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          },
-          {
-            "dtype": "bfloat16",
-            "shape": [
-              4096,
-              4096
-            ],
-            "strides": [
-              4096,
-              1
-            ]
-          }
-        ],
-        "operation": "unverified.gemm_tc",
-        "parameters": {
-          "epi": 0
-        },
-        "tuning_schema": 5
-      },
-      "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 1,
-        "tile": "128x128x64w64x64s2"
-      }
-    },
-    "fc763e5e96d040147818f7352e58c7f124f0eccbbe335bafdaeb5b9a4ab5790e": {
-      "key": {
-        "gpu": "NVIDIA RTX A6000",
-        "inputs": [
-          {
-            "dtype": "float16",
             "shape": [
               256,
               4864
@@ -1103,30 +234,43 @@
             ]
           },
           {
-            "dtype": "float16",
+            "dtype": "bfloat16",
             "shape": [
               4864,
               896
             ],
             "strides": [
-              896,
-              1
+              1,
+              4864
             ]
           }
         ],
-        "operation": "unverified.gemm_tc",
+        "operation": "aten.mm.default",
         "parameters": {
-          "epi": 0
+          "acc_dtype": null,
+          "impl": null,
+          "out_dtype": null
         },
-        "tuning_schema": 5
+        "tuning_schema": 7
       },
       "spec": {
-        "config": 3,
-        "group": 8,
-        "splits": 4,
-        "tile": "128x128x64w64x64s2"
+        "acc_dtype": "float32",
+        "backend": "supergemm_splitk",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.SuperGEMMSplitK.Bf16.F32.Bf16.P_bm128_bn128_bk64_wm64_wn32_skew8_group1_splits4",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 64,
+          "bm": 128,
+          "bn": 128,
+          "group": 1,
+          "skew": 8,
+          "splits": 4,
+          "wm": 64,
+          "wn": 32
+        }
       }
     }
   },
-  "tuning_schema": 5
+  "tuning_schema": 7
 }
