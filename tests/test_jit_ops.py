@@ -49,16 +49,14 @@ def _assert_close(out, ref, dtype):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("in_dtype,acc_dtype,out_dtype,backend", [
-    (torch.float16, torch.float16, torch.float16, "tc2d"),
-    (torch.float16, torch.float32, torch.float32, "tc2d"),
-    (torch.bfloat16, torch.float32, torch.float32, "tc2d"),
-    # An output that is not the accumulator type cannot be stored from the
-    # accumulator fragment, so it goes through the cast-on-write backend.
+    (torch.float16, torch.float16, torch.float16, "tc2d_to"),
+    (torch.float16, torch.float32, torch.float32, "tc2d_to"),
+    (torch.bfloat16, torch.float32, torch.float32, "tc2d_to"),
     (torch.float16, torch.float32, torch.float16, "tc2d_to"),
 ])
 def test_mm_tensorcore2d(in_dtype, acc_dtype, out_dtype, backend):
-    """TensorCore2D wins whenever wmma can hold the output in an accumulator
-    fragment."""
+    """With a contiguous B, SuperGEMM does not apply and the cast-on-write
+    TensorCore2D backend handles every valid fragment/accumulator pairing."""
     _need_tensor_cores(in_dtype)
     impl = kuiops.MmImpl()
     torch.manual_seed(0)
@@ -112,14 +110,10 @@ def test_mm_backend_selection():
         spec = impl.supported(aten.mm.default, (A, B), kwargs)
         return spec and spec["backend"]
 
-    # The default f32 accumulator cannot be stored into an f16 C, so an f16
-    # output only comes out of the cast-on-write backend.
     assert backend(torch.float16) == "tc2d_to"
-    assert backend(torch.float16, acc_dtype=torch.float16) == "tc2d"
-    assert backend(torch.bfloat16, out_dtype=torch.float32) == "tc2d"
+    assert backend(torch.float16, acc_dtype=torch.float16) == "tc2d_to"
+    assert backend(torch.bfloat16, out_dtype=torch.float32) == "tc2d_to"
     assert backend(torch.float32) == "bt2d"
-    # A bf16 output has no wmma accumulator fragment, so tc2d cannot combine
-    # into it and the cast-on-write backend takes over.
     assert backend(torch.bfloat16) == "tc2d_to"
     # bf16 can only accumulate in f32 on a tensor core, so an explicit bf16
     # accumulator falls through to the block-tiled backend.
@@ -226,7 +220,7 @@ def test_addmm_tensorcore2d(alpha, beta):
     bias = torch.randn(M, N, device="cuda", dtype=torch.float32)
     kw = dict(alpha=alpha, beta=beta, out_dtype=torch.float32)
     spec = impl.supported(aten.addmm.default, (bias, A, B), kw)
-    assert spec is not None and spec["backend"] == "tc2d"
+    assert spec is not None and spec["backend"] == "tc2d_to"
     out = impl.run(spec, (bias, A, B), kw)
     ref = alpha * (A.float() @ B.float()) + beta * bias
     assert out.dtype == torch.float32

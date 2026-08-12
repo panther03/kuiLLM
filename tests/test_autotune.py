@@ -113,7 +113,7 @@ def test_hash_is_canonical():
 
 def test_tile_enumeration_is_grid_bounded():
     assert len(kuiops._tiles("bt2d", torch.float32, 1, 128, 128, 64)) > 1
-    assert len(kuiops._tiles("tc2d", torch.bfloat16, 1, 128, 128, 64)) > 1
+    assert len(kuiops._tiles("tc2d_to", torch.bfloat16, 1, 128, 128, 64)) > 1
     # A grid that would exceed the block limit leaves no legal tiling.
     huge = kuiops._MAX_BLOCKS * 128
     assert kuiops._tiles("bt2d", torch.float32, huge, 128, 128, 64) == []

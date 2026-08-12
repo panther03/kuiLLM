@@ -934,9 +934,12 @@ def _explicit_only_filtered(backends, kwargs):
     """Drop backends that must be asked for by name.
 
     ``supergemm_splitk`` launches two kernels and synchronizes the stream in
-    between (Kuiper does not model stream queue ordering), so it is illegal
-    under CUDA graph capture -- which is how the inference pipeline runs. It
-    stays reachable through an explicit ``impl="supergemm_splitk"``."""
+    between, so it is illegal under CUDA graph capture -- which is how the
+    inference pipeline runs. Chaining the two launches without a host
+    synchronization needs a kernel description whose precondition is
+    existentially quantified (the workspace contents are only pledged up to
+    ``%~``), which Kuiper cannot express yet. It stays reachable through an
+    explicit ``impl="supergemm_splitk"``."""
     if kwargs.get("impl") in _EXPLICIT_ONLY_BACKENDS:
         return tuple(backends)
     return tuple(b for b in backends if b not in _EXPLICIT_ONLY_BACKENDS)
