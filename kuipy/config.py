@@ -55,13 +55,18 @@ JIT_NVCC_FAST = os.environ.get("KUIPY_JIT_NVCC_FAST", "0") == "1"
 NVCC_MAXRREGCOUNT = int(os.environ.get("KUIPY_MAXRREGCOUNT", "0"))
 
 # Bump this whenever a change makes previously selected tuning parameters stale.
-TUNING_SCHEMA_VERSION = 6
+TUNING_SCHEMA_VERSION = 7
 AUTOTUNE = os.environ.get("KUIPY_AUTOTUNE", "0") == "1"
 AUTOTUNE_WARMUP = int(os.environ.get("KUIPY_AUTOTUNE_WARMUP", "3"))
 AUTOTUNE_REPEATS = int(os.environ.get("KUIPY_AUTOTUNE_REPEATS", "10"))
 # Launches per timed sample. One launch per sample would measure mostly launch
 # latency: the kernels being tuned run in tens of microseconds.
 AUTOTUNE_BATCH = int(os.environ.get("KUIPY_AUTOTUNE_BATCH", "50"))
+# Threads used to build the candidate kernels before timing them. Each build is
+# an F* extraction plus an nvcc compile, so this is the difference between a
+# tuning pass that takes hours and one that takes tens of minutes.
+AUTOTUNE_BUILD_JOBS = int(os.environ.get("KUIPY_AUTOTUNE_BUILD_JOBS", "0")) or min(
+    16, (os.cpu_count() or 4))
 
 # Parallelism for the one-time `make verify-kuiops` pass that seeds the
 # kuiops .checked cache before any kernel is built.

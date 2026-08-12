@@ -14,6 +14,7 @@ import json
 import os
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from filelock import FileLock
@@ -214,6 +215,32 @@ def _benchmark(spec, run_candidate, args, kwargs, device):
     return min(timings)
 
 
+def _prebuild(candidates, run_candidate, args, kwargs, device):
+    """Build every candidate's kernel before any of them is timed.
+
+    A candidate that is not in the on-disk cache costs an F* extraction and an
+    nvcc compile, both external processes, so threads give real parallelism;
+    the per-kernel file lock in ``compile`` keeps distinct kernels independent.
+    Timing itself stays strictly serial. Failures are ignored here -- the
+    timing loop hits them again and records them properly."""
+    jobs = min(C.AUTOTUNE_BUILD_JOBS, len(candidates))
+    if jobs <= 1:
+        return
+
+    def build(spec):
+        try:
+            with torch.cuda.device(device):
+                run_candidate(spec, args, kwargs)
+        except Exception:
+            pass
+
+    print(f"[kuipy-autotune] building {len(candidates)} candidates "
+          f"({jobs} jobs)", flush=True)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        list(pool.map(build, candidates))
+    torch.cuda.synchronize(device)
+
+
 def _cleanup(candidates, winner, store):
     # Specs without a "module" name a kernel that was built ahead of time (the
     # unverified table-driven ones), so there is no losing artifact to remove.
@@ -248,6 +275,7 @@ def _tune_now(key, kwargs, candidates, run_candidate, device, store, digest):
         flush=True,
     )
     args = _synthesize_args(key, device)
+    _prebuild(candidates, run_candidate, args, kwargs, device)
     results = []
     failures = []
     for index, spec in enumerate(candidates, 1):
