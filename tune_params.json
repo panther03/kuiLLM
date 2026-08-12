@@ -52,6 +52,165 @@
         }
       }
     },
+    "0711d957e6dbaefb867b674108ca3bdaf21a2a2942c9274780b69cfcb7d9ca34": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "float16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "float16",
+            "shape": [
+              896,
+              151936
+            ],
+            "strides": [
+              151936,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "float16",
+        "module": "Kuiops.Mm.Tc2DTo.F16.F32.F16.P_bm128_bn128_bk32_tm16_tn16_tk16_wm8_wn2",
+        "out_dtype": "float16",
+        "tile": {
+          "bk": 32,
+          "bm": 128,
+          "bn": 128,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 8,
+          "wn": 2
+        }
+      }
+    },
+    "07351464849643961031b7dd871eac012d8958ff3253c4c07ea429da218854bb": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              896,
+              151936
+            ],
+            "strides": [
+              151936,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm128_bn128_bk32_tm16_tn16_tk16_wm8_wn2",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 32,
+          "bm": 128,
+          "bn": 128,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 8,
+          "wn": 2
+        }
+      }
+    },
+    "129ef4a5bddc2d95b9e43e96f2635df6a3bcc8569aa25f17ed02cd4294cd3b3a": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "float16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "float16",
+            "shape": [
+              896,
+              4864
+            ],
+            "strides": [
+              4864,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "float16",
+        "module": "Kuiops.Mm.Tc2DTo.F16.F32.F16.P_bm128_bn64_bk32_tm16_tn16_tk16_wm8_wn2",
+        "out_dtype": "float16",
+        "tile": {
+          "bk": 32,
+          "bm": 128,
+          "bn": 64,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 8,
+          "wn": 2
+        }
+      }
+    },
     "147bc0904cbc300163c61f8152769555845ecd7b81c8a8f02389547c3833db21": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
@@ -166,6 +325,59 @@
         }
       }
     },
+    "1f15bb5d62d42b3c369cd48c1d4ef916c6f616b92d6533fd42a35e515b7d8577": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              896,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 32,
+          "bm": 64,
+          "bn": 64,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 2,
+          "wn": 2
+        }
+      }
+    },
     "33ef5e7885d26b6d836b896b10d2f289c44573f601d2ed83944d10d4ecc581e0": {
       "key": {
         "gpu": "NVIDIA RTX A6000",
@@ -215,6 +427,218 @@
           "skew": 8,
           "wm": 16,
           "wn": 64
+        }
+      }
+    },
+    "73ba0dd429016129151525d0d33e4f98efda746122351d53b010b5e218f0b2ad": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              256,
+              4864
+            ],
+            "strides": [
+              4864,
+              1
+            ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              4864,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 32,
+          "bm": 64,
+          "bn": 64,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 2,
+          "wn": 2
+        }
+      }
+    },
+    "746e1c6d1809952ee8f7b145484d0ccaffb0f7642533c1a46a633f48342aab2f": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              4096,
+              4096
+            ],
+            "strides": [
+              4096,
+              1
+            ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              4096,
+              4096
+            ],
+            "strides": [
+              4096,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm128_bn128_bk32_tm16_tn16_tk16_wm8_wn2",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 32,
+          "bm": 128,
+          "bn": 128,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 8,
+          "wn": 2
+        }
+      }
+    },
+    "961eda66739536c9e2100044d4f748b59d9c50a0cdb3492ff316f611652d0fd9": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "float16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "float16",
+            "shape": [
+              896,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "float16",
+        "module": "Kuiops.Mm.Tc2DTo.F16.F32.F16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "out_dtype": "float16",
+        "tile": {
+          "bk": 32,
+          "bm": 64,
+          "bn": 64,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 2,
+          "wn": 2
+        }
+      }
+    },
+    "bf85de3b61aeba9fc34ae072ee384e1e723929a6ba1fa9be5dbdf5dfcd536f10": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              256,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          },
+          {
+            "dtype": "bfloat16",
+            "shape": [
+              896,
+              4864
+            ],
+            "strides": [
+              4864,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "bfloat16",
+        "module": "Kuiops.Mm.Tc2DTo.Bf16.F32.Bf16.P_bm64_bn128_bk16_tm16_tn16_tk16_wm4_wn2",
+        "out_dtype": "bfloat16",
+        "tile": {
+          "bk": 16,
+          "bm": 64,
+          "bn": 128,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 4,
+          "wn": 2
         }
       }
     },
@@ -268,6 +692,112 @@
           "splits": 4,
           "wm": 64,
           "wn": 32
+        }
+      }
+    },
+    "e5ca9a55225dafa44adcfeab86d688bd0887c782271d0f2fc454a5138fd98ee9": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "float16",
+            "shape": [
+              4096,
+              4096
+            ],
+            "strides": [
+              4096,
+              1
+            ]
+          },
+          {
+            "dtype": "float16",
+            "shape": [
+              4096,
+              4096
+            ],
+            "strides": [
+              4096,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "float16",
+        "module": "Kuiops.Mm.Tc2DTo.F16.F32.F16.P_bm128_bn128_bk32_tm16_tn16_tk16_wm4_wn4",
+        "out_dtype": "float16",
+        "tile": {
+          "bk": 32,
+          "bm": 128,
+          "bn": 128,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 4,
+          "wn": 4
+        }
+      }
+    },
+    "f969abc62ab2431137d4745bd47b446ed7647fdfa907873af244fc126f033a2f": {
+      "key": {
+        "gpu": "NVIDIA RTX A6000",
+        "inputs": [
+          {
+            "dtype": "float16",
+            "shape": [
+              256,
+              4864
+            ],
+            "strides": [
+              4864,
+              1
+            ]
+          },
+          {
+            "dtype": "float16",
+            "shape": [
+              4864,
+              896
+            ],
+            "strides": [
+              896,
+              1
+            ]
+          }
+        ],
+        "operation": "aten.mm.default",
+        "parameters": {
+          "acc_dtype": null,
+          "impl": "tc2d_to",
+          "out_dtype": null
+        },
+        "tuning_schema": 7
+      },
+      "spec": {
+        "acc_dtype": "float32",
+        "backend": "tc2d_to",
+        "in_dtype": "float16",
+        "module": "Kuiops.Mm.Tc2DTo.F16.F32.F16.P_bm64_bn64_bk32_tm16_tn16_tk16_wm2_wn2",
+        "out_dtype": "float16",
+        "tile": {
+          "bk": 32,
+          "bm": 64,
+          "bn": 64,
+          "tk": 16,
+          "tm": 16,
+          "tn": 16,
+          "wm": 2,
+          "wn": 2
         }
       }
     }
