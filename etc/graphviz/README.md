@@ -32,7 +32,7 @@ cut out of the full layout, so the surrounding graph runs off the frame.
 python3 etc/graphviz/dump_graph.py              # needs CUDA; pre.json / post.json
 python3 etc/graphviz/dump_graph.py --no-kuiper  # stock.json
 python3 etc/graphviz/render.py       # needs graphviz + pillow
-python3 etc/graphviz/simple_graph.py # standalone, CPU-only; --tb for a tall layout
+python3 etc/graphviz/simple_graph.py # standalone, CPU-only; --lr for a wide layout
 ```
 
 `dump_graph.py` monkeypatches `KuiperPostGradPass.__call__` to snapshot the

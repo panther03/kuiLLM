@@ -77,8 +77,8 @@ def dot_source(graph, names, rankdir):
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--tb", action="store_true",
-                    help="lay out top-to-bottom instead of left-to-right")
+    ap.add_argument("--lr", action="store_true",
+                    help="lay out left-to-right instead of top-to-bottom")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -88,7 +88,7 @@ def main():
 
     names = dict(zip([n.name for n in traced.graph.nodes
                       if n.op == "placeholder"], ("x", "W", "b")))
-    src = dot_source(traced.graph, names, "TB" if args.tb else "LR")
+    src = dot_source(traced.graph, names, "LR" if args.lr else "TB")
 
     dot = os.path.join(HERE, "simple_graph.dot")
     open(dot, "w").write(src)
