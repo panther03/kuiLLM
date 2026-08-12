@@ -32,6 +32,8 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module A = Pulse.Lib.Array
 module ML = FStar.Math.Lemmas
+open Kuiops.Approx.Share { approx_pts_to, approx_pts_to_sendable, approx_share, approx_gather }
+
 module RL = Kuiops.SuperGEMM.Mm.SplitK.ReduceLemmas
 module SL = Kuiops.SuperGEMM.Mm.SplitK.SpecLemmas
 
@@ -146,7 +148,8 @@ let d_gran_at
 ghost
 fn rsetup
   (#et_acc #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc, sized et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| sized et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
   (#lD : layout2 (SZ.v m) (SZ.v n))
@@ -155,14 +158,15 @@ fn rsetup
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (#fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   ()
   norewrite
-  requires (gW |-> Frac fW eW) ** live gD
+  requires approx_pts_to gW fW rW ** live gD
   ensures
     (forall+ (i : natlt njobs).
-      (gW |-> Frac (fW /. njobs) eW) **
-      d_gran gD () (i / gcols et_d n) (i % gcols et_d n)) ** pure True
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
+      d_gran gD () (i / gcols et_d n) (i % gcols et_d n)) **
+    approx_pts_to gW (fW /. 2) rW
 {
   with (eD : chest2 _ _ _). assert gD |-> eD;
   array2_tile gD 1 (SZ.v (chunk et_d)) #eD #1.0R;
@@ -178,9 +182,9 @@ fn rsetup
     fn i {
       fold (d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
     };
-  tensor_share_n gW (SZ.v njobs);
+  approx_share gW fW rW (SZ.v njobs);
   forevery_zip
-    (fun (i : natlt njobs) -> gW |-> Frac (fW /. njobs) eW)
+    (fun (i : natlt njobs) -> approx_pts_to gW ((fW /. 2) /. njobs) rW)
     (fun (i : natlt njobs) ->
       d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
 }
@@ -190,7 +194,7 @@ fn rsetup
 ghost
 fn rteardown
   (#et_acc #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
@@ -202,22 +206,23 @@ fn rteardown
                  gran_ub (SZ.v m) (gcols et_d n) })
   (rD : chest2 real (SZ.v m) (SZ.v n))
   (#_ : squash (SZ.fits lD.ulen))
-  (#fW : perm) (#eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (#fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   ()
   norewrite
   requires
     (forall+ (i : natlt njobs).
-      (gW |-> Frac (fW /. njobs) eW) **
-      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n)) ** pure True
-  ensures (gW |-> Frac fW eW) **
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
+      d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n)) **
+    approx_pts_to gW (fW /. 2) rW
+  ensures approx_pts_to gW fW rW **
           (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
              gD |-> eD ** pure (eD %~ rD))
 {
   forevery_unzip
-    (fun (i : natlt njobs) -> gW |-> Frac (fW /. njobs) eW)
+    (fun (i : natlt njobs) -> approx_pts_to gW ((fW /. 2) /. njobs) rW)
     (fun (i : natlt njobs) ->
       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n));
-  tensor_gather_n gW (SZ.v njobs);
+  approx_gather gW fW rW (SZ.v njobs);
   forevery_map
     (fun (i : natlt njobs) ->
       d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
@@ -268,7 +273,7 @@ let rk_sq
 
 #push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries no"
 inline_for_extraction noextract
-fn rkf
+fn rkf_at
   (#et_acc #et_d : Type0)
   {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
@@ -290,7 +295,7 @@ fn rkf
   (i : szlt njobs)
   ()
   preserves gpu
-  preserves gW |-> Frac (fW /. njobs) eW
+  preserves gW |-> Frac fW eW
   requires d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
   ensures d_gran_at gD ()
             (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
@@ -437,6 +442,46 @@ fn rkf
 }
 #pop-options
 
+(* The device body as the descriptor needs it: with the workspace contents
+   existential, so that [kpre] does not have to name them.  The body itself is
+   [rkf_at], unchanged -- naming the witness here rather than inside keeps the
+   inner loops' proof context exactly as it was. *)
+inline_for_extraction noextract
+fn rkf
+  (#et_acc #et_d : Type0)
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
+  (#m #n #mws : szp)
+  (#lW : layout2 (SZ.v mws) (SZ.v n)) {| T.ctlayout lW |}
+       {| strW : strided_row_major (vtlayout_of_tlayout lW) |}
+  (#lD : layout2 (SZ.v m) (SZ.v n)) {| T.ctlayout lD |}
+       {| strD : strided_row_major (vtlayout_of_tlayout lD) |}
+  (gW : array2 et_acc lW)
+  (gD : array2 et_d lD)
+  (splits : szp)
+  (post_map : et_acc -> et_d)
+  (post_map_r : real -> real { post_map %~ post_map_r })
+  (sq : squash (rk_sq gW gD splits))
+  (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
+                 gran_ub (SZ.v m) (gcols et_d n) })
+  (#fW : perm)
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
+  (i : szlt njobs)
+  ()
+  preserves gpu
+  preserves approx_pts_to gW ((fW /. 2) /. njobs) rW
+  requires d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+  ensures d_gran_at gD ()
+            (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
+            (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n)
+{
+  unfold (approx_pts_to gW ((fW /. 2) /. njobs) rW);
+  with eW. assert (gW |-> Frac ((fW /. 2) /. njobs) eW);
+  rkf_at gW gD splits post_map post_map_r () njobs
+    #((fW /. 2) /. njobs) #eW rW i ();
+  fold (approx_pts_to gW ((fW /. 2) /. njobs) rW);
+}
+
 (* ---------------------------------------------------------------------- *)
 (* kernel descriptor                                                        *)
 (* ---------------------------------------------------------------------- *)
@@ -476,7 +521,8 @@ let d_gran_at_sendable
 
 let rk_sendable
   (#et_acc #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc, sized et_d, has_vec_cpy et_d |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
+  {| sized et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
   (#lD : layout2 (SZ.v m) (SZ.v n))
@@ -485,20 +531,20 @@ let rk_sendable
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (i : natlt njobs)
   : is_send_across gpu_of
-      ((gW |-> Frac (fW /. njobs) eW) **
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
        d_gran gD () (i / gcols et_d n) (i % gcols et_d n))
 = is_send_across_star
-    (gW |-> Frac (fW /. njobs) eW)
+    (approx_pts_to gW ((fW /. 2) /. njobs) rW)
     (d_gran gD () (i / gcols et_d n) (i % gcols et_d n))
-    #(is_send_across_global_tensor gW #(fW /. njobs) eW)
+    #(approx_pts_to_sendable gW ((fW /. 2) /. njobs) rW)
     #(d_gran_sendable gD () (i / gcols et_d n) (i % gcols et_d n))
 
 let rk_post_sendable
   (#et_acc #et_d : Type0)
-  {| sized et_acc, has_vec_cpy et_acc |}
+  {| scalar et_acc, real_like et_acc, has_vec_cpy et_acc |}
   {| scalar et_d, real_like et_d, has_vec_cpy et_d |}
   (#m #n #mws : szp)
   (#lW : layout2 (SZ.v mws) (SZ.v n))
@@ -508,16 +554,16 @@ let rk_post_sendable
   (sq : squash (SZ.v (chunk et_d) /?+ SZ.v n))
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
+  (fW : perm) (rW : chest2 real (SZ.v mws) (SZ.v n))
   (rD : chest2 real (SZ.v m) (SZ.v n))
   (i : natlt njobs)
   : is_send_across gpu_of
-      ((gW |-> Frac (fW /. njobs) eW) **
+      (approx_pts_to gW ((fW /. 2) /. njobs) rW **
        d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
 = is_send_across_star
-    (gW |-> Frac (fW /. njobs) eW)
+    (approx_pts_to gW ((fW /. 2) /. njobs) rW)
     (d_gran_at gD () rD (i / gcols et_d n) (i % gcols et_d n))
-    #(is_send_across_global_tensor gW #(fW /. njobs) eW)
+    #(approx_pts_to_sendable gW ((fW /. 2) /. njobs) rW)
     #(d_gran_at_sendable gD () rD (i / gcols et_d n) (i % gcols et_d n))
 
 #push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
@@ -540,31 +586,31 @@ let mk_reduce_kernel
   (njobs : szp { SZ.v njobs == SZ.v m * gcols et_d n /\
                  gran_ub (SZ.v m) (gcols et_d n) /\
                  njobs <= max_blocks * max_threads })
-  (fW : perm) (eW : chest2 et_acc (SZ.v mws) (SZ.v n))
-  (rW : chest2 real (SZ.v mws) (SZ.v n) { eW %~ rW })
+  (fW : perm)
+  (rW : chest2 real (SZ.v mws) (SZ.v n))
   ()
   : kernel_desc
-      ((gW |-> Frac fW eW) ** live gD)
-      ((gW |-> Frac fW eW) **
+      (approx_pts_to gW fW rW ** live gD)
+      (approx_pts_to gW fW rW **
        (exists* (eD : chest2 et_d (SZ.v m) (SZ.v n)).
           gD |-> eD **
           pure (eD %~ RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)))
 = {
     nthr = njobs;
-    frame = pure True;
+    frame = approx_pts_to gW (fW /. 2) rW;
     kpre = (fun (i : natlt njobs) ->
-      (gW |-> Frac (fW /. njobs) eW) **
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
       d_gran gD () (i / gcols et_d n) (i % gcols et_d n));
     kpost = (fun (i : natlt njobs) ->
-      (gW |-> Frac (fW /. njobs) eW) **
+      approx_pts_to gW ((fW /. 2) /. njobs) rW **
       d_gran_at gD () (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r)
         (i / gcols et_d n) (i % gcols et_d n));
-    setup = rsetup gW gD () njobs #fW #eW;
+    setup = rsetup gW gD () njobs #fW rW;
     teardown = rteardown gW gD () njobs
-      (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r) #() #fW #eW;
-    f = rkf gW gD splits post_map post_map_r () njobs #fW #eW rW;
-    kpre_sendable = rk_sendable gW gD () njobs fW eW;
-    kpost_sendable = rk_post_sendable gW gD () njobs fW eW
+      (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r) #() #fW rW;
+    f = rkf gW gD splits post_map post_map_r () njobs #fW rW;
+    kpre_sendable = rk_sendable gW gD () njobs fW rW;
+    kpost_sendable = rk_post_sendable gW gD () njobs fW rW
       (RL.gran_target (SZ.v m) (SZ.v splits) rW post_map_r);
   } <: kernel_desc_n _ _
 #pop-options

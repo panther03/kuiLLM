@@ -93,10 +93,9 @@ fn supergemm_mm_splitk_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
-  returns e' : epoch_t
   ensures
-    epoch_live s e' **
-    pledge0 (epoch_done s e')
+    epoch_live s (epoch_next (epoch_next e)) **
+    pledge0 (epoch_flushed s (epoch_next (epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).

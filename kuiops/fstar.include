@@ -22,6 +22,7 @@ common/skewed
 common/pipelined
 common/local_aligned
 common/approx_share
+common/kernel_frame
 common/vecmap
 common/shmem_aligned
 common/tc2d_to

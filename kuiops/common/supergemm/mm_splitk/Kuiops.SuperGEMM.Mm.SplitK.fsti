@@ -12,12 +12,15 @@ module Kuiops.SuperGEMM.Mm.SplitK
    viewed as a [(splits * rows, cols)] matrix.  The second sums the partials
    for each 128-bit granule of D and applies [post_map] on the way out.
 
-   Signature deviation.  Kuiper does not model the queue ordering of a CUDA
-   stream, so a later launch cannot observe an earlier launch's writes.  The
-   launcher therefore synchronizes the stream between the two launches: it
-   CONSUMES [epoch_live s e] and RETURNS a fresh epoch [e'], rather than
-   preserving one as [Kuiops.SuperGEMM.Mm.supergemm_mm_async] does.  The
-   consequence is that this operator cannot run under CUDA graph capture.
+   The two launches are chained on the stream with no synchronization between
+   them: pass 2 consumes the pledge pass 1 produced, at the queue position pass
+   1 left behind, which is exactly CUDA's guarantee that a kernel does not start
+   until everything enqueued before it on the same stream has retired.  The
+   operator therefore advances the epoch by two and is safe to capture in a
+   CUDA graph.  Chaining is possible only because the reduce kernel's
+   precondition keeps the workspace contents EXISTENTIAL -- pass 1 can name its
+   output only up to [%~], and an existential cannot be pulled out from under a
+   pledge; see [Kuiops.Approx.Share].
 
    The workspace [gW] is caller-allocated (Kuiper kernels never allocate) and
    comes back live but with unspecified contents.
@@ -109,10 +112,9 @@ fn supergemm_mm_splitk_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
-  returns e' : epoch_t
   ensures
-    epoch_live s e' **
-    pledge0 (epoch_done s e')
+    epoch_live s (epoch_next (epoch_next e)) **
+    pledge0 (epoch_flushed s (epoch_next (epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
