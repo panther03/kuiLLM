@@ -39,7 +39,7 @@ kuipy.enable() # hooks in Inductor backend
 - `infer.py`: Where the main Qwen2.5 integration test lives.
 - `bench_ops.ipynb`: Kernel benchmarks (verified + unverified) against stock PyTorch.
 
-## Details
+## Details (all AI generated from here on)
 
 How the pieces actually fit together. Engineering specifics — build targets,
 environment flags, naming conventions, coding rules — are in
