@@ -1,6 +1,6 @@
 # kuiLLM
 
-A set of verified, memory-safe Kuiper kernels for LLM inference, and a PyTorch backend that automatically maps operators to those kernels. The PyTorch part is structured as an Inductor pass that replaces suitable operators in the graph with Kuiper implementations. These nodes are then dispatched to JIT-verified, extracted, and compiled Kuiper kernels at runtime (during CUDA graph capture to be specific).
+A set of verified, memory-safe Kuiper kernels for LLM inference, and a PyTorch backend that automatically maps operators to those kernels. The PyTorch part is structured as an Inductor pass that replaces suitable operators in the graph with Kuiper implementations. These nodes are then dispatched to JIT-verified, extracted, and compiled Kuiper kernels at runtime (during CUDA graph capture to be specific). kuiLLM also supports autotuning operators based on the supported parameter space.
 
 ![](etc/diagram.png)
 
@@ -41,123 +41,149 @@ kuipy.enable() # hooks in Inductor backend
 
 ## Details
 
-The rest of this file is background on *why* the system is shaped this way. For
-the engineering specifics — build targets, environment flags, file-naming
-conventions, coding rules — see `.github/copilot-instructions.md`, which is kept
-current.
+How the pieces actually fit together. Engineering specifics — build targets,
+environment flags, naming conventions, coding rules — are in
+`.github/copilot-instructions.md` and not repeated here.
 
-### The problem
+### End to end
 
-GPU kernels are where the performance is, and also where the bugs are. A GEMM is
-a few hundred lines of index arithmetic, asynchronous copies and barriers, and
-essentially all of it is unchecked: a race between a tile load and the barrier
-that guards it, or an index that walks off the end of a shared-memory buffer,
-produces silently wrong numbers or a crash far from the cause. The usual answer
-is to test, but tests only cover the shapes you thought to try, and the
-interesting failures are the ones that depend on a particular block count or a
-particular interleaving.
+```
+  model                                                    (1) compile time
+    |  torch.compile(mode="reduce-overhead")
+    v
+  FX post-grad graph  --------------------------------.
+    |                                                 |
+    |  KuiperPostGradPass                             |  for each claimed node
+    |    1. user fusion rules                         |
+    |    2. map fusion: absorb elementwise nodes      |
+    |       into a kernel's pre_map / post_map        |
+    |    3. replace claimed aten node -> kuiperjit::* |
+    v                                                 v
+  rewritten graph                             supported(args) -> spec
+    |                                                 |
+    |                                          (2) JIT, per spec
+    |                                                 |
+    |                                    Jinja: Kuiops.<Op>.Inst.fst.j2
+    |                                                 |  monomorphic .fst
+    |                                                 v
+    |                                            F* + Pulse
+    |                                                 |  extract (Karamel)
+    |                                                 v
+    |                                              .cu  +  wrapper_<op>.cu.j2
+    |                                                 |  nvcc
+    |                                                 v
+    |                                          cached .so  (.kuipy_cache/)
+    v                                                 |
+  CUDA graph capture  <------------------------------'
+    |
+    v
+  replay per decode step                                   (3) run time
+```
 
-Kuiper's answer is to prove the kernel correct instead. It is a DSL embedded in
-[F\*](https://fstar-lang.org) and Pulse (F\*'s concurrent separation logic), so a
-kernel is checked before it runs for memory safety, data-race freedom, and
-functional correctness against a mathematical specification. It then extracts to
-ordinary CUDA. The proof is discharged once, at build time; the kernel that runs
-is normal compiled code with no residual checking.
+Two things are happening at once, and it helps to keep them separate. Path (1)
+is PyTorch's ordinary compile flow, into which one pass is inserted. Path (2) is
+the Kuiper JIT, which turns a *generic, already-proven* kernel into a
+monomorphic CUDA one. They meet because the pass can only claim a node if the
+JIT can produce a kernel for it.
 
-The obvious objection is that nobody wants to write a proof per matrix shape.
-That is what this repository is about.
+### The Inductor pass
 
-### Polymorphism, and why it forces a JIT
+`torch.compile` traces the model, decomposes and functionalizes it, and hands
+Inductor a post-grad FX graph of ATen operators.
+`kuipy.inductor.passes.KuiperPostGradPass` is registered as
+`post_grad_custom_post_pass` and mutates that graph in place.
 
-The reason a proof per shape is avoidable is that Kuiper kernels are far more
-generic than CUDA can express. One matmul is written once and is generic in the
-element type, in the *layout* of each operand (row major, column major, a
-strided subtile of a larger tensor, a transposed view), in the accumulator type,
-and even in the function combining the product with the output — so `mm`,
-`addmm`, and a fused activation are the same kernel at different instantiations.
-The proof is done once, generically, and holds for every instantiation.
+Post-grad is the useful place to intervene: the graph is canonicalized, so there
+is a small set of operator forms to match instead of the whole Python API. The
+pass runs fusion first and replacement second, because fusion changes what a
+single kernel can absorb:
 
-CUDA has no equivalent of a higher-order type-generic kernel, so the genericity
-has to be erased before code generation. Erasing it requires knowing the actual
-types, layouts and tile sizes, and those are only known when the operator is
-actually called with real tensors. Hence the pipeline runs at *runtime*:
+- **Map fusion** (`inductor/fusion.py`) walks outward from each *anchor* — an op
+  whose family accepts `pre_map` / `post_map` — and greedily swallows the
+  elementwise chain feeding it and the chain it feeds. A node is eligible when
+  it is unary (or binary against a compile-time constant), preserves dtype and
+  shape, and is single-use, so nothing observable elsewhere disappears. These
+  become arguments *inside* the kernel, at no extra memory traffic.
+- **Replacement** then swaps each claimed node for a `kuiperjit::*` custom op.
+  `custom_ops.claim` is the single definition of coverage, shared with the
+  tracer so both agree.
 
-    aten op + real tensor metadata
-      -> supported()      does a legal parameterization exist for these inputs?
-      -> Jinja templates  emit a monomorphic F* instantiation of the generic kernel
-      -> F*               check it, then extract to CUDA
-      -> nvcc             compile, link against a small Torch-tensor wrapper
-      -> cached .so       reused forever after, keyed on the parameterization
+Inductor treats `kuiperjit::*` ops as opaque externs: it schedules them, plans
+their outputs, and records them into `reduce-overhead` CUDA graphs.
 
-The first call for a new parameterization costs tens of seconds; every later
-call is a dict lookup. A model has only a handful of distinct GEMM shapes, so
-this amortizes almost immediately. `kuiops/<op>/Kuiops.<Op>.Inst.fst.j2` is the
-template that performs the specialization; anything with real proof content
-lives in a support module beside it, so that the JIT does not pay to re-verify
-it on every instantiation.
+### The JIT
 
-### Getting the kernels into a real model
+Kuiper kernels are generic in ways CUDA cannot express: in element type, in the
+*layout* of each operand (row major, column major, a strided subtile, a
+transposed view), in the accumulator type, and in the maps mentioned above. That
+genericity is what makes one proof cover every use — `mm`, `addmm` and a fused
+activation are one kernel at three instantiations — and it is exactly what must
+be erased before code generation.
 
-Two entry points, for two different purposes.
+Erasing it needs the concrete types, layouts and tile sizes, which only exist
+once the operator is called with real tensors. So specialization runs at
+runtime, per unique parameterization:
 
-The direct one is `kuipy.run(aten_op)`, which returns a drop-in replacement for
-that operator that always goes through Kuiper and raises rather than silently
-falling back. Tests and benchmarks use it, because they need to know they
-measured the thing they meant to measure.
+    supported()  -> is there a legal parameterization for these inputs?  (spec, or None)
+    Jinja        -> emit a monomorphic F* instantiation from the spec
+    F*           -> typecheck, then extract to CUDA
+    nvcc         -> compile with the Torch-tensor wrapper, cache the .so
 
-The one that matters for inference is an **Inductor post-grad pass**. After
-PyTorch has traced, decomposed and functionalized the model into an FX graph of
-ATen operators, the pass walks that graph and replaces every node a Kuiper
-kernel can serve with a custom op bound to it. This is the right layer to
-intervene at: the graph is already canonicalized, so there is a small set of
-operator forms to match rather than the whole surface of the Python API, and
-adjacent elementwise nodes can be fused into a single kernel's epilogue before
-the replacement happens. Running Qwen2.5 end to end is then the integration
-test — `infer.py`, with `make verify` running each dispatched op alongside its
-stock reference and reporting relative Frobenius divergence.
+Each operator contributes two templates, `Kuiops.<Op>.Inst.fst.j2` (the
+instantiation) and `wrapper_<op>.cu.j2` (the `torch::Tensor` glue). Templates
+stay free of proof content — anything with real obligations lives in a support
+module beside them, so the JIT does not re-verify it per instantiation. Cold
+cost is tens of seconds per new parameterization; afterwards it is a dict
+lookup, and a model has only a handful of distinct shapes.
 
-One consequence is worth calling out because it shapes a lot of the code:
-inference runs under **CUDA graph capture**. A captured graph records device
-work, so a kernel may not synchronize, may not allocate, and may not make
-host-side decisions during capture. This is why the JIT has a batch mode that
-extracts every kernel it sees during a first pass, defers execution to PyTorch,
-and then compiles them all into a single translation unit — and why kernels take
-a stream and never spawn one, and never call `cudaStreamSynchronize`.
+By default the JIT *admits* SMT queries at instantiation, since cold-compile
+latency dominates and the generic proof is what carries the guarantee.
+`KUIPY_JIT_VERIFY=1` re-verifies each instantiation; `make verify-kuiops` checks
+the generic modules.
 
-### What is actually trusted
+### CUDA graphs, and why there is a batch mode
 
-The proof covers the Kuiper kernel: no out-of-bounds access, no data race, and
-agreement with the functional specification. It does not cover the glue. The
-Python that decides a parameterization is legal, and the C++ wrapper that
-unpacks `torch::Tensor` into pointers and extents, are untrusted, so the design
-rule is that they stay as thin as possible. Specifically:
+Inference replays a captured CUDA graph, which constrains kernels sharply: no
+synchronization, no allocation, no host-side decisions during capture. Hence
+kernels take the caller's stream rather than creating one, never call
+`cudaStreamSynchronize`, and never allocate their outputs — the wrapper
+allocates (with the *kernel's* output dtype, which is not always the input's),
+and families that internally launch and synchronize are marked
+`graph_safe = False` and stay out of graphs.
 
-- `supported()` must accept **exactly** what the kernel's own refinements allow —
-  no broader (unsound) and no narrower (leaving performance unclaimed). The
-  source of truth is the typeclass constraint in the F\*, not a guess.
-- Missing PyTorch semantics — broadcasting, unusual layouts, edge-case dtypes —
-  get fixed by making the *kernel* handle them, never by adding a fixup in the
-  wrapper. A wrapper that quietly transposes or copies is an unverified kernel
-  wearing a verified one's name.
+Capture is also why compiling appears twice. Building each kernel separately
+re-parses `torch/extension.h` every time, which dominates cold start. Under
+`kuipy.batch_capture()` a first warm-up pass *only extracts* each matched
+kernel, raises `CaptureDeferred`, and lets stock PyTorch produce the values; at
+`finalize_capture` every queued wrapper fragment is concatenated into one
+translation unit and built with all the device code in a single compile. The
+graph is recorded afterwards, against the real kernels.
 
-Note also that the default JIT mode admits SMT queries rather than re-proving
-each instantiation, since cold-compile latency matters; `KUIPY_JIT_VERIFY=1`
-runs the real thing. The generic proof — which is where the guarantee actually
-comes from — is checked separately with `make verify-kuiops`.
+### The trust boundary
+
+The proof covers the Kuiper kernel: memory safety, data-race freedom, and
+agreement with its functional specification. The Python that selects a
+parameterization and the C++ that unpacks `torch::Tensor` are *not* verified, so
+they are kept as thin as possible, and two rules follow:
+
+- `supported()` must accept **exactly** what the kernel's refinements allow. The
+  source of truth is the typeclass constraint in the F\*, not a guess — too
+  broad is unsound, too narrow silently leaves performance behind.
+- Missing PyTorch semantics (broadcasting, layouts, edge-case dtypes) are fixed
+  in the *kernel*, never patched in the wrapper. A wrapper that quietly
+  transposes or copies is an unverified kernel wearing a verified one's name.
+
+`make verify` runs inference with each dispatched op alongside its stock
+reference and reports relative Frobenius divergence — an eager, non-captured
+pass, since the comparison needs a host sync.
 
 ### Performance
 
-Verified does not have to mean slow, but it does mean some optimizations are
-harder to reach, because each one has to be expressed in a way the proof can
-follow. The GEMMs here are software-pipelined tensor-core kernels competitive
-with hand-written unverified CUDA and within a factor of the vendor library.
-`PERFORMANCE.md` documents where the remaining gaps come from and which are
-artifacts of the verification framework rather than of the algorithm —
-currently, for example, Kuiper cannot alias one shared-memory allocation over
-another's lifetime, which costs occupancy in the largest GEMM.
-
-Kernel parameterizations (tile sizes, warp tiling, split-K) are chosen by an
-autotuner that benchmarks the legal candidates per shape and records the winners
-in `tune_params.json`; ordinary runs only read that file. Unverified reference
-implementations of the same kernels live in `kuipy/unverified/` so the cost of
-verification can be measured directly rather than guessed at.
+Tile sizes, warp tiling and split-K are picked by an autotuner that benchmarks
+the legal candidates per shape and records winners in `tune_params.json`;
+ordinary runs only read it. Unverified CUDA implementations of the same kernels
+live in `kuipy/unverified/` so the overhead of Kuiper itself can be measured
+rather than guessed. `PERFORMANCE.md` tracks where the remaining gaps are and
+which are artifacts of the framework — currently, for instance, Kuiper cannot
+alias one shared-memory allocation over another's lifetime, which costs
+occupancy in the largest GEMM.
