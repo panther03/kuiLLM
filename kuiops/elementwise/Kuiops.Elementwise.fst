@@ -24,14 +24,14 @@ fn map_async
   (a : array1 et l { is_global a })
   (s : stream_t)
   (#sa : chest1 et lena)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (a |-> sa)
-  ensures  epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e)) (on gpu_loc (a |-> chest_map f sa))
+  ensures  Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e)) (on gpu_loc (a |-> chest_map f sa))
 {
-  launch (map_kd f lena a #sa) s;
+  Kuiops.Kernel.launch (map_kd f lena a #sa) s;
 }
 
 inline_for_extraction noextract
@@ -47,17 +47,17 @@ fn map_to_async
   (#si : chest1 it lena)
   (#so : chest1 ot lena)
   (#fi : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (input |-> Frac fi si) ** on gpu_loc (output |-> so)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((input |-> Frac fi si) **
                    (output |-> mk1 (fun i -> f (acc1 si i)))))
 {
-  launch (map_to_kd f lena input output #si #so #fi) s;
+  Kuiops.Kernel.launch (map_to_kd f lena input output #si #so #fi) s;
 }
 
 inline_for_extraction noextract
@@ -72,16 +72,16 @@ fn map2_async
   (s : stream_t)
   (#sa #sb : chest1 et lena)
   (#fb : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (b |-> Frac fb sb) ** on gpu_loc (a |-> sa)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((b |-> Frac fb sb) ** (a |-> chest1_map2 f sa sb)))
 {
-  launch (map2_kd f lena a b #sa #sb #fb) s;
+  Kuiops.Kernel.launch (map2_kd f lena a b #sa #sb #fb) s;
 }
 
 inline_for_extraction noextract
@@ -101,17 +101,17 @@ fn map3_to_async
   (#sa : chest1 at lena) (#sb : chest1 bt lena) (#sc : chest1 ct lena)
   (#so : chest1 ot lena)
   (#fa #fb #fc : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     on gpu_loc (a |-> Frac fa sa) ** on gpu_loc (b |-> Frac fb sb) **
     on gpu_loc (c |-> Frac fc sc) ** on gpu_loc (output |-> so)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((a |-> Frac fa sa) ** (b |-> Frac fb sb) ** (c |-> Frac fc sc) **
                    (output |-> mk1 (fun i -> f (acc1 sa i) (acc1 sb i) (acc1 sc i)))))
 {
-  launch (map3_to_kd f lena a b c output #sa #sb #sc #so #fa #fb #fc) s;
+  Kuiops.Kernel.launch (map3_to_kd f lena a b c output #sa #sb #sc #so #fa #fb #fc) s;
 }

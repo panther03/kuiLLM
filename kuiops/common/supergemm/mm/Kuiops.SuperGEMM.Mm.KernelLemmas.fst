@@ -48,7 +48,39 @@ let map_subtile_commute
                 (chest_map f (ematrix_subtile em tr tc r c)))
 #pop-options
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
+(* Associating an inner tile offset with its enclosing tile is a small ring
+   fact, but proving it separately avoids feeding the whole chest context to
+   the nonlinear solver. *)
+let nested_tile_offset
+  (outer : nat) (tile : pos) (block inner i : nat)
+  : Lemma (requires outer == tile * (outer / tile))
+          (ensures block * outer + (inner * tile + i)
+                   == (block * (outer / tile) + inner) * tile + i)
+= ()
+
+let tile_cell_index
+  (extent : nat) (tile : pos{tile /? extent})
+  (block : natlt (extent / tile)) (i : natlt tile)
+  : natlt extent
+= ML.lemma_div_exact extent tile;
+  block * tile + i
+
+(* Expose one cell of a subtile without asking SMT to unfold nested chest
+   constructors in the caller. *)
+let subtile_cell
+  (#et : Type) (#rows #cols : nat)
+  (em : chest2 et rows cols)
+  (tr : pos{tr /? rows}) (tc : pos{tc /? cols})
+  (r : natlt (rows / tr)) (c : natlt (cols / tc))
+  (i : natlt tr) (j : natlt tc)
+  (oi : natlt rows) (oj : natlt cols)
+  (_ : squash (oi == r * tr + i /\ oj == c * tc + j))
+  : Lemma
+      (acc2 (ematrix_subtile em tr tc r c) i j
+       == acc2 em oi oj)
+= ()
+
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 3"
 let subtile_subtile_compose
   (#et : Type) (#rows #cols : nat)
   (em : chest2 et rows cols)
@@ -56,17 +88,50 @@ let subtile_subtile_compose
   (br : natlt (rows / br0)) (bc : natlt (cols / bc0))
   (r : natlt (br0 / tr)) (c : natlt (bc0 / tc))
   (_ : squash (br0 /? rows /\ bc0 /? cols /\ tr /? br0 /\ tc /? bc0))
+  (rr : natlt (rows / tr)) (cc : natlt (cols / tc))
+  (_ : squash (rr == br * (br0 / tr) + r /\
+                cc == bc * (bc0 / tc) + c))
+  (_ : squash (tr /? rows /\ tc /? cols))
   : Lemma
-    (requires tr /? rows /\ tc /? cols /\
-              br * (br0 / tr) + r < rows / tr /\
-              bc * (bc0 / tc) + c < cols / tc)
     (ensures
-      ematrix_subtile (ematrix_subtile em br0 bc0 br bc) tr tc r c
-      == ematrix_subtile em tr tc (br * (br0 / tr) + r) (bc * (bc0 / tc) + c))
+      forall (ij : Kuiper.Shape.abs
+        (Kuiper.Shape.ICons tr
+          (Kuiper.Shape.ICons tc Kuiper.Shape.INil))).
+        acc (ematrix_subtile (ematrix_subtile em br0 bc0 br bc) tr tc r c) ij
+        == acc (ematrix_subtile em tr tc rr cc) ij)
 = ML.lemma_div_exact br0 tr;
   ML.lemma_div_exact bc0 tc;
-  assert (Kuiper.Chest.equal (ematrix_subtile (ematrix_subtile em br0 bc0 br bc) tr tc r c)
-                (ematrix_subtile em tr tc (br * (br0 / tr) + r) (bc * (bc0 / tc) + c)))
+  introduce forall
+    (ij : Kuiper.Shape.abs
+      (Kuiper.Shape.ICons tr
+        (Kuiper.Shape.ICons tc Kuiper.Shape.INil))).
+    acc (ematrix_subtile (ematrix_subtile em br0 bc0 br bc) tr tc r c) ij
+    == acc (ematrix_subtile em tr tc rr cc) ij
+  with (
+    let (i, (j, ())) = ij in
+    let ri = tile_cell_index br0 tr r i in
+    let cj = tile_cell_index bc0 tc c j in
+    let outer_i = tile_cell_index rows br0 br ri in
+    let outer_j = tile_cell_index cols bc0 bc cj in
+    let fine_i = tile_cell_index rows tr rr i in
+    let fine_j = tile_cell_index cols tc cc j in
+    calc (==) {
+      acc (ematrix_subtile (ematrix_subtile em br0 bc0 br bc) tr tc r c)
+        (i, (j, ()));
+      == { subtile_cell (ematrix_subtile em br0 bc0 br bc)
+             tr tc r c i j ri cj () }
+      acc2 (ematrix_subtile em br0 bc0 br bc)
+        ri cj;
+      == { subtile_cell em br0 bc0 br bc
+             ri cj outer_i outer_j () }
+      acc2 em outer_i outer_j;
+      == { nested_tile_offset br0 tr br r i;
+           nested_tile_offset bc0 tc bc c j }
+      acc2 em fine_i fine_j;
+      == { subtile_cell em tr tc rr cc i j fine_i fine_j () }
+      acc (ematrix_subtile em tr tc rr cc)
+        (i, (j, ())); }
+  )
 #pop-options
 
 #push-options "--fuel 2 --ifuel 1 --z3rlimit 40"
@@ -124,7 +189,15 @@ let coerce_wm_nested
     == { coerce_subtile_col rD_whole wm_c wn_c wn_1 grow gcol gcol () }
     ematrix_subtile rD_whole wm_c wn_1 grow gcol;
     == { subtile_subtile_compose rD_whole bm bn wm_c wn_1
-           block_row block_col idx_m idx_n () }
+           block_row block_col idx_m idx_n () grow gcol () ();
+         Kuiper.Chest.lemma_equal_intro
+           (ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
+             wm_c wn_1 idx_m idx_n)
+           (ematrix_subtile rD_whole wm_c wn_1 grow gcol);
+         Kuiper.Chest.ext
+           (ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
+             wm_c wn_1 idx_m idx_n)
+           (ematrix_subtile rD_whole wm_c wn_1 grow gcol) }
     ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
       wm_c wn_1 idx_m idx_n;
   }
@@ -136,7 +209,7 @@ let mfrag_frag_eq (w : szp)
           [SMTPat (mfrag w * frag)]
 = ML.lemma_div_exact (SZ.v w) frag
 
-#push-options "--fuel 2 --ifuel 1 --z3rlimit 30 --split_queries always"
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 30"
 let lane_target_is_subtile
   (#m #n #k : szp)
   (rA : chest2 real (SZ.v m) (SZ.v k))

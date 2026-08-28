@@ -17,12 +17,13 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 open Kuiper.TensorCore
 open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.Split
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module FC = Kuiper.Float.Casts
@@ -887,6 +888,7 @@ fn b2_o_transform_v
               (ematrix_stride_subtile
                 (ematrix_subtile eO 16 (SZ.v d <: pos) w 0)
                 warp_row_span 16 (lane / 16) (lane % 16)));
+  FStar.Math.Lemmas.lemma_div_exact (SZ.v nw * 16) 16;
   forevery_map #(natlt (SZ.v nw))
     (fun w ->
       forall+ (lane : natlt BW.warp_size).

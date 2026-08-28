@@ -40,7 +40,7 @@ open Kuiper.EMatrix
 open Kuiper.Chest { chest_map }
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.TensorCore
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
 
@@ -104,17 +104,17 @@ fn supergemm_mm_splitk_async
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#fA #fB : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
   requires
-    epoch_live s e **
+    Kuiops.Epoch.epoch_live s e **
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
   ensures
-    epoch_live s (epoch_next (epoch_next e)) **
-    pledge0 (epoch_flushed s (epoch_next (epoch_next e)))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).

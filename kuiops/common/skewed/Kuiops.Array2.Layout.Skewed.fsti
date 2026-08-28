@@ -28,7 +28,7 @@ open Kuiper.Shape
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 module SZ = Kuiper.SizeT
@@ -55,6 +55,12 @@ val srm_l2_skewed_row_major
   (#rows : erased nat) (#cols #pad : erased nat)
   (ld : SZ.t { SZ.v ld == cols + pad })
   : strided_row_major (vtlayout_of_tlayout (l2_skewed_row_major rows cols pad))
+
+val lemma_srm_l2_skewed_stride
+  (#rows : erased nat) (#cols : erased nat) (#pad : erased nat)
+  (ld : SZ.t { SZ.v ld == cols + pad })
+  : Lemma (SZ.v (srm_l2_skewed_row_major #rows #cols #pad ld).stride == SZ.v ld)
+          [SMTPat (SZ.v (srm_l2_skewed_row_major #rows #cols #pad ld).stride)]
 
 val lemma_aligned_srm_l2_skewed_row_major
   (#rows : erased nat) (#cols #pad : erased nat)

@@ -12,7 +12,7 @@ open Kuiper.Tensor
 open Kuiper.EMatrix
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.TensorCore
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Epi.Kernel { mk_kernel }
@@ -68,17 +68,17 @@ fn supergemm_mm_epi_async
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#eC : chest2 et_c (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc
         ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
           (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). (gD |-> eD') **
@@ -91,7 +91,7 @@ fn supergemm_mm_epi_async
   assert pure (SZ.v nblk == SZ.v rows / SZ.v bm * (SZ.v cols / SZ.v bn));
   assert pure (SZ.v nthr == P.nthr bm bn wm wn);
 
-  launch (
+  Kuiops.Kernel.launch (
     mk_kernel
       gA #eA #(to_real_matrix eA) gB #eB #(to_real_matrix eB)
       gC #eC #(to_real_matrix eC) gD comb comb_r

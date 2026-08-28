@@ -102,8 +102,7 @@ let masked_exps (#n : pos) (valid : natlt n -> bool) (r : chest1 real n)
 let masked_denom_pos (#n : pos) (valid : valid_pred n) (r : chest1 real n)
   : Lemma (chest1_rsum (masked_exps valid r) >. 0.0R)
   = eliminate exists (j : natlt n). valid j
-    returns chest1_rsum (masked_exps valid r) >. 0.0R
-    with _. chest1_rsum_pos (masked_exps valid r) j
+    with chest1_rsum_pos (masked_exps valid r) j
 
 let masked_denom (#n : pos) (valid : valid_pred n) (r : chest1 real n)
   : GTot (z:real { z >. 0.0R })

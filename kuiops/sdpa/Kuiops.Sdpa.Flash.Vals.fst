@@ -179,7 +179,15 @@ let stride_idx_split (s : pos) (i : nat) (t : natlt s)
   FStar.Math.Lemmas.lemma_div_plus t i s;
   FStar.Math.Lemmas.small_div t s
 
-#push-options "--fuel 1 --ifuel 2"
+(* Preserve the [mk2] head for the SMT pattern after the packaged stride
+   helpers unfold through two nested matrix constructors. *)
+let stride_acc2_mk2 (#et : Type) (#d0 #d1 : nat)
+  (g : natlt d0 -> natlt d1 -> GTot et) (i : natlt d0) (j : natlt d1)
+  : Lemma (acc2 (mk2 g) i j == g i j)
+      [SMTPat (acc2 (mk2 g) i j)]
+= ()
+
+#push-options "--fuel 1 --ifuel 2 --z3rlimit 40"
 let stride_from_tiles_subtile
   (#et : Type0) (#rows #cols : nat)
   (srows : pos { srows /? rows }) (scols : pos { scols /? cols })

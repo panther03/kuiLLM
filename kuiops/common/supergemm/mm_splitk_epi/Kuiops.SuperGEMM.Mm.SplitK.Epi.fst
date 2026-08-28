@@ -19,7 +19,7 @@ open Kuiper.Tensor
 open Kuiper.EMatrix
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.TensorCore
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.SplitK.Kernel { mk_kernel }
@@ -97,18 +97,18 @@ fn supergemm_mm_splitk_epi_async
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#eC : chest2 et_c (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
   requires
-    epoch_live s e **
+    Kuiops.Epoch.epoch_live s e **
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
   ensures
-    epoch_live s (epoch_next (epoch_next e)) **
-    pledge0 (epoch_flushed s (epoch_next (epoch_next e)))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
@@ -124,7 +124,7 @@ fn supergemm_mm_splitk_epi_async
   assert pure (SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v cols / SZ.v bn));
   assert pure (SZ.v nthr == P.nthr bm bn wm wn);
 
-  launch (
+  Kuiops.Kernel.launch (
     mk_kernel gA #eA gB #eB gW (to_real_matrix eA) (to_real_matrix eB)
       bm bn bk wm wn skew splits ks fA fB nblk nthr ()
   ) s;
@@ -136,8 +136,8 @@ fn supergemm_mm_splitk_epi_async
   (* Bring the reduce kernel's precondition to the queue position pass 1 left
      behind: C and D are owned outright, so they are injected with a trivial
      pledge and joined onto pass 1's.  A and B ride along as a frame -- pass 2
-     never touches them, but [launch_pledged] consumes the whole pledge. *)
-  return_pledge (epoch_flushed s (epoch_next e))
+     never touches them, but [Kuiops.Kernel.launch_pledged] consumes the whole pledge. *)
+  return_pledge (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
     (on gpu_loc ((gC |-> Frac fC eC) ** live gD))
     #(is_send_placeless (on gpu_loc ((gC |-> Frac fC eC) ** live gD))
         #(placeless_on gpu_loc ((gC |-> Frac fC eC) ** live gD)));
@@ -164,7 +164,7 @@ fn supergemm_mm_splitk_epi_async
         (gC |-> Frac fC eC) ** live gD)))
     #emp_inames fn () { () };
 
-  launch_pledged
+  Kuiops.Kernel.launch_pledged
     (desc_frame ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB))
        (mk_reduce_kernel gW gC gD splits comb comb_r () njobs 1.0R fC eC
           (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)

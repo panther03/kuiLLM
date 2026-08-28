@@ -10,14 +10,14 @@ open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor
 open Kuiper.Shape
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TradeHelpers
 open Kuiper.ForEvery
 open Kuiper.Bijection
 open Pulse.Lib.Trade { (@==>) }
 module SZ = Kuiper.SizeT
 
-#push-options "--split_queries always"
+#push-options ""
 inline_for_extraction noextract
 instance c_band_layout
   (#rows #cols : erased nat)

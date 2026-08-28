@@ -5,7 +5,8 @@ module Kuiops.SuperGEMM.Mm.Barrier
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
+open Kuiper.EMatrix.Tiling { ematrix_subtile }
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
@@ -83,7 +84,7 @@ fn sharing_ex_to_live
     };
 }
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn pipe_p_to_q_transform
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -214,7 +215,7 @@ fn pipe_p_to_q_transform
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn unfold_pipe_q_even
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -254,7 +255,7 @@ fn unfold_pipe_q_even
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn unfold_pipe_q_odd
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -328,7 +329,7 @@ fn own_to_sharing_c
     };
 }
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn pipe_p_to_q_transform_c
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -481,7 +482,7 @@ fn pipe_p_to_q_transform_c
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn pipe_q_c_forget
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -539,7 +540,7 @@ fn pipe_q_c_forget
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn unfold_pipe_q_c_even
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -595,7 +596,7 @@ fn unfold_pipe_q_c_even
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn unfold_pipe_q_c_odd
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -651,7 +652,7 @@ fn unfold_pipe_q_c_odd
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn fold_pipe_p_c_even
   (#et : Type0) {| sized et, has_vec_cpy et |}
@@ -719,7 +720,7 @@ fn fold_pipe_p_c_even
 }
 #pop-options
 
-#push-options "--fuel 2 --split_queries no"
+#push-options "--fuel 2"
 ghost
 fn fold_pipe_p_c_odd
   (#et : Type0) {| sized et, has_vec_cpy et |}

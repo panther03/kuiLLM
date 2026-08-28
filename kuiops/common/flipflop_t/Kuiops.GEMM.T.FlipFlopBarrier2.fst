@@ -27,6 +27,14 @@ module CV = Kuiper.Kernel.GEMM.Copy.Vec2
 open Kuiops.Tensor.Transpose2 { atranspose, ctranspose, tensor_transpose2,
                                  lemma_ctranspose_involutive, atranspose_back }
 
+(* [bp_sharing] reduces through tensor ownership typeclass instances.  Normalize
+   those instances explicitly when rewriting quantified separation assertions. *)
+let unfold_bp_sharing () : FStar.Tactics.V2.Tac unit =
+  FStar.Tactics.V2.norm [delta_attr [`%Pulse.Lib.Core.pulse_unfold];
+                         delta_only [`%bp_sharing];
+                         zeta; iota; primops];
+  Pulse.Lib.Core.slprop_equiv_norm ()
+
 (* ---- Strided chunk operations for Array2 ---- *)
 
 ghost
@@ -168,7 +176,10 @@ fn bp_sharing_to_own_strided_chunks
     forall+ (tid : natlt nthr).
       own_strided_chunks (from_array l sar) em nthr tid
 {
-  tensor_gather_n (from_array l sar) nthr;
+  rewrite (forall+ (_tid : natlt nthr). bp_sharing (from_array l sar) em nthr)
+       as (forall+ (_tid : natlt nthr). tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       by unfold_bp_sharing ();
+  tensor_gather_n (from_array l sar) nthr #1.0R;
   split_array2_into_strided_chunks (from_array l sar) nthr;
 }
 
@@ -189,7 +200,10 @@ fn own_strided_chunks_to_bp_sharing
       bp_sharing (from_array l sar) em nthr
 {
   join_array2_from_strided_chunks (from_array l sar) nthr;
-  tensor_share_n (from_array l sar) nthr;
+  tensor_share_n (from_array l sar) nthr #1.0R;
+  rewrite (forall+ (_tid : natlt nthr). tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       as (forall+ (_tid : natlt nthr). bp_sharing (from_array l sar) em nthr)
+       by unfold_bp_sharing ();
 }
 
 ghost
@@ -210,7 +224,12 @@ fn bp_sharing_to_own_strided_chunks_underspec
       exists* em.
         own_strided_chunks (from_array l sar) em nthr tid
 {
-  tensor_gather_n_underspec (from_array l sar) nthr;
+  rewrite (forall+ (_tid : natlt nthr). exists* (em : chest2 et rows cols).
+             bp_sharing (from_array l sar) em nthr)
+       as (forall+ (_tid : natlt nthr). exists* (em : chest2 et rows cols).
+             tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       by unfold_bp_sharing ();
+  tensor_gather_n_underspec (from_array l sar) nthr #1.0R;
   with em. assert from_array l sar |-> em;
   split_array2_into_strided_chunks (from_array l sar) nthr;
   forevery_map
@@ -238,11 +257,14 @@ fn own_strided_chunks_to_bp_sharing_underspec
 {
   join_array2_from_strided_chunks_underspec (from_array l sar) nthr;
   with em. assert from_array l sar |-> em;
-  tensor_share_n (from_array l sar) nthr;
+  tensor_share_n (from_array l sar) nthr #1.0R;
+  rewrite (forall+ (_tid : natlt nthr). tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       as (forall+ (_tid : natlt nthr). bp_sharing (from_array l sar) em nthr)
+       by unfold_bp_sharing ();
   forevery_map
-    (fun (tid : natlt nthr) -> from_array l sar |-> Frac (1.0R /. nthr) em)
+    (fun (tid : natlt nthr) -> bp_sharing (from_array l sar) em nthr)
     (fun (tid : natlt nthr) -> exists* em. bp_sharing (from_array l sar) em nthr)
-    fn tid { fold bp_sharing (from_array l sar) em nthr; };
+    fn tid { };
 }
 
 
@@ -271,7 +293,12 @@ fn bp_sharing_to_own_strided_chunks_underspec_cm
     forall+ (tid : natlt nthr).
       live_strided_chunks_cm (from_array l sar) nthr tid
 {
-  tensor_gather_n_underspec (from_array l sar) nthr;
+  rewrite (forall+ (_tid : natlt nthr). exists* (em : chest2 et rows cols).
+             bp_sharing (from_array l sar) em nthr)
+       as (forall+ (_tid : natlt nthr). exists* (em : chest2 et rows cols).
+             tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       by unfold_bp_sharing ();
+  tensor_gather_n_underspec (from_array l sar) nthr #1.0R;
   with em. assert from_array l sar |-> em;
   tensor_transpose2 (from_array l sar);
   split_array2_into_strided_chunks (atranspose (from_array l sar)) nthr;
@@ -309,7 +336,10 @@ fn own_strided_chunks_to_bp_sharing_cm
   atranspose_back (from_array l sar);
   lemma_ctranspose_involutive em;
   rewrite each (ctranspose (ctranspose em)) as em;
-  tensor_share_n (from_array l sar) nthr;
+  tensor_share_n (from_array l sar) nthr #1.0R;
+  rewrite (forall+ (_tid : natlt nthr). tensor_pts_to (from_array l sar) #(1.0R /. nthr) em)
+       as (forall+ (_tid : natlt nthr). bp_sharing (from_array l sar) em nthr)
+       by unfold_bp_sharing ();
 }
 
 (* ---- Even/odd barrier transforms ---- *)
@@ -506,6 +536,26 @@ fn barrier_p_to_q_transform
 
 (* ---- Per-thread fold/unfold helpers ---- *)
 
+(* Keep these arithmetic facts explicit.  Current F* checks the guards again
+   when the barrier definitions unfold; the triggers make the concrete even
+   and odd iterations reduce without asking Z3 to rediscover division facts. *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let double_quot (shared bk : nat)
+  : Lemma (requires bk > 0 /\ shared % bk = 0)
+          (ensures 2 * shared / bk == 2 * (shared / bk))
+          [SMTPat (2 * shared / bk)]
+  = let q = shared / bk in
+    FStar.Math.Lemmas.lemma_div_exact shared bk;
+    assert (2 * shared == (2 * q) * bk);
+    FStar.Math.Lemmas.multiple_division_lemma (2 * q) bk
+
+let half_of_2x (x : nat) : Lemma ((2 * x) / 2 == x) [SMTPat ((2 * x) / 2)]
+  = FStar.Math.Lemmas.cancel_mul_div x 2
+
+let half_of_2x1 (x : nat) : Lemma ((2 * x + 1) / 2 == x) [SMTPat ((2 * x + 1) / 2)]
+  = FStar.Math.Lemmas.division_addition_lemma 1 2 x
+#pop-options
+
 #push-options "--fuel 2"
 ghost
 fn fold_barrier_p_odd
@@ -576,7 +626,7 @@ fn unfold_barrier_q_odd
 }
 #pop-options
 
-#push-options "--fuel 2"
+#push-options "--fuel 2 --z3rlimit 40"
 ghost
 fn fold_barrier_p_even
   (#etA : Type0) (#etB : Type0)
@@ -609,7 +659,7 @@ fn fold_barrier_p_even
 }
 #pop-options
 
-#push-options "--fuel 2"
+#push-options "--fuel 2 --z3rlimit 40"
 ghost
 fn unfold_barrier_q_even
   (#etA : Type0) (#etB : Type0)

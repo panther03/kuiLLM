@@ -154,7 +154,7 @@ let row_no_overflow
     SS.all_finite emask has_mask true causal bi qh qpos cbound scale
       eQt eKg i
 
-#push-options "--z3rlimit 40 --fuel 1 --ifuel 2 --split_queries always"
+#push-options "--z3rlimit 40 --fuel 1 --ifuel 2"
 
 (* One logical output cell of the kernel approximates the spec's attention
    output for the query row it belongs to. *)
@@ -318,7 +318,7 @@ let pre_row
                              scale (SS.tile_score_row #et_ab #et_acc #_s #_
                                       #skv #dv #() eQt eKg k0 i)) t))
     with introduce _ ==> _
-    with _. assert (acc1 (SF.tile_scores #et_acc #et_ab #_f #_r #_s #_rb #_c1
+    with assert (acc1 (SF.tile_scores #et_acc #et_ab #_f #_r #_s #_rb #_c1
                             emask has_mask true causal bi qh qpos k0 cbound
                             scale (SS.tile_score_row #et_ab #et_acc #_s #_
                                      #skv #dv #() eQt eKg k0 i)) t
@@ -328,7 +328,7 @@ let pre_row
 
 #pop-options
 
-#push-options "--z3rlimit 60 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 1 --ifuel 1"
 
 (* The kernel's output chest and the spec agree at one index. *)
 let out_idx_cell

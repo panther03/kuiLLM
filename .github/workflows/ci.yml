@@ -2,17 +2,54 @@ name: CI
 
 on:
   push:
-    branches: [main]
+  pull_request:
   workflow_dispatch:
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  KUIPER_NIGHTLY: 2026-08-27
+
+permissions:
+  contents: read
 
 jobs:
+  verify:
+    name: Verify Kuiops (hosted CPU)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/fstarlang/kuiper-base-nocuda:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clean runner workspace
+        run: find . -delete
+
+      - uses: actions/checkout@v6
+
+      - name: Set up build environment
+        run: |
+          echo "HOME=/home/vscode" >> "$GITHUB_ENV"
+          echo "PATH=/usr/local/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Restore Kuiper package
+        uses: actions/cache@v5
+        with:
+          path: .kuiper
+          key: kuiper-nightly-${{ env.KUIPER_NIGHTLY }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Prepare pinned toolchain
+        run: make -j2 prepare
+
+      - name: Verify local modules
+        run: |
+          jobs=$(scripts/ci-jobs.sh 3072)
+          echo "Verifying with $jobs job(s)."
+          make -j"$jobs" verify-kuiops
+
   test:
-    # Self-hosted: the suite needs a CUDA GPU and a host CUDA 12.x toolkit
-    # (nvcc), which kuipy invokes through torch.utils.cpp_extension.
+    name: GPU integration tests
+    needs: [verify]
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: self-hosted
     timeout-minutes: 180
     defaults:
@@ -37,8 +74,14 @@ jobs:
           nvcc --version
           nvidia-smi
 
-      - name: Install latest Kuiper nightly
-        run: make install-kuiper-nightly
+      - name: Restore Kuiper package
+        uses: actions/cache@v5
+        with:
+          path: .kuiper
+          key: kuiper-nightly-${{ env.KUIPER_NIGHTLY }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Prepare pinned toolchain
+        run: make -j"$(nproc)" prepare
 
       - name: Run test suite
         # Override NPROCS on a dispatch run if the GPU can't hold one CUDA

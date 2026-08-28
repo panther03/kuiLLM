@@ -181,7 +181,7 @@ let nsum_ext (#n : nat) (x y : natlt n -> GTot real) (p q : pred n)
 
 (* [l] and [o] are the running denominator and output accumulator for the
    keys in [p], both scaled down by [exp m].  [m] is arbitrary. *)
-let flash_inv (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m l o : real) : GTot prop
+let flash_inv (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m l o : real) : prop
   = l == dsum x p /. exp m /\ o == nsum x y p /. exp m
 
 (* Absorb a whole tile [t] of fresh keys while moving the maximum to [m'].
@@ -247,6 +247,7 @@ let flash_step_masked (#n : nat) (x y : natlt n -> GTot real) (p p' : pred n) (m
    [(m, l, o)].  Rescaling both to a common [gm] and adding merges them,
    because the invariant is linear in the key set once the [exp m] scaling is
    normalized away.  Iterating this absorbs any number of warps. *)
+#push-options "--z3rlimit 60"
 let flash_combine (#n : nat) (x y : natlt n -> GTot real) (p1 p2 p' : pred n)
                   (m1 m2 gm l1 l2 o1 o2 : real)
   : Lemma (requires disjoint p1 p2 /\
@@ -264,6 +265,7 @@ let flash_combine (#n : nat) (x y : natlt n -> GTot real) (p1 p2 p' : pred n)
     nsum_split x y p1 p2;
     dsum_ext x p' (por p1 p2);
     nsum_ext x y p' (por p1 p2)
+#pop-options
 
 (* ------------------------------------------------------------------ *)
 (* Restricting a sum to the support of its summand.                    *)
@@ -309,7 +311,17 @@ let dsum_is_masked_denom (#n : pos) (valid : FS.valid_pred n) (r : chest1 real n
   : Lemma (dsum (acc1 r) valid == FS.masked_denom valid r)
   = let x : natlt n -> GTot real = acc1 r in
     assert (FS.masked_denom valid r == chest1_rsum (FS.masked_exps valid r));
-    chest1_rsum_is_sum_where (FS.masked_exps valid r) (fun j -> exp (x j)) valid
+    assert (forall (j : natlt n).
+      acc1 (FS.masked_exps valid r) j ==
+        (if valid j then exp (x j) else 0.0R));
+    chest1_rsum_is_sum_where
+      (FS.masked_exps valid r) (fun j -> exp (x j)) valid;
+    calc (==) {
+      dsum (acc1 r) valid;
+      == {} sum_where (fun j -> exp (x j)) valid;
+      == {} chest1_rsum (FS.masked_exps valid r);
+      == {} FS.masked_denom valid r;
+    }
 
 (* [matmul_single] is also a left fold from [zero]. *)
 let rec matmul_single_is_sum_upto
@@ -387,7 +399,7 @@ let masked_matmul_cell
               acc2 probs i j == (if valid j then exp (x j) /. z else 0.0R));
     introduce forall (j : natlt sk). valid j ==> g j == f j /. z
     with introduce _ ==> _
-    with _. div_mul_left (exp (x j)) (y j) z;
+    with div_mul_left (exp (x j)) (y j) z;
     matmul_single_is_sum_where probs mV i c g;
     sum_where_restrict g valid;
     sum_where_div_at f g valid z;
@@ -484,7 +496,7 @@ let sum_where_tile
 
 (* The kernel updates [l] in the softmax pass and [o] in the P@V pass, so the
    two halves of [flash_inv] are established at different program points. *)
-let dinv (#n : nat) (x : natlt n -> GTot real) (p : pred n) (m l : real) : GTot prop
+let dinv (#n : nat) (x : natlt n -> GTot real) (p : pred n) (m l : real) : prop
   = l == dsum x p /. exp m
 
 let dstep (#n : nat) (x : natlt n -> GTot real) (p t p' : pred n) (m m' l : real)
@@ -512,7 +524,7 @@ let dcombine (#n : nat) (x : natlt n -> GTot real) (p1 p2 p' : pred n)
 (* The numerator half of the invariant, on its own.                    *)
 (* ------------------------------------------------------------------ *)
 
-let ninv (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m o : real) : GTot prop
+let ninv (#n : nat) (x y : natlt n -> GTot real) (p : pred n) (m o : real) : prop
   = o == nsum x y p /. exp m
 
 let nstep (#n : nat) (x y : natlt n -> GTot real) (p t p' : pred n) (m m' o : real)

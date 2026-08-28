@@ -22,6 +22,10 @@ module SZ = Kuiper.SizeT
 module RPM = Kuiper.Barrier.RPM
 module B = Kuiper.Barrier
 
+(* Boolean reflection of equality, replacing the removed compatibility name
+   from older F★ releases. *)
+let bool_eq (#a : eqtype) (x y : a) : GTot bool = x = y
+
 unfold
 let abs_bij (#len : nat) : (abs (len @| INil) =~ natlt len) =
   {

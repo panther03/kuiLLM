@@ -18,7 +18,7 @@ module Kuiops.SuperGEMM.Mm.KLoop
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Pulse.Lib.Array { length }
 
@@ -27,7 +27,7 @@ open Kuiper.Tensor.Tiling
 open Kuiper.Chest
 open Kuiper.EMatrix
 open Kuiper.Spec.GEMM { matmul, matplus }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiops.SuperGEMM.Mm.Params { frag, ldt }
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_live, pipe_q, pipe_contract,
                                     pipe_contract_c }
@@ -65,10 +65,10 @@ fn subproducts
   (bFrags  : array (fragment et_ab FragB   frag frag frag FragLCM))
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#lA : layout2 (SZ.v bm) (SZ.v bk)) {| T.ctlayout lA |}
-       {| strided_row_major (vtlayout_of_tlayout lA) |}
+       {| Kuiper.Array2.Strided.strided_row_major lA |}
   (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v bk) (SZ.v bn)) {| T.ctlayout lB |}
-       {| strided_col_major (vtlayout_of_tlayout lB) |}
+       {| Kuiper.Array2.Strided.strided_col_major lB |}
   (gB : array2 et_ab lB)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))

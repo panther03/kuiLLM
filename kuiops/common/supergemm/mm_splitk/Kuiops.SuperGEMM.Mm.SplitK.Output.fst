@@ -6,15 +6,15 @@ open Kuiper
 open Kuiper.Tensor
 open Kuiper.Tensor.Tiling
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
+open Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 open Kuiops.SuperGEMM.Mm.SplitK.Gather
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn split_ws_to_warps
   (#et : Type0) {| scalar et |}
@@ -128,7 +128,7 @@ fn split_ws_to_warps
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_ws_warps
   (#et : Type0) {| scalar et |}
@@ -214,7 +214,7 @@ fn gather_ws_warps
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_ws_approximates
   (#et : Type0) {| scalar et |} {| real_like et |}

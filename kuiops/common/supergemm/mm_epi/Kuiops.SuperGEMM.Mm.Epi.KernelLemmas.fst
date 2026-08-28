@@ -111,14 +111,22 @@ let coerce_wm_nested_c
     == { coerce_subtile_col rD_whole wm_c wn_c wn_1 grow gcol gcol () }
     ematrix_subtile rD_whole wm_c wn_1 grow gcol;
     == { subtile_subtile_compose rD_whole bm bn wm_c wn_1
-           block_row block_col idx_m idx_n () }
+           block_row block_col idx_m idx_n () grow gcol () ();
+         Kuiper.Chest.lemma_equal_intro
+           (ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
+             wm_c wn_1 idx_m idx_n)
+           (ematrix_subtile rD_whole wm_c wn_1 grow gcol);
+         Kuiper.Chest.ext
+           (ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
+             wm_c wn_1 idx_m idx_n)
+           (ematrix_subtile rD_whole wm_c wn_1 grow gcol) }
     ematrix_subtile (ematrix_subtile rD_whole bm bn block_row block_col)
       wm_c wn_1 idx_m idx_n;
   }
 #pop-options
 
 (* C-combining counterpart of [KernelLemmas.lane_target_is_subtile]. *)
-#push-options "--fuel 2 --ifuel 1 --z3rlimit 30 --split_queries always"
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 30"
 let lane_target_c_is_subtile
   (#m #n #k : szp)
   (rC : chest2 real (SZ.v m) (SZ.v n))

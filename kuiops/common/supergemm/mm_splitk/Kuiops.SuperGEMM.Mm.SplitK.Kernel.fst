@@ -24,7 +24,7 @@ module Kuiops.SuperGEMM.Mm.SplitK.Kernel
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.ForEvery
 open Pulse.Lib.Array { length }
@@ -33,20 +33,20 @@ open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Kernel.Desc { kernel_desc }
 open Kuiper.Tensor.Tiling { array2_extract_tile_ro', subtile_layout, array2_subtile }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, ws_warp_approximates,
   split_ws_to_warps, gather_ws_approximates }
 open Kuiops.SuperGEMM.Mm.SplitK.WsLemmas { ws_target, ws_warp_target }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 open Kuiops.SuperGEMM.Mm.SplitK.Store { store_warp_tile }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
   { skewed_view, pipe_live, pipe_q, pipe_contract_c, pipe_p_to_q_transform_c }
-open Kuiops.SuperGEMM.Mm.Stage { geo_ok }
+open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_t_row, g_t_col, g_row_step, g_a_iters }
 open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 
 module SZ = Kuiper.SizeT
@@ -146,7 +146,7 @@ let subtile_approximates
 (* setup / teardown : GPU-level pre/post transforms                       *)
 (* ---------------------------------------------------------------------- *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn setup
   (#et_ab #et_acc : Type0)
@@ -219,7 +219,7 @@ fn setup
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn teardown
   (#et_ab #et_acc : Type0)
@@ -338,7 +338,7 @@ let bcontract
 (* kf : one thread's kernel body                                          *)
 (* ---------------------------------------------------------------------- *)
 
-#push-options "--split_queries no --z3rlimit 20"
+#push-options " --z3rlimit 20"
 inline_for_extraction noextract
 fn kf
   (#et_ab #et_acc : Type0)
@@ -381,12 +381,13 @@ fn kf
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
-  (sh : c_shmems (SH.shmems_desc et_ab et_acc bm bn bk wm wn skew) { c_shmems_inv sh })
+  (sh : c_shmems (SH.shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (bid : szlt nblk)
   (tid : szlt nthr)
   ()
   requires
     gpu **
+    pure (c_shmems_inv sh) **
     SH.kpre gA eA gB eB gW bm bn bk wm wn skew fA fB nblk nthr sh bid tid **
     thread_id (SZ.v nthr) (SZ.v tid) **
     block_id (SZ.v nblk) (SZ.v bid) **
@@ -427,9 +428,12 @@ fn kf
   assert pure (SZ.v nthr == warps bm bn wm wn * SZ.v warp_size);
   div_ub (SZ.v tid) (warps bm bn wm wn) (SZ.v warp_size);
   let wnn = bn /^ wn;
+  assert pure (SZ.v wnn == SZ.v bn / SZ.v wn);
   div_ub (SZ.v wid) (SZ.v bm / SZ.v wm) (SZ.v wnn);
   let warp_m : szlt (SZ.v bm / SZ.v wm) = wid /^ wnn;
   let warp_n : szlt (SZ.v bn / SZ.v wn) = wid %^ wnn;
+  assert pure (SZ.v warp_m == SZ.v wid / SZ.v wnn);
+  assert pure (SZ.v warp_n == SZ.v wid % SZ.v wnn);
 
   (* ---- slice A and B to this split's k-range ---- *)
   ML.cancel_mul_div (SZ.v splits) (SZ.v ks);
@@ -446,6 +450,15 @@ fn kf
   let a_row_step = (ch *^ nthrc) /^ bk;
   let a_iters   = (bm *^ bk) /^ (ch *^ nthrc);
   let b_iters   = (bn *^ bk) /^ (ch *^ nthrc);
+  let staging_coordinates : squash (
+    SZ.v a_t_row == g_t_row (SZ.v bk) (SZ.v ch) (SZ.v nthr) (SZ.v tid) /\
+    SZ.v a_t_col == g_t_col (SZ.v bk) (SZ.v ch) (SZ.v nthr) (SZ.v tid) /\
+    SZ.v a_row_step == g_row_step (SZ.v bk) (SZ.v ch) (SZ.v nthr) /\
+    SZ.v a_iters == g_a_iters (SZ.v bm) (SZ.v bk) (SZ.v ch) (SZ.v nthr) /\
+    SZ.v a_t_row == g_t_row (SZ.v bk) (SZ.v ch) (SZ.v nthr) (SZ.v tid) /\
+    SZ.v a_t_col == g_t_col (SZ.v bk) (SZ.v ch) (SZ.v nthr) (SZ.v tid) /\
+    SZ.v a_row_step == g_row_step (SZ.v bk) (SZ.v ch) (SZ.v nthr) /\
+    SZ.v b_iters == g_a_iters (SZ.v bn) (SZ.v bk) (SZ.v ch) (SZ.v nthr)) = ();
 
   let accFrags = __alloc_array_fragment et_acc FragAcc frag_sz frag_sz frag_sz FragLAcc ((wm /^ frag_sz) *^ (wn /^ frag_sz));
   acc_len_alloc wm wn;
@@ -503,7 +516,7 @@ fn kf
     grow gcol
     a_t_row a_t_col a_row_step a_iters
     a_t_row a_t_col a_row_step b_iters
-    () () () () () () () () () () ();
+    () () () staging_coordinates () () () () () () ();
 
   rewrite (B.barrier_tok
              (pipe_contract_c m n ks bm bn bk skew
@@ -535,6 +548,18 @@ fn kf
   ws_warp_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB
     (SZ.v bm) (SZ.v bn) (SZ.v wm) (SZ.v wn)
     (SZ.v z) (SZ.v block_row) (SZ.v block_col) (SZ.v warp_m) (SZ.v warp_n) () ();
+  assert pure (SZ.v tid / warp_size == SZ.v wid);
+  assert pure (SZ.v wid / (SZ.v bn / SZ.v wn) == SZ.v warp_m);
+  assert pure (SZ.v wid % (SZ.v bn / SZ.v wn) == SZ.v warp_n);
+  assert pure (
+    epilogue_warp_input
+      (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks) rA rB ())
+      (SZ.v bm) (SZ.v bn) frag frag (mfrag wm) (nfrag wn)
+      (SZ.v bid) (SZ.v tid)
+    == warp_matmul
+         (ematrix_subtile rA (SZ.v m) (SZ.v ks) 0 (SZ.v z))
+         (ematrix_subtile rB (SZ.v n) (SZ.v ks) 0 (SZ.v z))
+         (SZ.v wm) (SZ.v wn) (reveal grow) (reveal gcol));
   with ews. assert (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
                       (mfrag wm) (nfrag wn) (SZ.v bid) (SZ.v tid / warp_size) ews);
   unfold (warp_tile_pts_to gW (SZ.v bm) (SZ.v bn) frag frag
@@ -586,7 +611,7 @@ let geo_facts
   P.nthr_pos bm bn wm wn;
   P.chunk_nthr_divides_ab et_ab et_acc bm bn bk wm wn skew
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 15 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 15"
 inline_for_extraction noextract
 let mk_kernel
   (#et_ab #et_acc : Type0)

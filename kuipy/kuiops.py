@@ -482,7 +482,7 @@ def _map_tag(entries):
 #            COLUMN-major with leading dimension K, which is what PyTorch hands
 #            a frozen weight, so no `B.contiguous()` copy is needed. This is the
 #            backend of choice wherever it applies.
-#   tc2d_to  Kuiper.Kernel.GEMM.TensorCore2D.To (hosted in kuiops/common/tc2d_to),
+#   tc2d_to  Kuiops.Kernel.GEMM.TensorCore2D.To,
 #            accumulates in `acc` and combines into a separate `out` buffer. The
 #            choice for the non-transposed-B case.
 #   bt2d     BlockTiling2D, one element type throughout, batched (rank-2 runs at

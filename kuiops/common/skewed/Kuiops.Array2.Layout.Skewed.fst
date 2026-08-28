@@ -8,7 +8,7 @@ open Kuiper.Shape
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.ForEvery
 open Kuiper.Bijection
@@ -74,6 +74,13 @@ let srm_l2_skewed_row_major
     stride = ld;
     pf     = (fun i j -> ()) }
 
+let lemma_srm_l2_skewed_stride
+  (#rows : erased nat) (#cols : erased nat) (#pad : erased nat)
+  (ld : SZ.t { SZ.v ld == cols + pad })
+  : Lemma (SZ.v (srm_l2_skewed_row_major #rows #cols #pad ld).stride == SZ.v ld)
+          [SMTPat (SZ.v (srm_l2_skewed_row_major #rows #cols #pad ld).stride)]
+= ()
+
 let lemma_aligned_srm_l2_skewed_row_major
   (#rows : erased nat) (#cols #pad : erased nat)
   (ld : SZ.t { SZ.v ld == cols + pad })
@@ -113,7 +120,7 @@ let lemma_flat_div (rows : nat) (ld : pos) (i : natlt (rows * ld))
   ML.lemma_div_le i (rows * ld) ld;
   ML.cancel_mul_div rows ld
 
-let skew_bij (rows : nat) (cols : pos) (pad : nat)
+unfold let skew_bij (rows : nat) (cols : pos) (pad : nat)
   : (natlt (rows * (cols + pad)) =~ (natlt rows & natlt (cols + pad)))
 = mk_bijection #(natlt (rows * (cols + pad)))
                #(natlt rows & natlt (cols + pad))
@@ -184,11 +191,41 @@ let lemma_skew_cell_eq
   tensor_pts_to_cell_eq a (idx2 x._1 x._2) 1.0R
     (acc (skew_chest rows cols pad g) (idx2 x._1 x._2))
 
+ghost
+fn skew_cell_to_tile_cell
+  (#et : Type0) (rows : nat) (cols : pos) (pad : nat)
+  (p : larray et (rows * (cols + pad)))
+  (g : skew_val et rows cols pad)
+  (x : (natlt rows & natlt cols))
+  requires skew_cell p rows cols pad g ((tile_bij rows cols pad).ff x)
+  ensures
+    Cell (from_array (l2_skewed_row_major rows cols pad) p)
+         (idx2 x._1 x._2)
+      |-> Frac 1.0R (acc (skew_chest rows cols pad g) (idx2 x._1 x._2))
+{
+  lemma_skew_cell_eq rows cols pad p g x;
+  rewrite skew_cell p rows cols pad g ((tile_bij rows cols pad).ff x)
+    as Cell (from_array (l2_skewed_row_major rows cols pad) p)
+            (idx2 x._1 x._2)
+         |-> Frac 1.0R (acc (skew_chest rows cols pad g) (idx2 x._1 x._2));
+}
+
 let skew_ecell
   (#et : Type0) (p : array et) (rows cols pad : nat)
   (rc : (natlt rows & natlt (cols + pad)))
   : slprop
 = exists* (w : et). pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w
+
+ghost
+fn skew_ecell_unfold
+  (#et : Type0) (p : array et) (rows cols pad : nat)
+  (rc : (natlt rows & natlt (cols + pad)))
+  requires skew_ecell p rows cols pad rc
+  ensures exists* (w : et).
+    pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w
+{
+  unfold (skew_ecell p rows cols pad rc);
+}
 
 ghost
 fn skew_pad_hide
@@ -237,12 +274,13 @@ fn skew_split
   forevery_iso (bij_sym (tile_bij rows cols pad))
     (fun (rc : (rc : (natlt rows & natlt (cols + pad)) { in_tile cols rc })) ->
        skew_cell p rows cols pad g rc);
-  forevery_ext
+  forevery_map
     (fun (rc : (natlt rows & natlt cols)) ->
        skew_cell p rows cols pad g ((tile_bij rows cols pad).ff rc))
     (fun (rc : (natlt rows & natlt cols)) ->
        Cell (from_array (l2_skewed_row_major rows cols pad) p) (idx2 rc._1 rc._2)
-         |-> Frac 1.0R (acc (skew_chest rows cols pad g) (idx2 rc._1 rc._2)));
+         |-> Frac 1.0R (acc (skew_chest rows cols pad g) (idx2 rc._1 rc._2)))
+    (skew_cell_to_tile_cell rows cols pad p g);
   tensor_implode2 (from_array (l2_skewed_row_major rows cols pad) p)
                   #1.0R #(skew_chest rows cols pad g);
   (* unmapped cells -> the residual *)
@@ -330,6 +368,21 @@ fn skew_join
   forevery_refine_join (skew_ecell p rows cols pad)
     (in_tile cols) (fun rc -> ~ (in_tile cols rc));
   forevery_unrefine (skew_ecell p rows cols pad);
+  forevery_map
+    (skew_ecell p rows cols pad)
+    (fun (rc : natlt rows & natlt (cols + pad)) -> exists* (w : et).
+       pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w)
+    (skew_ecell_unfold p rows cols pad);
+  forevery_map
+    (fun (rc : natlt rows & natlt (cols + pad)) -> exists* (w : et).
+       pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w)
+    (fun (rc : natlt rows & natlt (cols + pad)) -> exists* (w : et).
+       pts_to_cell p ((skew_bij rows cols pad).gg rc) w)
+    fn rc {
+      with w. assert pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w;
+      rewrite pts_to_cell p (skew_idx rows cols pad rc._1 rc._2) w
+           as pts_to_cell p ((skew_bij rows cols pad).gg rc) w;
+    };
   forevery_iso_back (skew_bij rows cols pad)
     (fun (i : natlt (rows * (cols + pad))) -> exists* (w : et). pts_to_cell p i w);
   gpu_array_unslice_1' p;

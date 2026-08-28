@@ -63,9 +63,9 @@ let tile_approx_from_subtiles
     ML.lemma_div_mod x frag;
     ML.lemma_div_mod y frag;
     introduce i >= a ==> False
-    with _. ML.lemma_mult_le_right frag a i;
+    with ML.lemma_mult_le_right frag a i;
     introduce j >= b ==> False
-    with _. ML.lemma_mult_le_right frag b j;
+    with ML.lemma_mult_le_right frag b j;
     assert (acc2 (ematrix_subtile e frag frag i j) x' y' == acc2 e (i * frag + x') (j * frag + y'));
     assert (acc2 (ematrix_subtile r frag frag i j) x' y' == acc2 r (i * frag + x') (j * frag + y'))
   end;

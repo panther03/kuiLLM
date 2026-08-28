@@ -12,7 +12,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Floating
 open Kuiper.Shape
@@ -23,6 +23,7 @@ open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.ForEvery
 open Kuiper.Ghost.TensorTranspose
 open Kuiper.EMatrix
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
@@ -534,9 +535,9 @@ fn sdpa_flash_qk_mm
   (#lKT : layout2 hd 16)
   (#lS : layout2 16 16)
   {| ctlayout lQ |} {| ctlayout lKT |} {| ctlayout lS |}
-  {| strided_row_major (vtlayout_of_tlayout lQ) |}
-  {| strided_col_major (vtlayout_of_tlayout lKT) |}
-  {| strided_row_major (vtlayout_of_tlayout lS) |}
+  {| str_Q : strided_row_major (vtlayout_of_tlayout lQ) |}
+  {| str_KT : strided_col_major (vtlayout_of_tlayout lKT) |}
+  {| str_S : strided_row_major (vtlayout_of_tlayout lS) |}
   (shQ  : array2 et_ab lQ)
   (shKT : array2 et_ab lKT)
   (shS  : array2 et_acc lS)
@@ -565,6 +566,9 @@ fn sdpa_flash_qk_mm
 
   let nchunks = d /^ 16sz;
   FStar.Math.Lemmas.lemma_div_le (SZ.v d) (SZ.v hd) 16;
+  lemma_writable_strided_row_major_stride_positive lQ str_Q #_;
+  lemma_writable_strided_col_major_stride_positive lKT str_KT #_;
+  lemma_writable_strided_row_major_stride_positive lS str_S #_;
   let mut chunk : sz = 0sz;
   while (!chunk <^ nchunks)
     invariant
@@ -580,8 +584,14 @@ fn sdpa_flash_qk_mm
     let qtile = array2_extract_tile_ro' shQ 16 16 0 (SZ.v !chunk);
     let ktile = array2_extract_tile_ro' shKT 16 16 (SZ.v !chunk) 0;
 
-    mma_loadA qFrag qtile;
-    mma_loadB_cm kFrag ktile;
+    mma_loadA qFrag #_
+      #(Kuiper.Array2.Strided.strided_row_major_subtile lQ #_
+        #(to_kuiper_strided_row_major lQ str_Q) 16 16 0 (SZ.v !chunk) #_)
+      qtile;
+    mma_loadB_cm kFrag #_
+      #(Kuiper.Array2.Strided.strided_col_major_subtile lKT #_
+        #(to_kuiper_strided_col_major lKT str_KT) 16 16 (SZ.v !chunk) 0 #_)
+      ktile;
     mma_sync' qFrag kFrag sFrag;
 
     with etQ. assert (tensor_pts_to qtile #fQ etQ);
@@ -592,7 +602,7 @@ fn sdpa_flash_qk_mm
     chunk := !chunk +^ 1sz;
   };
 
-  mma_store sFrag shS;
+  mma_store sFrag #_ #(to_kuiper_strided_row_major lS str_S) shS;
 
   with vq. assert qFrag |-> vq; drop_ (qFrag |-> vq);
   with vk. assert kFrag |-> vk; drop_ (kFrag |-> vk);
@@ -686,9 +696,9 @@ fn sdpa_flash_pv_mm
   (#lPVc : layout2 16 16)
   (#lO : layout2 16 (SZ.v hd))
   {| ctlayout lP |} {| ctlayout lV |} {| cPVc : ctlayout lPVc |} {| ctlayout lO |}
-  {| strided_row_major (vtlayout_of_tlayout lP) |}
-  {| strided_row_major (vtlayout_of_tlayout lV) |}
-  {| strided_row_major (vtlayout_of_tlayout lPVc) |}
+  {| str_P : strided_row_major (vtlayout_of_tlayout lP) |}
+  {| str_V : strided_row_major (vtlayout_of_tlayout lV) |}
+  {| str_PVc : strided_row_major (vtlayout_of_tlayout lPVc) |}
   (shP   : array2 et_ab lP)
   (shV   : array2 et_ab lV)
   (shPVc : array2 et_acc lPVc)
@@ -723,6 +733,9 @@ fn sdpa_flash_pv_mm
   let pvacc = __alloc_fragment et_acc FragAcc 16sz 16sz 16sz FragLAcc;
 
   let njcol = d /^ 16sz;
+  lemma_writable_strided_row_major_stride_positive lP str_P #_;
+  lemma_writable_strided_row_major_stride_positive lV str_V #_;
+  lemma_writable_strided_row_major_stride_positive lPVc str_PVc #_;
   let mut jcol : sz = 0sz;
   while (!jcol <^ njcol)
     invariant
@@ -741,12 +754,15 @@ fn sdpa_flash_pv_mm
 
     mma_fill pvacc sc_acc.zero;
     let vtile = array2_extract_tile_ro' shV 16 16 0 (SZ.v vjcol);
-    mma_loadA pf shP;
-    mma_loadB vf vtile;
+    mma_loadA pf #_ #(to_kuiper_strided_row_major lP str_P) shP;
+    mma_loadB vf #_
+      #(Kuiper.Array2.Strided.strided_row_major_subtile lV #_
+        #(to_kuiper_strided_row_major lV str_V) 16 16 0 (SZ.v vjcol) #_)
+      vtile;
     mma_sync' pf vf pvacc;
     with etV. assert (tensor_pts_to vtile #fV etV);
       elim_trade (vtile |-> Frac fV etV) (shV |-> Frac fV eV);
-    mma_store pvacc shPVc;
+    mma_store pvacc #_ #(to_kuiper_strided_row_major lPVc str_PVc) shPVc;
     BM.emma_chain_one #et_ab #et_acc #_ #_ #_ #_ #_ eP (ematrix_subtile eV 16 16 0 (SZ.v ocol));
 
     (* The [__syncwarp()] after [store_matrix_sync]: model it as an empty warp

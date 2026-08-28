@@ -12,7 +12,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.Bijection
@@ -95,26 +95,26 @@ ghost
 fn flash_warp_split_stride
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
   (a : array2 et l)
-  (#_ : squash (SZ.v warp_size / 16 /? rows))
+  (#_ : squash (warp_row_span /? rows))
   (#_ : squash (16 /? cols))
   requires live a
   ensures
     forall+ (lane : natlt BW.warp_size).
-      exists* (r : chest2 et (rows / (SZ.v warp_size / 16)) (cols / 16)).
-        array2_stride_subtile a (SZ.v warp_size / 16) 16
+      exists* (r : chest2 et (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16
           (lane / 16) (lane % 16) |-> Frac 1.0R r
 
 ghost
 fn flash_warp_gather_stride
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
   (a : array2 et l)
-  (#_ : squash (SZ.v warp_size / 16 /? rows))
+  (#_ : squash (warp_row_span /? rows))
   (#_ : squash (16 /? cols))
   requires
     pure (SZ.fits (tlayout_ulen l)) **
     (forall+ (lane : natlt BW.warp_size).
-      exists* (r : chest2 et (rows / (SZ.v warp_size / 16)) (cols / 16)).
-        array2_stride_subtile a (SZ.v warp_size / 16) 16
+      exists* (r : chest2 et (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16
           (lane / 16) (lane % 16) |-> Frac 1.0R r)
   ensures live a
 

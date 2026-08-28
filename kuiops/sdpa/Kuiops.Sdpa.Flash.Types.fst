@@ -12,7 +12,7 @@ open Kuiper.Tensor
 open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Bijection
 open Kuiper.ForEvery
@@ -65,7 +65,7 @@ type flash_views
 
 (* ---- shared index algebra and cell-ownership slprops ---- *)
 
-unfold let warp_row_span : nat = 2
+let warp_row_span : s:pos { s /? 16 } = 2
 
 (* Concrete, content-free ownership states for the three block barriers in
    the flash-attention block.  Values are existential throughout: the

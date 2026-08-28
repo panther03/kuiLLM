@@ -12,7 +12,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Floating
 open Kuiper.Shape
@@ -24,6 +24,7 @@ open Kuiper.ForEvery
 open Kuiper.Ghost.TensorTranspose
 open Kuiper.EMatrix
 open Kuiops.Sdpa.Flash.KfSub
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
@@ -32,6 +33,15 @@ module Trade = Pulse.Lib.Trade
 module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module FT = Kuiops.Sdpa.Flash.Types
+
+let divup_le_quotient_plus_one (m : nat) (k : pos)
+  : Lemma (Kuiper.Divides.divup m k <= m / k + 1)
+= if m = 0 then ()
+  else begin
+    FStar.Math.Lemmas.lemma_div_plus (m - 1) 1 k;
+    FStar.Math.Lemmas.lemma_div_le (m - 1) m k
+  end
+
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
 inline_for_extraction noextract
@@ -394,6 +404,9 @@ fn sdpa_flash_causal_mask
     if causal { sdpa_flash_causal_active bm sk sq rows r0 } else { (sk <: sz) };
   let r = SZ.sdivup kmax bn;
   SZ.lem_sdivup kmax bn;
+  divup_le_quotient_plus_one (SZ.v kmax) (SZ.v bn);
+  assert pure (SZ.v kmax <= SZ.v sk);
+  FStar.Math.Lemmas.lemma_div_le (SZ.v kmax) (SZ.v sk) (SZ.v bn);
   r
 }
 
@@ -895,19 +908,39 @@ fn sdpa_flash_o_store_active
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
     stride_step_lem (SZ.v bm) (SZ.v d) (SZ.v lane) (SZ.v flat)
       ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+    let cur : stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane) =
+      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
     forevery_remove'
       #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
       (fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v flat))
       (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
         (out_cell b hq sq d gout
           (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2))
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+      cur;
+    rewrite
+      (when_ (SZ.v r0 + cur._1 < SZ.v rows)
+        (out_cell b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + cur._1) cur._2))
+      as
+      (when_ (SZ.v r0 + SZ.v i < SZ.v rows)
+        (out_cell b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)));
     sdpa_flash_o_store_cell_maybe nw bm d rows b hq sq
       shscale shO shgl gout bi kvh group i dd r0;
+    rewrite
+      (when_ (SZ.v r0 + SZ.v i < SZ.v rows)
+        (out_cell_v b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + SZ.v i) (SZ.v dd)
+          (FC.fcast (SF.out_val escale eO egl (SZ.v i) (SZ.v dd)))))
+      as
+      (when_ (SZ.v r0 + cur._1 < SZ.v rows)
+        (out_cell_v b hq sq d gout
+          (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + cur._1) cur._2
+          (FC.fcast (SF.out_val escale eO egl cur._1 cur._2))));
     forevery_refine_ext
       #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
       #(fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v flat) /\
-                  ij =!= ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d))))
+                  ij =!= cur)
       (fun ij -> ~(ij._1 * SZ.v d + ij._2 < SZ.v next))
       (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
         (out_cell b hq sq d gout
@@ -919,12 +952,11 @@ fn sdpa_flash_o_store_active
         (out_cell_v b hq sq d gout
           (SZ.v bi) (SZ.v kvh) (SZ.v group) (SZ.v r0 + ij._1) ij._2
           (FC.fcast (SF.out_val escale eO egl ij._1 ij._2))))
-      ((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)));
+      cur;
     forevery_refine_ext
       #(stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane))
       #(fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v flat \/
-                  (((SZ.v i <: natlt (SZ.v bm)), (SZ.v dd <: natlt (SZ.v d)))
-                     <: stride_index2 (SZ.v bm) (SZ.v d) BW.warp_size (SZ.v lane)) == ij)
+                  cur == ij)
       (fun ij -> ij._1 * SZ.v d + ij._2 < SZ.v next)
       (fun ij -> when_ (SZ.v r0 + ij._1 < SZ.v rows)
         (out_cell_v b hq sq d gout

@@ -49,8 +49,10 @@ Organization:
 - `infer.py`: Where the main Qwen2.5 integration test lives.
 - `bench_ops.ipynb`: Kernel benchmarks (verified + unverified) against stock PyTorch.
 
-You can expect the upstream kuiper source to live at $KUIPER_HOME. You can use this for searching for lemmas
-and the kernel sources.
+`make prepare` installs the selected binary package in `.kuiper/`. Its `src/`
+directory is the API reference matching the checked library and compiler suite.
+Do not add Kuiper, F*, Pulse, or Karamel source trees to this repository, and do
+not define local modules in the `Kuiper` namespace.
 
 ## Build / run / test
 
@@ -70,11 +72,9 @@ provide CUDA — nvcc 12.x must come from the host.
   new kernel instantiation compiles via F*+nvcc (tens of seconds)**; reruns hit the
   on-disk cache.
 - `make verify-kuiops` — F*-verify the `kuiops/*.fst{i}` support modules.
-- The makefile provides an option to reinstall Kuiper, but please ask before running this,
-  because usually concurrent work is happening at $KUIPER_HOME (so installing would trigger a
-  long rebuild) and nightly/release might be incompatible with the current state of the 
-  kuiops repo. Generally speaking, expect `inst/` to be present before starting work 
-  and ask if it is not there.
+- `make prepare` downloads the pinned Kuiper package. Set `KUIPER_HOME` to use
+  an existing package instead. `.kuiper/`, `.tools/`, and `.kuipy_cache/` are
+  generated locally and must not be committed.
 - Verify a single file through makefile: given some `Kuiops.My.Module.fst{i}` anywhere in `kuiops/`, `make .kuipy_cache/checked/Kuiops.My.Module.fst{i}.checked` verifies it
 - Extract a single file through makefile: given some `Kuiops.My.Module.fst{i}` anywhere in `kuiops/`, `make .kuipy_cache/cu/Kuiops_My_Module.cu` extracts to CUDA.
 

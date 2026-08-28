@@ -88,7 +88,7 @@ fn array2_gather_n_approximates
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 10"
 
 (* TODO(upstream): a copy of the [array2_untile_approximates] of
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown], which has no
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown], which has no
    [.fsti] entry and so cannot be reused. *)
 ghost
 fn array2_untile_approximates

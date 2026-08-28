@@ -16,7 +16,7 @@ open Kuiper.Chest
 open Kuiper.Tensor
 open Kuiper.Shape
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TradeHelpers
 open Kuiops.Common.Band
 open Pulse.Lib.Trade

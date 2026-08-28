@@ -25,20 +25,20 @@ open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor { array2, layout2, idx2 }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
   { own_lane_cells, live_lane_cells, in_lane }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
   { own_lane_cells_rw, lane_fade, lane_fade_start, lane_fade_done }
 
-open Kuiper.Array2.Vectorized { row_cells }
+open Kuiops.Array2.Vectorized { row_cells }
 open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
   { strided_row_major, strided_row_major_subtile, cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { mk2, acc2, chest2, chest_comb }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 
 open Pulse.Lib.Trade
 
@@ -56,9 +56,8 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module RO = Kuiper.TensorRO
 module A = Pulse.Lib.Array
-open Pulse.Lib.Array { op_Array_Access }
 module P = Kuiops.SuperGEMM.Mm.Params
-module VG = Kuiper.Array2.Vectorized.Group
+module VG = Kuiops.Array2.Vectorized.Group
 module ML = FStar.Math.Lemmas
 inline_for_extraction noextract
 fn epilogue

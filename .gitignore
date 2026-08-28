@@ -30,9 +30,9 @@ env/
 .kuipy_cache/
 .tune_params.json.lock
 
-# local fstar installation
-inst
-.kuiper.touch
+# Downloaded Kuiper package and generated toolchain files
+.kuiper/
+.tools/
 .depend
 
 # ── HuggingFace download cache (if user redirects HF_HOME here) ───────────────

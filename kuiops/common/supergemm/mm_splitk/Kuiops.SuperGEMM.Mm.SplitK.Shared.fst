@@ -8,17 +8,17 @@ open Kuiper
 
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 
 module SZ = Kuiper.SizeT
 
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, precip }
+open Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, precip }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_split, skew_join }
 open Kuiops.SuperGEMM.Mm.SplitK.Output { ws_warp_live, ws_warp_approximates }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Barrier { skewed_view, pipe_sharing, pipe_live, pipe_q,
   unfold_pipe_q_even, unfold_pipe_q_odd }
@@ -121,7 +121,7 @@ fn gather_pipe_buffer_live
 (* block_setup / block_teardown                                        *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_setup
   (#et_ab #et_acc : Type0)
@@ -202,7 +202,7 @@ fn block_setup
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn gather_last_pipe_buffers
   (#et_ab #et_acc : Type0)
@@ -294,7 +294,7 @@ fn gather_last_pipe_buffers
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
@@ -396,11 +396,11 @@ let shmem_inv_components
       is_block_array (sar_b1 bm bn bk wm wn skew sh))
 =
   assert (c_shmem_inv (fst sh));
-  assert (c_shmems_inv (snd sh));
+  assert (c_shmems_block_inv (snd sh));
   assert (c_shmem_inv (fst (snd sh)));
-  assert (c_shmems_inv (snd (snd sh)));
+  assert (c_shmems_block_inv (snd (snd sh)));
   assert (c_shmem_inv (fst (snd (snd sh))));
-  assert (c_shmems_inv (snd (snd (snd sh))));
+  assert (c_shmems_block_inv (snd (snd (snd sh))));
   assert (c_shmem_inv (fst (snd (snd (snd sh)))));
   ()
 

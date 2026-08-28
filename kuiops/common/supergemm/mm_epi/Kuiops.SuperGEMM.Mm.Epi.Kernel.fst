@@ -19,7 +19,7 @@ module Kuiops.SuperGEMM.Mm.Epi.Kernel
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.ForEvery
 open Pulse.Lib.Array { length }
@@ -30,15 +30,15 @@ open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Output
   { output_lane_live', output_lane_approximates', output_fragment',
     split_output_to_lanes', gather_output_approximates' }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
   { skewed_view, pipe_live, pipe_q, pipe_contract, pipe_p_to_q_transform,
     pipe_contract_c, pipe_p_to_q_transform_c }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok }
 open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.SuperGEMM.Mm.KernelLemmas { mfrag_frag_eq, td_bounds }
 open Kuiops.SuperGEMM.Mm.Epi.EpilogueLemmas { lane_c_target, coerce_chest2_cols }
@@ -131,7 +131,7 @@ let output_tiling_bounds (bm bn wm wn m n : pos)
 (* mk_kernel                                                              *)
 (* ---------------------------------------------------------------------- *)
 
-(* [--split_queries always] is a 40x slowdown here (~1000 sub-queries) AND
+(* [] is a 40x slowdown here (~1000 sub-queries) AND
    loses hypotheses in the field-type checks; one query per field is both
    faster and complete. *)
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 20"

@@ -25,20 +25,20 @@ open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor { array2, layout2, idx2 }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
   { own_lane_cells, live_lane_cells, in_lane }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
   { own_lane_cells_rw, lane_fade, lane_fade_start, lane_fade_done }
 
-open Kuiper.Array2.Vectorized { row_cells }
+open Kuiops.Array2.Vectorized { row_cells }
 open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
   { strided_row_major, strided_row_major_subtile, cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { mk2, acc2, chest2, chest_comb }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 
 open Pulse.Lib.Trade
 
@@ -57,10 +57,14 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module RO = Kuiper.TensorRO
 module A = Pulse.Lib.Array
-open Pulse.Lib.Array { op_Array_Access }
 module P = Kuiops.SuperGEMM.Mm.Params
-module VG = Kuiper.Array2.Vectorized.Group
+module VG = Kuiops.Array2.Vectorized.Group
 module ML = FStar.Math.Lemmas
+
+val fragment_index
+  (rows cols : pos) (row : natlt rows) (col : natlt cols)
+  : i : natlt (rows * cols) { i == row * cols + col }
+
 (* ---------------------------------------------------------------------------
    drain_band: drain band [idx] of the warp's output fragment (a rows x cols
    tile) to the global output, combining with the C window at global origin
@@ -106,13 +110,16 @@ fn drain_band
   (#eAcc : chest2 et_acc (SZ.v rows) (SZ.v cols))
   (rBand : chest2 real (SZ.v rows) (SZ.v cols))
   (idx : szlt (wm * wn))
+  (idxRow : szlt wm)
+  (idxCol : szlt wn)
+  (#_ : squash (SZ.v idx == SZ.v idxRow * SZ.v wn + SZ.v idxCol))
   (crb ccb : erased nat)
   (#_ : squash (
     reveal crb + SZ.v rows <= SZ.v m /\ reveal ccb + SZ.v cols <= SZ.v n /\
     reveal crb == SZ.v mrow * SZ.v bm + SZ.v warpRow * (SZ.v wm * SZ.v rows)
-                  + (SZ.v idx / SZ.v wn) * SZ.v rows /\
+                  + (SZ.v idxRow) * SZ.v rows /\
     reveal ccb == SZ.v mcol * SZ.v bn + SZ.v warpCol * (SZ.v wn * SZ.v cols)
-                  + (SZ.v idx % SZ.v wn) * SZ.v cols))
+                  + (SZ.v idxCol) * SZ.v cols))
   (lane : szlt warp_size)
   (#_ : squash (SZ.fits (SZ.v rows * SZ.v cols + Kuiper.Barrier.Warp.warp_size)))
   (#_ : squash (SZ.fits (SZ.v m * SZ.v n)))
@@ -131,7 +138,7 @@ fn drain_band
   requires
     live_lane_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (SZ.v lane)
   ensures
     (exists* (bufv : seq et_d). obuf |-> bufv)
@@ -139,7 +146,7 @@ fn drain_band
     (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
       own_lane_cells
         (output_fragment' gD bm bn rows cols wm wn
-          (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+          (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
         eD (SZ.v lane) **
       pure (eD %~ chest_comb comb_r
                     (cband rC (SZ.v rows) (SZ.v cols) crb ccb ()) rBand))
@@ -161,13 +168,15 @@ fn store_band
       frag (SZ.v wn) (SZ.v wid_sz) 0))
   (#e0 : chest2 et_acc frag (SZ.v wn))
   (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
+  (#_ : squash (nfrag wn * frag == SZ.v wn))
   ()
   preserves array_fragment_pts_to accFrags #1.0R em0
   requires
     band |-> Frac (1.0R /. warp_size) e0 **
     pure (Seq.length em0 == mfrag wm * nfrag wn /\
           (forall (i : natlt (mfrag wm)) (j : natlt (nfrag wn)).
-            Seq.index em0 (i * nfrag wn + j) %~ ematrix_subtile rAcc frag frag i j))
+            Seq.index em0 (fragment_index (mfrag wm) (nfrag wn) i j)
+              %~ ematrix_subtile rAcc frag frag i j))
   ensures
     exists* (e : chest2 et_acc frag (SZ.v wn)).
       band |-> Frac (1.0R /. warp_size) e **

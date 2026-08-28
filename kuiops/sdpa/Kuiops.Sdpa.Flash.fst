@@ -9,7 +9,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.Bijection
@@ -198,7 +198,9 @@ let sdpa_flash_kd
       (tid / BW.warp_size) (tid % BW.warp_size));
   f = sdpa_flash_thread nblk nw nthr
     b hq hkv group sq rows tiles sk d
-    gQ gK gV gmask gout causal has_mask scale;
+    gQ gK gV gmask gout causal has_mask scale
+    #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
+    #fQ #fK #fV #fmask #eQ #eK #eV #emask;
   block_pre_sendable = (fun _ -> magic());
   block_post_sendable = (fun _ -> magic());
   kpre_sendable = (fun _ _ _ _ -> magic());
@@ -261,9 +263,9 @@ fn sdpa_flash_async
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (s : stream_t)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     on gpu_loc (
       (gQ |-> Frac fQ eQ) **
@@ -274,8 +276,8 @@ fn sdpa_flash_async
     pure (FSpec.sdpa_flash_finite (SZ.v group) (SZ.v rows)
             eQ eK emask has_mask causal scale)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc (
         (gQ |-> Frac fQ eQ) **
         (gK |-> Frac fK eK) **
@@ -292,7 +294,7 @@ fn sdpa_flash_async
 {
   FApprox.flash_out_approx nw d b hq hkv group sq rows sk
     eQ eK eV emask has_mask causal scale;
-  launch (sdpa_flash_kd nblk nw nthr
+  Kuiops.Kernel.launch (sdpa_flash_kd nblk nw nthr
     b hq hkv group sq rows tiles sk d
     gQ gK gV gmask gout causal has_mask scale) s;
 }

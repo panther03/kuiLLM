@@ -25,7 +25,7 @@ open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor
 open Kuiper.Shape
 open Kuiper.TensorRO { vtlayout_of_tlayout }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TradeHelpers { factored }
 module SZ = Kuiper.SizeT
 

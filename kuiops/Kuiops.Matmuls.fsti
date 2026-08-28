@@ -5,7 +5,7 @@ open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Tensor
 open Kuiper.EMatrix
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Array2.Strided.Slice
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Float.Casts { float_cast }
@@ -27,6 +27,16 @@ let rmC (rows cols : nat) =
 unfold
 let bcastC (rows cols : nat) =
   RO.extended_layout (RO.vtlayout_of_tlayout (l1_forward cols)) rows
+
+(* [cvtlayout_extended] requires an explicit [SZ.fits rows] witness, which
+   typeclass search cannot recover from an unrefined natural dimension.  The
+   public launchers use [szp] dimensions, so name that constructive instance
+   here for the broadcast-bias view. *)
+inline_for_extraction noextract
+instance cvt_bcastC (rows cols : szp)
+  : RO.cvtlayout (bcastC (SZ.v rows) (SZ.v cols))
+  = RO.cvtlayout_extended
+      (RO.vtlayout_of_tlayout (l1_forward (SZ.v cols))) (SZ.v rows)
 
 inline_for_extraction noextract
 fn bt2d_async
@@ -53,9 +63,9 @@ fn bt2d_async
   (#eB : chest3 et (SZ.v batch) (SZ.v k) (SZ.v n))
   (#eC : chest3 et (SZ.v batch) (SZ.v m) (SZ.v n))
   (#fA #fB : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure (aligned 16 (core gA)) **
     pure (aligned 16 (core gB)) **
@@ -64,8 +74,8 @@ fn bt2d_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> eC)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gC |-> MS.gbmmcomb (fun (x:et) -> x) (fun (x:et) -> x) comb eC eA eB)))
 
@@ -132,7 +142,7 @@ fn tc2d_to_gen_async
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
   (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
-  (#lC : RO.vlayout2 (SZ.v rows) (SZ.v cols))
+  (#lC : RO.vlayout2 (SZ.v rows) (SZ.v cols)) {| RO.cvtlayout lC |}
   {| strC : strided_row_major lC |}
   (#_ : squash (aligned_strided_row_major (chunk et_cd) strC))
   (gC : RO.roarray2 et_cd lC { RO.is_global gC })
@@ -147,9 +157,9 @@ fn tc2d_to_gen_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -158,8 +168,8 @@ fn tc2d_to_gen_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -210,9 +220,9 @@ fn tc2d_to_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -221,8 +231,8 @@ fn tc2d_to_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -273,9 +283,9 @@ fn tc2d_to_bcast_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -284,10 +294,9 @@ fn tc2d_to_bcast_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
                   (to_real_matrix eC) (to_real_matrix eA) (to_real_matrix eB)))))
-

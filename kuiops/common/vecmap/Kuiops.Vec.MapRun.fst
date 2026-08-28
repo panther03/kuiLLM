@@ -19,9 +19,9 @@ module Kuiops.Vec.MapRun
 
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
-open Kuiper.Array2.Vectorized { row_cells, array2_vec_write_cells }
+open Kuiops.Array2.Vectorized { row_cells, array2_vec_write_cells }
 open Kuiper.Tensor { array2, layout2, tensor_read }
-open Kuiper.Array2.Strided { cell_of_pos, strided_row_major }
+open Kuiops.Array2.Strided { cell_of_pos, strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { acc2 }
 
@@ -81,7 +81,7 @@ fn vec_map_run_write
     let scc : szlt scols = sc +^ ve;
     let sv = tensor_read src (sr, (scc, ()));
     with so. assert obuf |-> so;
-    A.op_Array_Assignment obuf ve (post_map sv) #so;
+    obuf.(ve) <- post_map sv;
     e := !e +^ 1sz;
   };
   with so. assert obuf |-> so;

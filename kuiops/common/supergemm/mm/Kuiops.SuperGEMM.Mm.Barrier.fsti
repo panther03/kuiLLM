@@ -30,7 +30,7 @@ module Kuiops.SuperGEMM.Mm.Barrier
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier

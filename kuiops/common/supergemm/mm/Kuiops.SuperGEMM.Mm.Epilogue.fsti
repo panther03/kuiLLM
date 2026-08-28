@@ -47,18 +47,18 @@ module Kuiops.SuperGEMM.Mm.Epilogue
    alignment obligation for a general strided layout cannot be discharged from
    [chunk et_d /?+ n] alone, so the caller supplies it as the precondition
    [aligned_strided_row_major (chunk et_d) strD] (the same pattern A/B use in
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelBody.kf]). *)
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelBody.kf]). *)
 
 #lang-pulse
 
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor { array2, layout2 }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
   { strided_row_major, cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.TensorCore { FragAcc, FragLAcc, fragment }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiper.Chest { chest2, chest_map }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 

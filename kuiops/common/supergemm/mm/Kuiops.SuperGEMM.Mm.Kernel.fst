@@ -17,7 +17,7 @@ module Kuiops.SuperGEMM.Mm.Kernel
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.ForEvery
 open Pulse.Lib.Array { length }
@@ -28,15 +28,15 @@ open Kuiops.SuperGEMM.Mm.Params
 open Kuiops.SuperGEMM.Mm.Output
   { output_lane_live', output_lane_approximates', output_fragment',
     split_output_to_lanes', gather_output_live', gather_output_approximates' }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells, live_lane_cells }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiops.SuperGEMM.Mm.Barrier
   { skewed_view, pipe_live, pipe_q, pipe_contract, pipe_p_to_q_transform,
     pipe_contract_c, pipe_p_to_q_transform_c }
 open Kuiops.SuperGEMM.Mm.Stage { geo_ok, g_t_row, g_t_col, g_row_step, g_a_iters }
 open Kuiops.SuperGEMM.Mm.KLoop { kloop, acc_len_reveal, acc_len_alloc }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KLoop { populate_acc_with_zero }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul, warp_matmul_is_subtile, mtranspose_subtile }
 open Kuiops.SuperGEMM.Mm.Epilogue { epilogue }
 open Kuiops.SuperGEMM.Mm.KernelLemmas
@@ -57,7 +57,7 @@ module ML = FStar.Math.Lemmas
 (* setup : GPU-level pre transform                                        *)
 (* ---------------------------------------------------------------------- *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn setup
   (#et_ab #et_acc #et_d : Type0)
@@ -237,7 +237,7 @@ fn lane_retarget
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn teardown
   (#et_ab #et_acc #et_d : Type0)
@@ -427,7 +427,7 @@ let bcontract
     (SH.sar_b0 bm bn bk wm wn skew ptrs) (SH.sar_b1 bm bn bk wm wn skew ptrs)
     (SZ.v nthr) ()
 
-#push-options "--split_queries no --z3rlimit 15"
+#push-options " --z3rlimit 15"
 
 (* Pure bridge for the [kf] post fold: the [rD] the epilogue produces
    ([chest_map post_map_r] over the coerced warp accumulator) is definitionally
@@ -507,12 +507,13 @@ fn kf
   (fA fB : perm)
   (nblk : szp{SZ.v nblk == SZ.v m / SZ.v bm * (SZ.v n / SZ.v bn)})
   (nthr : szp{SZ.v nthr == P.nthr bm bn wm wn})
-  (sh : c_shmems (SH.shmems_desc et_ab et_acc bm bn bk wm wn skew) { c_shmems_inv sh })
+  (sh : c_shmems (SH.shmems_desc et_ab et_acc bm bn bk wm wn skew))
   (bid : szlt nblk)
   (tid : szlt nthr)
   ()
   requires
     gpu **
+    pure (c_shmems_inv sh) **
     SH.kpre gA eA gB eB gD bm bn bk wm wn skew fA fB nblk nthr sh bid tid **
     thread_id (SZ.v nthr) (SZ.v tid) **
     block_id (SZ.v nblk) (SZ.v bid) **
@@ -785,7 +786,7 @@ let output_tiling_bounds (bm bn wm wn m n : pos)
 (* mk_kernel : assemble the [kernel_desc]                                  *)
 (* ---------------------------------------------------------------------- *)
 
-(* [--split_queries always] is a 25x slowdown here (~1000 sub-queries) AND
+(* [] is a 25x slowdown here (~1000 sub-queries) AND
    loses hypotheses in the field-type checks; one query per field is both
    faster and complete. *)
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 15"

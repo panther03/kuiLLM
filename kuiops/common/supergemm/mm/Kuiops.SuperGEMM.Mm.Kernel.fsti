@@ -15,7 +15,7 @@ module Kuiops.SuperGEMM.Mm.Kernel
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 
 open Kuiper.TensorRO { vtlayout_of_tlayout }

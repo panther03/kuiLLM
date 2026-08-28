@@ -11,7 +11,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Floating
 open Kuiper.Shape
@@ -24,6 +24,8 @@ open Kuiper.Ghost.TensorTranspose
 open Kuiper.EMatrix
 open Kuiops.Sdpa.Flash.KfSub
 open Kuiops.Sdpa.Flash.KfBlock
+open Kuiops.Sdpa.Flash.Vals
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module B = Kuiper.Barrier
@@ -33,6 +35,32 @@ module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SS = Kuiops.Sdpa.Flash.Spec.Step
 module FT = Kuiops.Sdpa.Flash.Types
+
+#push-options "--fuel 2 --ifuel 2"
+
+let barrier_stage0_def
+  (#et_ab #et_acc : Type0) {| scalar et_acc |}
+  (nw d : szp) (#_ : squash (16 /?+ SZ.v d))
+  (shQ : array2 et_ab (l2_row_major 16 (SZ.v d)))
+  (eQsh : chest2 et_ab 16 (SZ.v d))
+  (shM shL : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (eM eL : chest2 et_acc (SZ.v nw) 16)
+  (shscale : array2 et_acc (l2_row_major (SZ.v nw) 16))
+  (shO : array2 et_acc (l2_row_major (SZ.v nw * 16) (SZ.v d)))
+  (shgl : array1 et_acc (l1_forward 16))
+  (escale : chest2 et_acc (SZ.v nw) 16)
+  (eO : chest2 et_acc (SZ.v nw * 16) (SZ.v d))
+  (egl : chest1 et_acc 16)
+  (tid : natlt (block_threads nw))
+  : Lemma
+      ((barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl
+          escale eO egl).rin 0 tid == b0_pre nw d shQ eQsh shO tid /\
+       (barrier_contract nw d shQ eQsh shM shL eM eL shscale shO shgl
+          escale eO egl).rout 0 tid == b0_post nw d shQ eQsh shO tid)
+= ()
+
+#pop-options
+
 (* Ownership of the row-major cells visited by
    [for (idx = tid; idx < rows*cols; idx += nthr)]. *)
 
@@ -214,6 +242,9 @@ fn sdpa_flash_block_prologue
   rewrite each (SZ.v lane) as (thread_lane nw (SZ.v tid));
   fold b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid);
 
+  barrier_stage0_def nw d shQ
+    (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0))
+    shM shL eM eL shscale shO shgl escale eO egl (SZ.v tid);
   rewrite (b0_pre nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shO (SZ.v tid))
        as ((barrier_contract nw d shQ (SF.q_tile 16 (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) shM shL eM eL shscale shO shgl escale eO egl).rin 0 (SZ.v tid));
   B.barrier_wait ();
@@ -706,4 +737,3 @@ fn flash_pin_o
          scale bi kvh group r0)
       tid);
 }
-

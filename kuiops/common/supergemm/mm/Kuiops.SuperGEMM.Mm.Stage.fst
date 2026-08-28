@@ -10,7 +10,7 @@ module Kuiops.SuperGEMM.Mm.Stage
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 module SZ = Kuiper.SizeT
@@ -19,7 +19,7 @@ module ML = FStar.Math.Lemmas
 module CV = Kuiper.Kernel.GEMM.Copy.Vec2
 module FB = Kuiops.GEMM.T.FlipFlopBarrier2
 
-open Kuiper.Array2.Vectorized { row_cells }
+open Kuiops.Array2.Vectorized { row_cells }
 open Kuiper.Bijection
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 20"
@@ -970,12 +970,16 @@ fn rows_to_subtile
   forevery_unflatten'
     (fun (ij : (natlt rows & natlt cols)) ->
        T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e' ij._1 ij._2));
-  rewrite
-    (forall+ (r : natlt rows) (c : natlt cols).
+  forevery_map_2
+    (fun (r : natlt rows) (c : natlt cols) ->
        T.tensor_pts_to_cell m #f (idx2 r c) (acc2 e' r c))
-  as
-    (forall+ (r : natlt rows) (c : natlt cols).
-       (Cell m (idx2 r c) |-> Frac f (acc e' (idx2 r c))));
+    (fun (r : natlt rows) (c : natlt cols) ->
+       Cell m (idx2 r c) |-> Frac f (acc e' (idx2 r c)))
+    fn r c {
+      T.tensor_pts_to_cell_eq m (idx2 r c) f (acc2 e' r c);
+      rewrite T.tensor_pts_to_cell m #f (idx2 r c) (acc2 e' r c)
+           as Cell m (idx2 r c) |-> Frac f (acc e' (idx2 r c));
+    };
   T.tensor_iraise2 m #f #e';
 }
 
@@ -1024,12 +1028,16 @@ fn rows_to_subtile_c
   forevery_unflatten'
     (fun (ij : (natlt rows & natlt cols)) ->
        T.tensor_pts_to_cell m #f (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2));
-  rewrite
-    (forall+ (r : natlt rows) (c : natlt cols).
+  forevery_map_2
+    (fun (r : natlt rows) (c : natlt cols) ->
        T.tensor_pts_to_cell m #f (idx2 r c) (acc2 e r c))
-  as
-    (forall+ (r : natlt rows) (c : natlt cols).
-       (Cell m (idx2 r c) |-> Frac f (acc e (idx2 r c))));
+    (fun (r : natlt rows) (c : natlt cols) ->
+       Cell m (idx2 r c) |-> Frac f (acc e (idx2 r c)))
+    fn r c {
+      T.tensor_pts_to_cell_eq m (idx2 r c) f (acc2 e r c);
+      rewrite T.tensor_pts_to_cell m #f (idx2 r c) (acc2 e r c)
+           as Cell m (idx2 r c) |-> Frac f (acc e (idx2 r c));
+    };
   T.tensor_iraise2 m #f #e;
 }
 
@@ -1218,27 +1226,27 @@ fn finish_stage
   (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
   (f : perm)
   (#e_s : chest2 et rows cols)
-  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (b : Kuiops.PipelineCopy.pipeline_batch_t)
   (sqg : squash (is_global m_s))
   requires
     (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
        exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }).
-         pledge0 (Kuiper.PipelineCopy.batch_done b)
+         pledge0 (Kuiops.PipelineCopy.batch_done b)
            (stage_rc m_d nthr tid sq 1.0R s v ** stage_rc m_s nthr tid sq f s v))
     ** src_residual m_s nthr tid f e_s
-  ensures pledge0 (Kuiper.PipelineCopy.batch_done b)
+  ensures pledge0 (Kuiops.PipelineCopy.batch_done b)
             (FB.live_strided_chunks m_d nthr tid ** (exists* e. m_s |-> Frac f e))
 {
   let vf = forevery_exists
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) (v : seq et { Seq.length v == (SZ.v (chunk et)) }) ->
-       pledge0 (Kuiper.PipelineCopy.batch_done b)
+       pledge0 (Kuiops.PipelineCopy.batch_done b)
          (stage_rc m_d nthr tid sq 1.0R s v ** stage_rc m_s nthr tid sq f s v));
 
-  collect_pledges (Kuiper.PipelineCopy.batch_done b) (g_a_iters rows cols (SZ.v (chunk et)) nthr)
+  collect_pledges (Kuiops.PipelineCopy.batch_done b) (g_a_iters rows cols (SZ.v (chunk et)) nthr)
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
        stage_rc m_d nthr tid sq 1.0R s (vf s) ** stage_rc m_s nthr tid sq f s (vf s));
 
-  return_pledge (Kuiper.PipelineCopy.batch_done b) (src_residual m_s nthr tid f e_s)
+  return_pledge (Kuiops.PipelineCopy.batch_done b) (src_residual m_s nthr tid f e_s)
     #(src_residual_send m_s nthr tid f e_s ());
 
   join_pledge
@@ -1288,23 +1296,23 @@ fn finish_stage_c
   (sq : squash (geo_ok rows cols (SZ.v (chunk et)) nthr))
   (f : perm)
   (e_s : chest2 et rows cols)
-  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (b : Kuiops.PipelineCopy.pipeline_batch_t)
   (sqg : squash (is_global m_s))
   requires
     (forall+ (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)).
-       pledge0 (Kuiper.PipelineCopy.batch_done b)
+       pledge0 (Kuiops.PipelineCopy.batch_done b)
          (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
           stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)))
     ** src_residual m_s nthr tid f e_s
-  ensures pledge0 (Kuiper.PipelineCopy.batch_done b)
+  ensures pledge0 (Kuiops.PipelineCopy.batch_done b)
             (FB.own_strided_chunks m_d e_s nthr tid ** (m_s |-> Frac f e_s))
 {
-  collect_pledges (Kuiper.PipelineCopy.batch_done b) (g_a_iters rows cols (SZ.v (chunk et)) nthr)
+  collect_pledges (Kuiops.PipelineCopy.batch_done b) (g_a_iters rows cols (SZ.v (chunk et)) nthr)
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
        stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
        stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s));
 
-  return_pledge (Kuiper.PipelineCopy.batch_done b) (src_residual m_s nthr tid f e_s)
+  return_pledge (Kuiops.PipelineCopy.batch_done b) (src_residual m_s nthr tid f e_s)
     #(src_residual_send m_s nthr tid f e_s ());
 
   join_pledge
@@ -1346,7 +1354,7 @@ fn stage_one
   (f : perm)
   (#e_s : chest2 et rows cols)
   (t_row t_col row_step a_iters : SZ.t)
-  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (b : Kuiops.PipelineCopy.pipeline_batch_t)
   (sqh : squash (
      SZ.v t_row == g_t_row cols (SZ.v (chunk et)) nthr tid /\
      SZ.v t_col == g_t_col cols (SZ.v (chunk et)) nthr tid /\
@@ -1358,9 +1366,9 @@ fn stage_one
      is_global m_s))
   ()
   preserves gpu
-  preserves Kuiper.PipelineCopy.batch_live b
+  preserves Kuiops.PipelineCopy.batch_live b
   requires FB.own_strided_chunks m_d em_d nthr tid ** (m_s |-> Frac f e_s)
-  ensures pledge0 (Kuiper.PipelineCopy.batch_done b)
+  ensures pledge0 (Kuiops.PipelineCopy.batch_done b)
             (FB.own_strided_chunks m_d e_s nthr tid ** (m_s |-> Frac f e_s))
 {
   own_chunks_to_rows m_d em_d nthr tid sq;
@@ -1383,10 +1391,10 @@ fn stage_one
        (exists* (v : seq et { Seq.length v == (SZ.v (chunk et)) }). stage_rc m_d nthr tid sq 1.0R s v) **
        stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s))
     (fun (s : between 0 (SZ.v a_iters)) ->
-       pledge0 (Kuiper.PipelineCopy.batch_done b)
+       pledge0 (Kuiops.PipelineCopy.batch_done b)
          (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
           stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)))
-    (gpu ** Kuiper.PipelineCopy.batch_live b)
+    (gpu ** Kuiops.PipelineCopy.batch_live b)
     fn x {
        lemma_ff rows cols (SZ.v (chunk et)) nthr tid (SZ.v x) 0;
        lemma_tcol_bound cols (SZ.v (chunk et)) nthr tid;
@@ -1404,7 +1412,7 @@ fn stage_one
 
   forevery_rw_type (between 0 (SZ.v a_iters)) (natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr))
     (fun (s : natlt (g_a_iters rows cols (SZ.v (chunk et)) nthr)) ->
-       pledge0 (Kuiper.PipelineCopy.batch_done b)
+       pledge0 (Kuiops.PipelineCopy.batch_done b)
          (stage_rc m_d nthr tid sq 1.0R s (esrc_cells nthr tid sq e_s s) **
           stage_rc m_s nthr tid sq f s (esrc_cells nthr tid sq e_s s)));
 
@@ -1445,7 +1453,7 @@ fn stage_tiles
   (#emBd : chest2 et bn bk) (fB : perm) (#eBs : chest2 et bn bk)
   (a_t_row a_t_col a_row_step a_iters : SZ.t)
   (b_t_row b_t_col b_row_step b_iters : SZ.t)
-  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (b : Kuiops.PipelineCopy.pipeline_batch_t)
   (sqh : squash (
      SZ.v a_t_row == g_t_row bk (SZ.v (chunk et)) nthr tid /\
      SZ.v a_t_col == g_t_col bk (SZ.v (chunk et)) nthr tid /\
@@ -1466,19 +1474,19 @@ fn stage_tiles
   preserves gpu
   requires FB.own_strided_chunks mAd emAd nthr tid ** (mAs |-> Frac fA eAs) **
            FB.own_strided_chunks mBd emBd nthr tid ** (mBs |-> Frac fB eBs) **
-           Kuiper.PipelineCopy.batch_live b
-  returns b' : Kuiper.PipelineCopy.pipeline_batch_t
+           Kuiops.PipelineCopy.batch_live b
+  returns b' : Kuiops.PipelineCopy.pipeline_batch_t
   ensures
-    pledge0 (Kuiper.PipelineCopy.batch_done b)
+    pledge0 (Kuiops.PipelineCopy.batch_done b)
       (FB.own_strided_chunks mAd eAs nthr tid ** FB.own_strided_chunks mBd eBs nthr tid **
        (mAs |-> Frac fA eAs) ** (mBs |-> Frac fB eBs)) **
-    Kuiper.PipelineCopy.batch_committed b **
-    Kuiper.PipelineCopy.batch_live b' **
+    Kuiops.PipelineCopy.batch_committed b **
+    Kuiops.PipelineCopy.batch_live b' **
     pure (fst b' == fst b /\ snd b' > snd b)
 {
   stage_one mAd mAs nthr tid sqA fA a_t_row a_t_col a_row_step a_iters b () ();
   stage_one mBd mBs nthr tid sqB fB b_t_row b_t_col b_row_step b_iters b () ();
-  let b' = Kuiper.PipelineCopy.pipeline_commit #b;
+  let b' = Kuiops.PipelineCopy.pipeline_commit #b;
   join_pledge
     (FB.own_strided_chunks mAd eAs nthr tid ** (mAs |-> Frac fA eAs))
     (FB.own_strided_chunks mBd eBs nthr tid ** (mBs |-> Frac fB eBs));

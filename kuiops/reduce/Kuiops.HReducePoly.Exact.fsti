@@ -41,13 +41,13 @@ type reduce_ty (et_i et et_o : Type0) {| sized et |} =
      (s : stream_t)
      (#va : chest (snoc_shape d cols) et_i)
      (#vout : chest d et_o)
-     (#e : epoch_t)
+     (#e : Kuiops.Epoch.epoch_t)
   requires
-    cpu ** stream_live s ** epoch_live s e **
+    cpu ** stream_live s ** Kuiops.Epoch.epoch_live s e **
     on gpu_loc (a |-> va) ** on gpu_loc (out |-> vout)
   ensures
-    cpu ** stream_live s ** epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    cpu ** stream_live s ** Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc (
         (a |-> va) **
         (out |-> mk d (fun i -> reduced f pre_map post_map va i))))

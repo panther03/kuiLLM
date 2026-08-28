@@ -1,9 +1,10 @@
+include kuiper.mk
+
 OBJ := .kuipy_cache/checked
 PRE := .kuipy_cache/pre
 CU  := .kuipy_cache/cu
-KUIPER_INST ?= $(CURDIR)/inst
-PLUGIN := $(KUIPER_INST)/kuiper_extr/kuiper_extr
-FIXUP := $(KUIPER_INST)/fixup.sed
+PLUGIN := $(KUIPER_PLUGIN)
+FIXUP := $(FIXUP_SED)
 
 # Keep intermediates (pre/*.cu, *.krml) around, and stay clear of make's
 # builtin rules, which would happily try to build .cu files from nothing.
@@ -12,7 +13,7 @@ FIXUP := $(KUIPER_INST)/fixup.sed
 .SUFFIXES:
 MAKEFLAGS += --no-builtin-rules
 
-ROOTS := $(shell find kuiops/ -name '*.fst' -o -name '*.fsti')
+ROOTS := $(shell find kuiops/ -type f \( -name '*.fst' -o -name '*.fsti' \) | sort)
 CHECKED_FILES := $(foreach f, $(ROOTS), $(OBJ)/$(notdir $(f)).checked)
 
 # Recover a module name from the underscored form F*/karamel use for filenames.
@@ -26,10 +27,11 @@ define msg =
 @printf "  %-8s  %s\n" $(1) $(if $(2),$(2),$(shell realpath --relative-to=. $<))
 endef
 
+.PHONY: mkobj verify-kuiops
 mkobj:
 	@mkdir -p $(OBJ) $(PRE) $(CU)
 
-.depend: $(ROOTS) | mkobj
+.depend: $(ROOTS) $(KUIPER_MARKER) | mkobj
 	$(call msg,"DEPEND",$@)
 	@$(CURDIR)/fstar.sh --codegen krml --already_cached '*,-Kuiops' --dep full $(ROOTS) -o $@
 
@@ -55,7 +57,7 @@ verify-kuiops: .depend $(CHECKED_FILES)
 # live in F*'s --odir ($(OBJ)).
 
 # Turning something like .kuipy_cache/checked/Kuiops_Mm.krml into Kuiops.Mm
-$(OBJ)/%.krml: | mkobj
+$(OBJ)/%.krml: | mkobj $(KUIPER_PLUGIN).cmxs
 	@$(call msg,"EXTRACT")
 	@$(CURDIR)/fstar.sh --already_cached '*,-Kuiops' --codegen krml \
 	  --load_cmxs $(PLUGIN) --extract "-*,+Kuiops,+Kuiper" -o $@ $<
@@ -67,9 +69,14 @@ $(PRE)/%.cu $(PRE)/%.h &: $(OBJ)/%.krml | mkobj
 
 # Postprocess via sed and generate the actual target.
 # Do NOT use a wildcard without an extension or this can match object files.
-$(CU)/%.cu: $(PRE)/%.cu $(FIXUP) | mkobj
+$(CU)/%.cu: $(PRE)/%.cu $(FIXUP) $(CLANG_FORMAT) .clang-format | mkobj
 	@$(call msg,"FIXUP")
-	@sed -f $(FIXUP) $< | indent -linux -i4 -nut > $@
-$(CU)/%.h: $(PRE)/%.h $(FIXUP) | mkobj
+	@sed -f $(FIXUP) $< | \
+		$(CLANG_FORMAT) $(CLANG_FORMAT_FLAGS) --assume-filename=$@ > $@
+$(CU)/%.h: $(PRE)/%.h $(FIXUP) $(CLANG_FORMAT) .clang-format | mkobj
 	@$(call msg,"FIXUP")
-	@sed -f $(FIXUP) $< | indent -linux -i4 -nut > $@
+	@sed -f $(FIXUP) $< | \
+		$(CLANG_FORMAT) $(CLANG_FORMAT_FLAGS) --assume-filename=$@ > $@
+
+$(KUIPER_MARKER) $(KUIPER_PLUGIN).cmxs $(CLANG_FORMAT):
+	@$(MAKE) prepare

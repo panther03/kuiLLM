@@ -22,7 +22,7 @@ open Kuiper
 
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_join }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile_idx_rows, block_tile_idx_cols, warp_tile_idx_rows, warp_tile_idx_cols }
@@ -105,7 +105,7 @@ fn gather_pipe_buffer_live
 (* ------------------------------------------------------------------ *)
 (* Split the skewed epilogue scratch into per-warp / per-lane shares.  *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn gather_scratch_from_threads
   (#et_ab #et_acc : Type0)
@@ -187,7 +187,7 @@ fn gather_scratch_from_threads
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 (* Resolve the parity of the last-used k-tile [it0] and gather the four
    pipeline buffers back to full ownership.  Factored into its own [fn] with an
    explicit postcondition so the two-way parity [if] does not force Pulse to
@@ -290,7 +290,7 @@ fn gather_last_pipe_buffers
 (* The shared-memory half of [Mm.Shared.block_teardown]: gather the per-thread
    final shared state back to whole-allocation ownership.  No global-side
    pre/post, hence usable by any epilogue. *)
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn shared_gather
   (#et_ab #et_acc : Type0)
@@ -346,7 +346,7 @@ fn shared_gather
 
 (* TODO(upstream): copied verbatim from [Kuiops.SuperGEMM.Mm.Shared] (private
    there). *)
-#push-options "--split_queries always"
+#push-options ""
 let output_lane_approximates_sendable'
   (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
   (#m #n : szp)
@@ -468,13 +468,13 @@ let shmem_inv_components
       is_block_array (sar_scratch bm bn bk wm wn skew sh))
 =
   assert (c_shmem_inv (fst sh));
-  assert (c_shmems_inv (snd sh));
+  assert (c_shmems_block_inv (snd sh));
   assert (c_shmem_inv (fst (snd sh)));
-  assert (c_shmems_inv (snd (snd sh)));
+  assert (c_shmems_block_inv (snd (snd sh)));
   assert (c_shmem_inv (fst (snd (snd sh))));
-  assert (c_shmems_inv (snd (snd (snd sh))));
+  assert (c_shmems_block_inv (snd (snd (snd sh))));
   assert (c_shmem_inv (fst (snd (snd (snd sh)))));
-  assert (c_shmems_inv (snd (snd (snd (snd sh)))));
+  assert (c_shmems_block_inv (snd (snd (snd (snd sh)))));
   assert (c_shmem_inv (fst (snd (snd (snd (snd sh))))));
   ()
 

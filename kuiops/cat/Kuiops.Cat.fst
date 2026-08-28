@@ -35,18 +35,18 @@ fn cat_async
   (eB : chest dB et)
   (s : stream_t)
   (#fA #fB : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (gA |-> Frac fA eA) ** on gpu_loc (gB |-> Frac fB eB) **
            on gpu_loc (live gOut)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gOut |-> cat_chest dim dA dB dout eA eB (SZ.v na) pf_sz pfA pfB)))
 {
   with eOut. assert on gpu_loc (gOut |-> eOut);
-  launch (cat_kd dA dB dout cdA cdB cdout dim dimsz na pf_sz pfA pfB
+  Kuiops.Kernel.launch (cat_kd dA dB dout cdA cdB cdout dim dimsz na pf_sz pfA pfB
             gA gB gOut n eA eB #eOut #fA #fB) s;
 }

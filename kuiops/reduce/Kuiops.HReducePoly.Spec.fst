@@ -460,7 +460,7 @@ fn mk_barrier_pre
         (array1_pts_to_slice_red p r tid (min (tid + pow2 it) nth)));
     forevery_ext
       (fun (i:natlt nth) ->
-        if_ (op_Equality #(natlt nth) i (tid - pow2 it))
+        if_ (bool_eq #(natlt nth) i (tid - pow2 it))
           (if_ (not (div_pow2 (it + 1) tid) && (div_pow2 it tid))
             (array1_pts_to_slice_red p r tid (min (tid + pow2 it) nth))))
       (fun (i:natlt nth) -> barrier_matrix p nth r it tid i);
@@ -515,11 +515,11 @@ fn iteration
   if (nextid <^ nth) {
     forevery_ext
       (fun (from: natlt nth) ->
-        if_ (op_Equality #int from (tid + pow2 it))
+        if_ (bool_eq #int from (tid + pow2 it))
           (if_ (not (div_pow2 (it + 1) from) && div_pow2 it from)
             (array1_pts_to_slice_red p r from (min (from + pow2 it) nth))))
       (fun (from: natlt nth) ->
-        if_ (op_Equality #(natlt nth) from (tid + pow2 it))
+        if_ (bool_eq #(natlt nth) from (tid + pow2 it))
           (if_ (not (div_pow2 (it + 1) from) && (div_pow2 it from))
             (array1_pts_to_slice_red p r from (min (from + pow2 it) nth))));
     forevery_if_elim #(natlt nth)
@@ -573,7 +573,7 @@ fn iteration
   } else {
     forevery_map
       (fun (from: natlt nth) ->
-        if_ (op_Equality #int from (tid + pow2 it))
+        if_ (bool_eq #int from (tid + pow2 it))
           (if_ (not (div_pow2 (it + 1) from) && div_pow2 it from)
             (array1_pts_to_slice_red p r from (min (from + pow2 it) nth))))
       (fun from -> emp)

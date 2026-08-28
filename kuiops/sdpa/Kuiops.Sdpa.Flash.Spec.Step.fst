@@ -159,6 +159,16 @@ let local_pred
   (row_active causal : bool) (sk cbound k0 bn : nat) : SO.pred bn
   = fun i -> SF.key_ok row_active causal sk cbound (k0 + i)
 
+let local_tile_pred_eq
+  (row_active causal : bool) (sk : pos) (cbound k0 : nat)
+  (u : natlt 16)
+  : Lemma
+      (requires k0 + u < sk)
+      (ensures
+        local_pred row_active causal sk cbound k0 16 u ==
+        tile_pred row_active causal sk cbound k0 16 (k0 + u))
+= ()
+
 (* The real scores of the tile, with the out-of-range slots of the last tile
    filled by an arbitrary value that the predicate never selects. *)
 let local_real
@@ -248,7 +258,36 @@ let step_ok
          (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j))) /\
     (forall (j : natlt sk). p j ==> j < k0)
 
-#push-options "--z3rlimit 30 --fuel 0 --ifuel 1"
+let step_ok_intro
+  (#et_ab #et_acc : Type0)
+  {| floating et_acc |} {| real_like et_acc |}
+  {| scalar et_ab |} {| real_like et_ab |}
+  {| c_ab_acc : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#_ : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (k0 cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d)
+  (rQ : chest2 real 16 d) (rK : chest2 real sk d)
+  (rbias : chest1 real sk) (rscale : real)
+  (i : natlt 16) (p : SO.pred sk)
+  (#_ : squash (k0 <= sk))
+  (#_ : squash (eQ %~ rQ))
+  (#_ : squash (eKg %~ rK))
+  (#_ : squash (scale %~ rscale))
+  (#_ : squash (forall (j : natlt sk).
+    SF.mask_bias emask has_mask bi qh qpos j %~ acc1 rbias j))
+  (#_ : squash (scores_finite row_active causal sk cbound k0
+    (SF.tile_scores emask has_mask row_active causal bi qh qpos
+      k0 cbound scale (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j)))))
+  (#_ : squash (forall (j : natlt sk). p j ==> j < k0))
+  : Lemma (step_ok #et_ab #et_acc #_ #_ #_ #_ #c_ab_acc
+      emask has_mask row_active causal bi qh qpos k0 cbound scale
+      eQ eKg rQ rK rbias rscale i p)
+= ()
+
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 (* One lane absorbs one key tile: the running maximum and denominator move from
    the key set [p] to [p] together with the tile's admitted keys. *)
@@ -291,7 +330,7 @@ let ml_step_tile
     introduce forall (u : natlt 16). q u ==>
                 (acc1 es' u %~ xt u /\ k0 + u < sk /\ xt u == x (k0 + u))
     with introduce _ ==> _
-    with _. masked_score_approx emask has_mask row_active causal bi qh qpos
+    with masked_score_approx emask has_mask row_active causal bi qh qpos
               k0 cbound scale eQ eKg rQ rK rbias rscale i u;
     introduce forall (u : natlt 16). not_nan (acc1 es' u)
     with (if SF.key_ok row_active causal sk cbound (k0 + u)
@@ -300,13 +339,17 @@ let ml_step_tile
     assert (SO.disjoint p t);
     assert (forall (j : natlt sk). SO.por p t j == (p j || t j));
     assert (forall (j : natlt sk). t j ==> (k0 <= j /\ j < k0 + 16));
-    assert (forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u));
+    introduce forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u)
+    with introduce _ ==> _
+    with local_tile_pred_eq row_active causal sk cbound k0 u;
     assert (forall (u : natlt 16). k0 + u >= sk ==> ~(q u));
     assert (forall (u : natlt 16). q u ==> (k0 + u < sk /\ xt u == x (k0 + u)));
     assert (forall (u : natlt 16). ~(q u) ==> acc1 es' u == neg infinity);
     assert (forall (u : natlt 16). q u ==>
               (Finite? (kind (acc1 es' u)) /\ acc1 es' u %~ xt u));
     assert (not_nan vm);
+    SB.step_pre_intro x p t (SO.por p t) q xt k0 es' vm vl m' l' cw'
+      #() #() #() #() #() #() #() #() #() #() #() #() #() #();
     SB.ml_step x p t (SO.por p t) q xt k0 es' vm vl m' l' cw'
 
 #pop-options
@@ -384,6 +427,42 @@ let all_finite
       scores_finite row_active causal sk cbound k0
         (SF.tile_scores emask has_mask row_active causal bi qh qpos
            k0 cbound scale (tile_score_row #et_ab #et_acc eQ eKg k0 i))
+
+(* Keep these two definitional conversions out of the much larger loop proof.
+   Asking SMT to unfold them in that context makes proof search needlessly
+   sensitive to the exact packaged Kuiper environment. *)
+let tile_score_row_unfold
+  (#et_ab #et_acc : Type0) {| scalar et_ab |} {| scalar et_acc |}
+  (#sk : pos) (#d : pos) (#_ : squash (16 /?+ d))
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (k0 : nat)
+  (i : natlt 16)
+  : Lemma (tile_score_row #et_ab #et_acc eQ eKg k0 i ==
+      mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j))
+= ()
+
+let all_finite_at
+  (#et_ab #et_acc : Type0)
+  {| f_acc : floating et_acc |} {| r_acc : real_like et_acc |}
+  {| s_ab : scalar et_ab |} {| r_ab : real_like et_ab |}
+  {| c_ab_acc : FC.float_cast et_ab et_acc |}
+  (#b #hq #sq : nat) (#sk : pos) (#d : pos) (#_ : squash (16 /?+ d))
+  (emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
+  (has_mask row_active causal : bool)
+  (bi : natlt b) (qh : natlt hq) (qpos : natlt sq)
+  (cbound : nat) (scale : et_acc)
+  (eQ : chest2 et_ab 16 d) (eKg : chest2 et_ab sk d) (i : natlt 16)
+  (k0 : nat)
+  : Lemma
+      (requires
+        k0 <= sk /\
+        all_finite emask has_mask row_active causal bi qh qpos cbound scale
+          eQ eKg i)
+      (ensures
+        scores_finite row_active causal sk cbound k0
+          (SF.tile_scores #et_acc #et_ab #f_acc #r_acc #s_ab #r_ab #c_ab_acc
+            emask has_mask row_active causal bi qh qpos k0 cbound scale
+            (mk1 (fun j -> raw_score #et_ab #et_acc eQ eKg k0 i j))))
+= tile_score_row_unfold #et_ab #et_acc eQ eKg k0 i
 
 (* The additive bias one lane sees, as a real.  With no mask it is exactly
    [0.0R], matching the spec: the kernel biases by the float [zero], and
@@ -473,9 +552,13 @@ let ml_step_loop
     lane_bias_ok emask has_mask bi qh qpos;
     introduce forall (j : natlt sk). p j ==> j < k0
     with introduce _ ==> _
-    with _. absorbed_lt row_active causal sk cbound nw w vjt j;
-    assert (step_ok emask has_mask row_active causal bi qh qpos k0 cbound scale
-      eQ eKg (to_real_chest eQ) (to_real_chest eKg) rbias (to_real scale) i p);
+    with absorbed_lt row_active causal sk cbound nw w vjt j;
+    all_finite_at emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i k0;
+    step_ok_intro emask has_mask row_active causal bi qh qpos k0 cbound scale
+      eQ eKg (to_real_chest eQ) (to_real_chest eKg) rbias (to_real scale) i p
+      #() #() #() #() #() #() #();
+    tile_score_row_unfold #et_ab #et_acc eQ eKg k0 i;
     ml_step_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
       eQ eKg (to_real_chest eQ) (to_real_chest eKg) rbias (to_real scale)
       i p es' ep' vm vl m' l' cw';
@@ -625,7 +708,7 @@ let ml_step_loop_fa
       ==> loop_state #et_ab #et_acc #_f #_r #_s #_rb
             #b #hq #sq #sk #d emask has_mask row_active causal
             bi qh qpos cbound scale eQ eKg i nw w (vjt + nw) m' l'
-    with _.
+    with
       ml_step_loop #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
         #b #hq #sq #sk #d #sq16
         emask has_mask row_active causal bi qh qpos cbound
@@ -672,7 +755,7 @@ let lane_step
            ==> loop_state #et_ab #et_acc #_f #_r #_s #_rb
                  #b #hq #sq #sk #d emask has_mask row_active causal
                  bi qh qpos cbound scale eQ eKg i nw w (vjt + nw) m' l'
-         with _.
+         with
            ml_step_loop_fa #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
              #b #hq #sq #sk #d #sq16
              emask has_mask row_active causal bi qh qpos cbound
@@ -1436,7 +1519,7 @@ let warp_tile_succ (nw : pos) (w t : nat)
   : Lemma (warp_tile nw w t + nw == warp_tile nw w (t + 1))
   = FStar.Math.Lemmas.distributivity_add_left t 1 nw
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 let rec run_ml_state
   (#et_ab #et_acc : Type0)
@@ -1623,7 +1706,7 @@ let warp_iters_bounds (nw : pos) (nkt w : nat)
       FStar.Math.Lemmas.distributivity_sub_left t 1 nw;
       introduce forall (u : nat). u < t ==> w + u * nw < nkt
       with introduce _ ==> _
-      with _. FStar.Math.Lemmas.lemma_mult_le_right nw u (t - 1)
+      with FStar.Math.Lemmas.lemma_mult_le_right nw u (t - 1)
     end
 
 (* ------------------------------------------------------------------ *)
@@ -1675,7 +1758,7 @@ let warp_ml_state
     key_tiles_last sq sk rows r0 causal;
     introduce forall (u : nat). u < t ==> (w + u * nw) * 16 <= sk
     with introduce _ ==> _
-    with _. FStar.Math.Lemmas.lemma_mult_le_right 16 (w + u * nw) (nkt - 1);
+    with FStar.Math.Lemmas.lemma_mult_le_right 16 (w + u * nw) (nkt - 1);
     run_ml_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
       #b #hq #sq #sk #d #sq16
       emask has_mask row_active causal bi qh qpos cbound scale
@@ -1704,7 +1787,7 @@ let warp_ml_state
 (* The block's published (m, l) vectors as real online-softmax states.  *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 let block_ml_state
   (#et_ab #et_acc : Type0)
@@ -2051,19 +2134,28 @@ let pv_cell_ok
       prob_real rQ rK rbias rscale row_active causal cbound k0 i mr' in
     let rP = prob_chest eP i rho in
     let rVt = SF.kv_tile 16 rV k0 in
+    let f : natlt 16 -> GTot real =
+      fun k -> acc2 rP i k *. acc2 rVt k c in
+    let local_sum = SO.sum_where f SO.ptrue in
+    let masked_sum = SO.sum_where f q in
     introduce forall (u : natlt 16). acc2 eP i u %~ rho u
     with prob_row_approx emask has_mask row_active causal bi qh qpos k0 cbound
            scale eQ eKg rQ rK rbias rscale i p m' mr' u;
     prob_chest_approx eP i rho;
     kv_tile_approx 16 eVg rV k0;
     pv_cell_approx #et_ab #et_acc eP (SF.kv_tile 16 eVg k0) rP rVt i c;
+    assert (acc2 (SF.pv_chunk #et_ab #et_acc eP (SF.kv_tile 16 eVg k0)
+                    (SF.clamp_nat (d / 16) (c / 16))) i (c % 16)
+            %~ local_sum);
     acc2_mk2 (fun (r : natlt 16) (k : natlt 16) ->
                 if r = i then rho k else to_real (acc2 eP r k));
     acc2_mk2 (fun (r : natlt 16) (cc : natlt d) ->
                 acc2 rV (SF.clamp_nat sk (k0 + r)) cc);
-    SO.sum_where_drop #16 (fun (k : natlt 16) -> acc2 rP i k *. acc2 rVt k c) q;
+    SO.sum_where_drop #16 f q;
+    assert (local_sum == masked_sum);
     SO.sum_where_tile #sk (fun (j : natlt sk) -> exp (x j -. mr') *. y j) t
-      #16 (fun (k : natlt 16) -> acc2 rP i k *. acc2 rVt k c) q k0
+      #16 f q k0;
+    assert (SO.tsum_n x y t mr' == masked_sum)
 
 #pop-options
 
@@ -2130,11 +2222,11 @@ let mlo_step_tile
     introduce forall (u : natlt 16). q u ==>
                 (acc1 es' u %~ xt u /\ k0 + u < sk /\ xt u == x (k0 + u))
     with introduce _ ==> _
-    with _. masked_score_approx emask has_mask row_active causal bi qh qpos
+    with masked_score_approx emask has_mask row_active causal bi qh qpos
               k0 cbound scale eQ eKg rQ rK rbias rscale i u;
     introduce forall (mr' : real). m' %~ mr' ==> pv %~ SO.tsum_n x y t mr'
     with introduce _ ==> _
-    with _. pv_cell_ok emask has_mask row_active causal bi qh qpos k0 cbound
+    with pv_cell_ok emask has_mask row_active causal bi qh qpos k0 cbound
               scale eQ eKg eVg rQ rK rV rbias rscale i p eP m' mr' c;
     introduce forall (u : natlt 16). not_nan (acc1 es' u)
     with (if SF.key_ok row_active causal sk cbound (k0 + u)
@@ -2143,13 +2235,18 @@ let mlo_step_tile
     assert (SO.disjoint p t);
     assert (forall (j : natlt sk). SO.por p t j == (p j || t j));
     assert (forall (j : natlt sk). t j ==> (k0 <= j /\ j < k0 + 16));
-    assert (forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u));
+    introduce forall (u : natlt 16). k0 + u < sk ==> q u == t (k0 + u)
+    with introduce _ ==> _
+    with local_tile_pred_eq row_active causal sk cbound k0 u;
     assert (forall (u : natlt 16). k0 + u >= sk ==> ~(q u));
     assert (forall (u : natlt 16). q u ==> (k0 + u < sk /\ xt u == x (k0 + u)));
     assert (forall (u : natlt 16). ~(q u) ==> acc1 es' u == neg infinity);
     assert (forall (u : natlt 16). q u ==>
               (Finite? (kind (acc1 es' u)) /\ acc1 es' u %~ xt u));
     assert (not_nan vm);
+    SB.step_pre_intro #et_acc #_f #_r #sk #16
+      x p t (SO.por p t) q xt k0 es' vm vl m' l' cw'
+      #() #() #() #() #() #() #() #() #() #() #() #() #() #();
     SB.mlo_step x y p t (SO.por p t) q xt k0 es' vm vl m' l' cw' vo pv o'
 
 #pop-options
@@ -2217,7 +2314,7 @@ let oloop_state
       (lane_val eVg c)
       (absorbed_pred row_active causal sk cbound nw w vjt) vm vl vo
 
-#push-options "--z3rlimit 120 --fuel 1 --ifuel 2 --split_queries always"
+#push-options "--z3rlimit 120 --fuel 1 --ifuel 2"
 
 (* One iteration of the loop preserves [oloop_state]. *)
 let mlo_step_loop
@@ -2262,11 +2359,15 @@ let mlo_step_loop
     lane_bias_ok emask has_mask bi qh qpos;
     introduce forall (j : natlt sk). p j ==> j < k0
     with introduce _ ==> _
-    with _. absorbed_lt row_active causal sk cbound nw w vjt j;
-    assert (step_ok emask has_mask row_active causal bi qh qpos k0 cbound scale
-      eQ eKg (to_real_chest eQ) (to_real_chest eKg) rbias (to_real scale) i p);
+    with absorbed_lt row_active causal sk cbound nw w vjt j;
+    all_finite_at emask has_mask row_active causal bi qh qpos cbound scale
+      eQ eKg i k0;
+    step_ok_intro emask has_mask row_active causal bi qh qpos k0 cbound scale
+      eQ eKg (to_real_chest eQ) (to_real_chest eKg) rbias (to_real scale) i p
+      #() #() #() #() #() #() #();
     assert (forall (j : natlt sk).
               acc2 (to_real_chest eVg) j c == lane_val eVg c j);
+    tile_score_row_unfold #et_ab #et_acc eQ eKg k0 i;
     mlo_step_tile emask has_mask row_active causal bi qh qpos k0 cbound scale
       eQ eKg eVg (to_real_chest eQ) (to_real_chest eKg) (to_real_chest eVg)
       rbias (to_real scale) i c p eP es' ep' vm vl vo m' l' cw' pv o';
@@ -2375,7 +2476,7 @@ let cw_vec_acc
 
 #pop-options
 
-#push-options "--z3rlimit 100 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 100 --fuel 0 --ifuel 1"
 
 (* One column of one lane's output accumulator tracks the real numerator. *)
 let rec run_O_state
@@ -2562,7 +2663,7 @@ let block_O_state
     key_tiles_last sq sk rows r0 causal;
     introduce forall (u : nat). u < t ==> (w + u * nw) * 16 <= sk
     with introduce _ ==> _
-    with _. FStar.Math.Lemmas.lemma_mult_le_right 16 (w + u * nw) (nkt - 1);
+    with FStar.Math.Lemmas.lemma_mult_le_right 16 (w + u * nw) (nkt - 1);
     run_O_state #et_ab #et_acc #_f #_r #_fr #_s #_rb #_c1 #_c2
       #b #hq #sq #sk #d #sq16
       emask has_mask row_active causal bi qh qpos kvh group rows r0 cbound
@@ -2662,7 +2763,7 @@ let warp_keys_cover
 (* The block's published state, warp by warp and then combined.        *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 (* [block_O_state] restated against the published [(m, l)] vectors. *)
 let block_mlo_state
@@ -2731,7 +2832,7 @@ let block_mlo_state
 let row_keys (row_active causal : bool) (sk : pos) (cbound : nat) : SO.pred sk
   = fun j -> SF.key_ok row_active causal sk cbound j
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 (* What the block holds for row [i], column [c] once warp 0 has folded every
    warp's partial state into the block-wide maximum, denominator and output:
@@ -2824,7 +2925,7 @@ let block_gstate
     introduce forall (w1 w2 : natlt nw). ~(w1 == w2) ==>
       SO.disjoint (pw w1) (pw w2)
     with introduce _ ==> _
-    with _. warp_keys_disjoint row_active causal sk cbound nw w1 w2;
+    with warp_keys_disjoint row_active causal sk cbound nw w1 w2;
     introduce forall (j : natlt sk).
       row_keys row_active causal sk cbound j == SB.punion pw nw j
     with warp_keys_cover row_active causal sk cbound nw j;
@@ -2840,7 +2941,7 @@ let block_gstate
 (* The epilogue: the stored cell as a real softmax-weighted average.    *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 let block_out_cell
   (#et_ab #et_acc : Type0)
@@ -3029,7 +3130,7 @@ let row_keys_page
                      == FSpec.row_keys causal sq sk qpos j)
   = ()
 
-#push-options "--z3rlimit 60 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 60 --fuel 0 --ifuel 1"
 
 (* The block's stored cell is the spec's attention output for the page row. *)
 let page_out_cell

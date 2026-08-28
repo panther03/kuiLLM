@@ -12,7 +12,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.Bijection
@@ -20,13 +20,18 @@ open Kuiper.EMatrix
 open Kuiper.ForEvery
 open Kuiper.Shape
 open Pulse.Lib.Pledge
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
 module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
+module SF = Kuiops.Sdpa.Flash.Spec.Float
 module Trade = Pulse.Lib.Trade
+
+let natlt1_singleton () : Lemma (forall (x : natlt 1). (0 <: natlt 1) == x)
+= introduce forall (x : natlt 1). (0 <: natlt 1) == x with ()
 
 
 ghost
@@ -266,33 +271,33 @@ ghost
 fn flash_warp_split_stride
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
   (a : array2 et l)
-  (#_ : squash (SZ.v warp_size / 16 /? rows))
+  (#_ : squash (warp_row_span /? rows))
   (#_ : squash (16 /? cols))
   requires live a
   ensures
     forall+ (lane : natlt BW.warp_size).
-      exists* (r : chest2 et (rows / (SZ.v warp_size / 16)) (cols / 16)).
-        array2_stride_subtile a (SZ.v warp_size / 16) 16
+      exists* (r : chest2 et (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16
           (lane / 16) (lane % 16) |-> Frac 1.0R r
 {
   unfold live a;
   with e. assert (a |-> e);
-  array2_stride_tile a (SZ.v warp_size / 16) 16;
-  forevery_unfactor' BW.warp_size (SZ.v warp_size / 16) 16
-    (fun (tr : natlt (SZ.v warp_size / 16)) (tc : natlt 16) ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16 tr tc
+  array2_stride_tile a warp_row_span 16;
+  forevery_unfactor' BW.warp_size warp_row_span 16
+    (fun (tr : natlt warp_row_span) (tc : natlt 16) ->
+      array2_stride_subtile a warp_row_span 16 tr tc
         |-> Frac 1.0R
-          (ematrix_stride_subtile e (SZ.v warp_size / 16) 16 tr tc));
+          (ematrix_stride_subtile e warp_row_span 16 tr tc));
   forevery_map #(natlt BW.warp_size)
     (fun lane ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16
+      array2_stride_subtile a warp_row_span 16
         (lane / 16) (lane % 16) |-> Frac 1.0R
-          (ematrix_stride_subtile e (SZ.v warp_size / 16) 16
+          (ematrix_stride_subtile e warp_row_span 16
             (lane / 16) (lane % 16)))
     (fun lane ->
       exists* (r : chest2 et
-        (rows / (SZ.v warp_size / 16)) (cols / 16)).
-        array2_stride_subtile a (SZ.v warp_size / 16) 16
+        (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16
           (lane / 16) (lane % 16) |-> Frac 1.0R r)
     fn lane { () };
 }
@@ -301,34 +306,34 @@ ghost
 fn flash_warp_gather_stride
   (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
   (a : array2 et l)
-  (#_ : squash (SZ.v warp_size / 16 /? rows))
+  (#_ : squash (warp_row_span /? rows))
   (#_ : squash (16 /? cols))
   requires
     pure (SZ.fits (tlayout_ulen l)) **
     (forall+ (lane : natlt BW.warp_size).
-      exists* (r : chest2 et (rows / (SZ.v warp_size / 16)) (cols / 16)).
-        array2_stride_subtile a (SZ.v warp_size / 16) 16
+      exists* (r : chest2 et (rows / warp_row_span) (cols / 16)).
+        array2_stride_subtile a warp_row_span 16
           (lane / 16) (lane % 16) |-> Frac 1.0R r)
   ensures live a
 {
   let rf = forevery_exists
     (fun (lane : natlt BW.warp_size)
-      (r : chest2 et (rows / (SZ.v warp_size / 16)) (cols / 16)) ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16
+      (r : chest2 et (rows / warp_row_span) (cols / 16)) ->
+      array2_stride_subtile a warp_row_span 16
         (lane / 16) (lane % 16) |-> Frac 1.0R r);
   forevery_ext #(natlt BW.warp_size)
     (fun lane ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16
+      array2_stride_subtile a warp_row_span 16
         (lane / 16) (lane % 16) |-> Frac 1.0R (rf lane))
     (fun lane ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16
+      array2_stride_subtile a warp_row_span 16
         (lane / 16) (lane % 16) |-> Frac 1.0R
           (rf ((lane / 16) * 16 + (lane % 16))));
-  forevery_factor' BW.warp_size (SZ.v warp_size / 16) 16
-    (fun (tr : natlt (SZ.v warp_size / 16)) (tc : natlt 16) ->
-      array2_stride_subtile a (SZ.v warp_size / 16) 16 tr tc
+  forevery_factor' BW.warp_size warp_row_span 16
+    (fun (tr : natlt warp_row_span) (tc : natlt 16) ->
+      array2_stride_subtile a warp_row_span 16 tr tc
         |-> Frac 1.0R (rf (tr * 16 + tc)));
-  array2_stride_untile' a (SZ.v warp_size / 16) 16
+  array2_stride_untile' a warp_row_span 16
     (fun tr tc -> rf (tr * 16 + tc));
   fold live a;
 }
@@ -712,12 +717,14 @@ fn flash_split_combine
   unfold live vscale;
   with escale. assert (vscale |-> escale);
   array2_stride_tile vscale 1 16;
-  forevery_singleton_elim
+  natlt1_singleton ();
+  forevery_singleton_elim'
     (fun (tr : natlt 1) ->
       forall+ (lane : natlt 16).
         array2_stride_subtile vscale 1 16 tr lane
           |-> Frac 1.0R
-            (ematrix_stride_subtile escale 1 16 tr lane));
+            (ematrix_stride_subtile escale 1 16 tr lane))
+    (0 <: natlt 1);
   forevery_map #(natlt 16)
     (fun lane ->
       array2_stride_subtile vscale 1 16 0 lane |-> Frac 1.0R

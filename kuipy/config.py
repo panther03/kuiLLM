@@ -8,15 +8,19 @@ _REPO_ROOT = _HERE.parent
 # --------------------------------------------------------------------------
 # paths
 # --------------------------------------------------------------------------
-KUIPER_INST = Path(os.environ.get("KUIPER_INST", _REPO_ROOT / "inst")).resolve()
+KUIPER_HOME = Path(os.environ.get("KUIPER_HOME", _REPO_ROOT / ".kuiper")).resolve()
 KUIOPS_SRC = Path(_REPO_ROOT / "kuiops").resolve()
 
-FSTAR_EXE = KUIPER_INST / "bin" / "fstar.exe"
-KRML_EXE = KUIPER_INST / "bin" / "krml"
-# F* extraction plugin, without the .cmxs extension (matches verify.mk PLUGIN).
-PLUGIN = KUIPER_INST / "kuiper_extr" / "kuiper_extr"
-KUIPER_INCLUDE = KUIPER_INST / "include" / "kuiper"
-FIXUP_SED = KUIPER_INST / "fixup.sed"
+FSTAR_EXE = KUIPER_HOME / "inst" / "bin" / "fstar.exe"
+KRML_EXE = KUIPER_HOME / "inst" / "bin" / "krml"
+# The package path contains dots, which F* interprets as module separators.
+# `make prepare` provides this dot-free symlink to the packaged plugin.
+PLUGIN = _REPO_ROOT / "build" / "kuiper_extr"
+KUIPER_INCLUDE = KUIPER_HOME / "include"
+FIXUP_SED = KUIPER_HOME / "scripts" / "fixup.sed"
+CLANG_FORMAT = (
+    _REPO_ROOT / ".tools" / "clang-format-19.1.7" / "bin" / "clang-format"
+)
 
 # --------------------------------------------------------------------------
 # JIT cache dirs
@@ -85,6 +89,8 @@ SEED_JOBS = int(os.environ.get("KUIPY_JIT_SEED_JOBS", "0")) or min(
 # --------------------------------------------------------------------------
 FSTAR_FLAGS = [
     "--silent",
+    "--include", str(KUIPER_HOME / "src"),
+    "--include", str(KUIPER_HOME / "obj"),
     "--include", str(KUIOPS_SRC),
     "--cache_dir", str(KUIPY_CHECKED_DIR),
     "--odir", str(KUIPY_CHECKED_DIR),

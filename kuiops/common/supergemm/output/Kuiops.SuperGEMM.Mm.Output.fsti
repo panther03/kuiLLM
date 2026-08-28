@@ -2,7 +2,7 @@ module Kuiops.SuperGEMM.Mm.Output
 
 (* Layout-generic output tiling for the software-pipelined tensor-core GEMM.
 
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc]'s [output_fragment] and
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc]'s [output_fragment] and
    [output_lane_live] hardcode the output operand to row-major
    ([gD : array2 et (rm m n)]).  SuperGEMM requires A, B *and* D to carry a
    [strided_row_major] typeclass witness rather than being pinned to row-major,
@@ -19,11 +19,11 @@ module Kuiops.SuperGEMM.Mm.Output
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_fragment, output_lane_live,
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_fragment, output_lane_live,
                                                      live_lane_cells, own_lane_cells }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 
@@ -68,7 +68,7 @@ let output_lane_live'
    for every [tm x tn] output fragment the lane holds cells [eD] that
    approximate the matching subtile of the real target [rD].  Layout-generic
    version of upstream
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.output_lane_approximates].
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.output_lane_approximates].
 
    Hosted here beside [output_lane_live'] because both [Epilogue] (which commits
    to it in its [ensures]) and [Shared] (which restates the [kf] postcondition)
@@ -95,7 +95,7 @@ let output_lane_approximates'
 
 (* ---- layout-generic live split of the output tile among warp lanes ----
    The generalisation of upstream
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.split_output_to_lanes] to an
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.split_output_to_lanes] to an
    arbitrary [lD : layout2 m n]. *)
 ghost
 fn split_output_to_lanes'
@@ -139,7 +139,7 @@ fn gather_output_live'
    [(bid, tid)], that the thread's lane holds output cells approximating the
    matching doubly-nested subtile of the real target [rD], it gathers the whole
    output array back and certifies [eD %~ rD].  Layout-generic version of
-   upstream [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown.gather_output]
+   upstream [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown.gather_output]
    (which is pinned to row-major [gD : array2 et (rm m n)] and folds in the
    accumulate-into-C combine; SuperGEMM has no C operand, so [rD] is the whole
    post-mapped product). *)

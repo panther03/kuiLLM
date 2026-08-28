@@ -15,7 +15,7 @@ open Pulse.Lib.Pledge
 open Kuiper
 open Kuiper.Tensor
 open Kuiper.EMatrix
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Array2.Strided.Slice
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Float.Casts { float_cast }
@@ -25,10 +25,16 @@ open Kuiper.Tensor.Layout.Alg
 module MS = Kuiper.Spec.GEMM
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
-module KT = Kuiper.Kernel.GEMM.TensorCore2D
-module KTT = Kuiper.Kernel.GEMM.TensorCore2D.To
+module KTT = Kuiops.Kernel.GEMM.TensorCore2D.To
 module KB = Kuiper.Kernel.GEMM.BlockTiling2D
 module RO = Kuiper.TensorRO
+
+(* [SizeT.rem] specifies its result through subtraction; expose the equivalent
+   Euclidean-modulus equation once so runtime divisibility guards can be
+   carried into the natural-number specifications of kernel descriptors. *)
+let sizet_rem_spec (a : SZ.t) (b : SZ.t { SZ.v b <> 0 })
+  : Lemma (SZ.v (a %^ b) == SZ.v a % SZ.v b)
+= FStar.Math.Lemmas.euclidean_division_definition (SZ.v a) (SZ.v b)
 
 (* The batched row-major layout is affine in (page, row, col) with offset 0,
    page stride rows*cols and row stride cols; [l3_batched_row_major_imap] is the
@@ -48,6 +54,18 @@ instance srm3_batched
            l3_batched_row_major_imap batch rows cols
              (SZ.uint_to_t p) (SZ.uint_to_t i) (SZ.uint_to_t j));
 }
+
+(* The instance is opaque at call sites; expose its affine fields so alignment
+   side conditions reduce to the divisibility facts established below. *)
+let lemma_srm3_batched_fields
+  (batch : erased nat { SZ.fits batch })
+  (rows : szp { SZ.fits (batch * rows) })
+  (cols : szp { SZ.fits (rows * cols) /\ SZ.fits (batch * (rows * cols)) })
+  : Lemma
+      ((srm3_batched batch rows cols).offset3 == 0sz /\
+       (srm3_batched batch rows cols).pstride3 == rows *^ cols /\
+       (srm3_batched batch rows cols).rstride3 == cols)
+  = ()
 
 (* Dimension factorization m == (m/bm)*((bm/tm)*tm) required by the batched
    BlockTiling2D index bijection. *)
@@ -88,9 +106,9 @@ fn bt2d_async
   (#eB : chest3 et (SZ.v batch) (SZ.v k) (SZ.v n))
   (#eC : chest3 et (SZ.v batch) (SZ.v m) (SZ.v n))
   (#fA #fB : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure (aligned 16 (core gA)) **
     pure (aligned 16 (core gB)) **
@@ -99,8 +117,8 @@ fn bt2d_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> eC)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gC |-> MS.gbmmcomb (fun (x:et) -> x) (fun (x:et) -> x) comb eC eA eB)))
 {
@@ -128,7 +146,9 @@ fn bt2d_async
   let sq2 : squash (SZ.v n == (SZ.v n/SZ.v bn) * ((SZ.v bn/SZ.v tn) * SZ.v tn)) =
     bt2d_dim_sq n bn tn;
 
-  launch (KB.bmk_kernel (fun (x:et) -> x) (fun (x:et) -> x) comb
+  lemma_srm3_batched_fields (SZ.v batch) m k;
+  lemma_srm3_batched_fields (SZ.v batch) k n;
+  Kuiops.Kernel.launch (KB.bmk_kernel (fun (x:et) -> x) (fun (x:et) -> x) comb
             gA gB gC bm bn bk (l2_col_major _ _) (l2_row_major _ _) tm tn sq1 sq2
             (batch *^ (m/^bm *^ (n/^bn))) (bm/^tm *^ (bn/^tn)) ()) s;
 }
@@ -136,7 +156,7 @@ fn bt2d_async
 
 (* TensorCore2D "to" GEMM: D = comb(C, A@B), with the accumulator type distinct
    from the C/D type. *)
-#push-options "--split_queries always"
+#push-options ""
 inline_for_extraction noextract
 fn tc2d_to_gen_async
   (et_ab et_acc et_cd : Type0)
@@ -170,7 +190,7 @@ fn tc2d_to_gen_async
   (rows shared cols : szp)
   (gA : array2 et_ab (l2_row_major (SZ.v rows) (SZ.v shared)) { is_global gA })
   (gB : array2 et_ab (l2_row_major (SZ.v shared) (SZ.v cols)) { is_global gB })
-  (#lC : RO.vlayout2 (SZ.v rows) (SZ.v cols))
+  (#lC : RO.vlayout2 (SZ.v rows) (SZ.v cols)) {| RO.cvtlayout lC |}
   {| strC : strided_row_major lC |}
   (#_ : squash (aligned_strided_row_major (chunk et_cd) strC))
   (gC : RO.roarray2 et_cd lC { RO.is_global gC })
@@ -185,9 +205,9 @@ fn tc2d_to_gen_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -196,8 +216,8 @@ fn tc2d_to_gen_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -215,6 +235,9 @@ fn tc2d_to_gen_async
   dguard (rows   %^ bm = 0sz);
   dguard (shared %^ bk = 0sz);
   dguard (cols   %^ bn = 0sz);
+  sizet_rem_spec rows bm;
+  sizet_rem_spec shared bk;
+  sizet_rem_spec cols bn;
 
   lemma_divides_chain (wm * tm) bm rows;
   lemma_divides_chain (wn * tn) bn cols;
@@ -240,12 +263,17 @@ fn tc2d_to_gen_async
   lemma_aligned_strided_row_major_l2_row_major
     #(SZ.v shared) #(SZ.v cols) (chunk et_ab);
 
+  let bm_div_rows : squash (SZ.v bm /?+ SZ.v rows) = ();
+  let bn_div_cols : squash (SZ.v bn /?+ SZ.v cols) = ();
+  let bk_div_shared : squash (SZ.v bk /?+ SZ.v shared) = ();
+
   #set-options "--fuel 0 --ifuel 0 --z3refresh" {
-  launch (
+  Kuiops.Kernel.launch (
     KTT.mk_kernel comb comb_r
       gA #eA gB #eB
       gC #_ #eC gD #eC
       bm bn bk tm tn tk wm wn
+      #bm_div_rows #bn_div_cols #bk_div_shared
       // #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_ #_
       // #fA #fB #fC
       nblk nthr
@@ -300,9 +328,9 @@ fn tc2d_to_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -311,8 +339,8 @@ fn tc2d_to_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -370,9 +398,9 @@ fn tc2d_to_bcast_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -381,8 +409,8 @@ fn tc2d_to_bcast_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r

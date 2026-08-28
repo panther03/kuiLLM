@@ -14,6 +14,16 @@ let mtranspose_subtile #et #rows #cols m trows tcols tr tc =
     (mtranspose (ematrix_subtile m trows tcols tr tc))
     (ematrix_subtile (mtranspose m) tcols trows tc tr)
 
+let tiled_index_lt
+  (n : nat)
+  (tile : pos { tile /?+ n })
+  (block : natlt (n / tile))
+  (i : natlt tile)
+  : Lemma (block * tile + i < n)
+= FStar.Math.Lemmas.lemma_div_exact n tile;
+  FStar.Math.Lemmas.lemma_mult_le_right tile (block + 1) (n / tile);
+  FStar.Math.Lemmas.distributivity_add_left block 1 tile
+
 (* Both sides are the (i,j) dot product of row [row*rows+i] of [a] with row
    [col*cols+j] of [b]:
 
@@ -32,6 +42,8 @@ let warp_matmul_is_subtile #m #n #k a b rows cols row col =
   let rhs = ematrix_subtile (MS.matmul a (mtranspose b)) rows cols row col in
   introduce forall (i : natlt rows) (j : natlt cols). acc2 lhs i j == acc2 rhs i j
   with begin
+    tiled_index_lt m rows row i;
+    tiled_index_lt n cols col j;
     MS.__gmatmul_single_congr #real #real #real 0.0R ( *. ) ( +. )
       (ematrix_subtile a rows k row 0)
       (mtranspose (ematrix_subtile b cols k col 0))

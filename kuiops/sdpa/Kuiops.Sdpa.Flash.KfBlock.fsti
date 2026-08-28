@@ -9,7 +9,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiops.Sdpa.Flash.Types
@@ -19,24 +19,6 @@ module B = Kuiper.Barrier
 module BW = Kuiper.Barrier.Warp
 module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
-
-inline_for_extraction noextract
-let stride_index2 (rows cols : nat) (nthr : pos) (tid : natlt nthr) : Type0 =
-  ij:(natlt rows & natlt cols) {
-    (ij._1 * cols + ij._2) % nthr == tid}
-
-let strided_cells2
-  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
-  (shA : array2 et l) (nthr : pos) (tid : natlt nthr) : slprop
-= forall+ (ij : stride_index2 rows cols nthr tid).
-    exists* (v : et). tensor_pts_to_cell shA (idx2 ij._1 ij._2) v
-
-let strided_cells2_v
-  (#et : Type0) (#rows #cols : nat) (#l : layout2 rows cols)
-  (shA : array2 et l) (nthr : pos) (tid : natlt nthr)
-  (e : chest2 et rows cols) : slprop
-= forall+ (ij : stride_index2 rows cols nthr tid).
-    tensor_pts_to_cell shA (idx2 ij._1 ij._2) (acc2 e ij._1 ij._2)
 
 inline_for_extraction noextract
 fn sdpa_flash_q_load

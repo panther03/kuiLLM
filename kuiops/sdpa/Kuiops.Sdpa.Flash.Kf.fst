@@ -12,7 +12,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.Bijection
@@ -23,6 +23,8 @@ open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.KfSub
 open Kuiops.Sdpa.Flash.KfBlock
 open Kuiops.Sdpa.Flash.KfBarrier
+open Kuiops.Sdpa.Flash.Vals
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO
