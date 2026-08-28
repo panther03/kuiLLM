@@ -10,12 +10,15 @@ module Kuiops.Maps
    Only ops whose real model is expressible with Kuiper's approximation rules
    live here: [sin] and [cos] have no real counterpart, so they cannot be fused
    into a reduction specified over the reals. [rsqrt] is the exception -- see
-   [rrsqrt] below. *)
+   its explicitly documented approximation rule below. *)
 
 open Kuiper
 
 module I64 = FStar.Int64
 module SZ = Kuiper.SizeT
+(* The local FStar.Math.Sqrt.{fst,fsti} are an exact stand-in for F* PR #4510.
+   Remove them once the pinned Kuiper package contains the upstream module. *)
+module Sqrt = FStar.Math.Sqrt
 
 (* [f] approximates [g]: it maps any value approximating [r] to a value
    approximating [g r]. The unary analogue of [Kuiper.Approximates.approx2]. *)
@@ -150,16 +153,25 @@ let amap_div_sz (#t:Type0)
 
 (* --- Reciprocal square root --- *)
 
-(* ASSUMED. Kuiper's [real_like] hierarchy has no square root, so the real
-   model of [rsqrt] is uninterpreted and its approximation rule is an axiom.
-   The rule is only sound where the real argument is positive, which is why it
-   carries that precondition. *)
-assume val rrsqrt (r : real) : real
+(* [amap] requires a total real model, whereas real inverse square root is only
+   defined on positives.  Extend it with zero outside its domain; this choice
+   is proof-only and the positive branch is the one RMSNorm intends to use. *)
+inline_for_extraction noextract
+let real_rsqrt_total (r : real) : Tot real =
+  if r >. 0.0R then Sqrt.rsqrt r else 0.0R
 
+let real_rsqrt_total_positive (r : Sqrt.rpos)
+  : Lemma (ensures real_rsqrt_total r == Sqrt.rsqrt r)
+  = ()
+
+(* ASSUMED. Kuiper's [floating_real_like] hierarchy does not yet relate its
+   concrete [rsqrt] operation to [FStar.Math.Sqrt.rsqrt].  Only this
+   floating-point approximation rule remains an axiom here. *)
 assume val rsqrt_approx (#t:Type0)
   {| scalar t, floating t, real_like t, floating_real_like t |}
   (x : t) (r : real)
-  : Lemma (requires x %~ r /\ r >. 0.0R) (ensures rsqrt x %~ rrsqrt r)
+  : Lemma (requires x %~ r /\ r >. 0.0R)
+          (ensures rsqrt x %~ (Sqrt.rsqrt r <: real))
 
 (* GAP. The [pre_map]/[post_map] slots demand an unconditional [approx1], but
    [rsqrt_approx] only holds on positives, and the reduction's specification
@@ -170,5 +182,10 @@ assume val rsqrt_approx (#t:Type0)
 inline_for_extraction noextract
 let amap_rsqrt (t:Type0)
   {| scalar t, floating t, real_like t, floating_real_like t |} : amap t =
-  mk_amap (fun x -> rsqrt x) rrsqrt
-    (fun x r -> if r >. 0.0R then rsqrt_approx x r else admit ())
+  mk_amap (fun x -> rsqrt x) real_rsqrt_total
+    (fun x r ->
+      if r >. 0.0R then begin
+        rsqrt_approx x r;
+        real_rsqrt_total_positive r
+      end else
+        admit ())
