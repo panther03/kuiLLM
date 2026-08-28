@@ -100,7 +100,8 @@ $(CLANG_FORMAT): scripts/install-clang-format.sh
 	@CLANG_FORMAT_VERSION=$(CLANG_FORMAT_VERSION) \
 		./scripts/install-clang-format.sh "$(TOOLS_DIR)/clang-format-$(CLANG_FORMAT_VERSION)"
 
-$(KUIPER_PLUGIN).cmxs: $(KUIPER_PLUGIN_SOURCE) | $(KUIPER_MARKER)
+$(KUIPER_PLUGIN).cmxs: | $(KUIPER_MARKER)
+	@test -f "$(KUIPER_PLUGIN_SOURCE)"
 	@mkdir -p "$(dir $(KUIPER_PLUGIN))"
 	@ln -sf "$(KUIPER_PLUGIN_SOURCE)" "$@"
 
