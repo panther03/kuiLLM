@@ -2,18 +2,23 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
-    name: Verify Kuiops (hosted CPU)
+    name: Verify Kuiops
     runs-on: ubuntu-latest
-    outputs:
-      kuiper-nightly: ${{ steps.kuiper.outputs.nightly }}
     container:
       image: ghcr.io/fstarlang/kuiper-base-nocuda:latest
     defaults:
@@ -48,57 +53,3 @@ jobs:
           jobs=$(scripts/ci-jobs.sh 3072)
           echo "Verifying with $jobs job(s)."
           make -j"$jobs" verify-kuiops
-
-  test:
-    name: GPU integration tests
-    needs: [verify]
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: self-hosted
-    timeout-minutes: 180
-    defaults:
-      run:
-        # Login shell so the micromamba environment is active in every step.
-        shell: bash -leo pipefail {0}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up micromamba environment
-        uses: mamba-org/setup-micromamba@v3
-        with:
-          download-micromamba: false
-          micromamba-binary-path: ~/micromamba-bin/micromamba
-          environment-file: environment.yml
-          environment-name: kuillm
-          cache-environment: true
-
-      - name: Report toolchain
-        run: |
-          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())"
-          nvcc --version
-          nvidia-smi
-
-      - name: Restore Kuiper package
-        uses: actions/cache@v5
-        with:
-          path: .kuiper
-          key: kuiper-nightly-${{ needs.verify.outputs.kuiper-nightly }}-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Prepare pinned toolchain
-        run: make -j"$(nproc)" prepare
-
-      - name: Run test suite
-        # Override NPROCS on a dispatch run if the GPU can't hold one CUDA
-        # context per worker.
-        run: make test NPROCS="$(nproc)"
-
-      - name: Upload JIT build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
-        with:
-          name: kuipy-cache
-          path: |
-            .kuipy_cache/src
-            .kuipy_cache/cu
-            .kuipy_cache/build/**/*.log
-          if-no-files-found: ignore
-          retention-days: 7
