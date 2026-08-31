@@ -281,11 +281,12 @@ fn fragarray_mma
 
       array_fragment_extract_ro aFrags !resIdxM;
       array_fragment_extract_ro bFrags !resIdxN;
-      array_fragment_extract accumFrags (!resIdxM * wn + !resIdxN);
+      let acc_idx = !resIdxM *^ wn +^ !resIdxN;
+      array_fragment_extract accumFrags (SZ.v acc_idx);
 
       let a_frag = aFrags.(!resIdxM);
       let b_frag = bFrags.(!resIdxN);
-      let acc_frag = accumFrags.(!resIdxM *^ wn +^ !resIdxN);
+      let acc_frag = accumFrags.(acc_idx);
 
       with eAt. assert a_frag |-> eAt;
       with eBt. assert b_frag |-> eBt;

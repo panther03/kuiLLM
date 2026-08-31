@@ -5,9 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  KUIPER_NIGHTLY: 2026-08-27
-
 permissions:
   contents: read
 
@@ -15,6 +12,8 @@ jobs:
   verify:
     name: Verify Kuiops (hosted CPU)
     runs-on: ubuntu-latest
+    outputs:
+      kuiper-nightly: ${{ steps.kuiper.outputs.nightly }}
     container:
       image: ghcr.io/fstarlang/kuiper-base-nocuda:latest
     defaults:
@@ -26,6 +25,10 @@ jobs:
 
       - uses: actions/checkout@v6
 
+      - name: Read Kuiper package pin
+        id: kuiper
+        run: echo "nightly=$(make -s print-kuiper-nightly)" >> "$GITHUB_OUTPUT"
+
       - name: Set up build environment
         run: |
           echo "HOME=/home/vscode" >> "$GITHUB_ENV"
@@ -35,7 +38,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .kuiper
-          key: kuiper-nightly-${{ env.KUIPER_NIGHTLY }}-${{ runner.os }}-${{ runner.arch }}
+          key: kuiper-nightly-${{ steps.kuiper.outputs.nightly }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Prepare pinned toolchain
         run: make -j2 prepare
@@ -78,7 +81,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .kuiper
-          key: kuiper-nightly-${{ env.KUIPER_NIGHTLY }}-${{ runner.os }}-${{ runner.arch }}
+          key: kuiper-nightly-${{ needs.verify.outputs.kuiper-nightly }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Prepare pinned toolchain
         run: make -j"$(nproc)" prepare

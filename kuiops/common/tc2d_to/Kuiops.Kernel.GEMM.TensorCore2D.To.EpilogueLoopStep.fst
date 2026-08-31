@@ -263,8 +263,8 @@ fn epilogue_loop_step
     #m #n gC fC eC rC
     bm bn bk tm tn tk wm wn nthr sh accFrags rAcc tid;
 
-  let mrow = bid /^ (n /^ bn);
-  let mcol = bid %^ (n /^ bn);
+  let mrow : szlt (m / bm) = bid /^ (n /^ bn);
+  let mcol : szlt (n / bn) = bid %^ (n /^ bn);
   let warpRow : szlt (bm / (wm * tm)) = wid /^ (bn /^ (wn *^ tn));
   let warpCol : szlt (bn / (wn * tn)) = wid %^ (bn /^ (wn *^ tn));
   assert pure (

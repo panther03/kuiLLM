@@ -1318,12 +1318,12 @@ fn flash_ml_to_pre
       cell_full (row l (SZ.v ws)) (SZ.v ls)));
   if lane_active 16sz ls {
     rewrite
-      (when__ l_True (fun _ ->
+      (when__ true (fun _ ->
         cell_full (row m (SZ.v ws)) (SZ.v ls)))
       as
       (cell_full (row m (SZ.v ws)) (SZ.v ls));
     rewrite
-      (when__ l_True (fun _ ->
+      (when__ true (fun _ ->
         cell_full (row l (SZ.v ws)) (SZ.v ls)))
       as
       (cell_full (row l (SZ.v ws)) (SZ.v ls));
@@ -1342,11 +1342,11 @@ fn flash_ml_to_pre
         (row l (SZ.v ws)) ls);
   } else {
     rewrite
-      (when__ l_False (fun _ ->
+      (when__ false (fun _ ->
         cell_full (row m (SZ.v ws)) (SZ.v ls)))
       as emp;
     rewrite
-      (when__ l_False (fun _ ->
+      (when__ false (fun _ ->
         cell_full (row l (SZ.v ws)) (SZ.v ls)))
       as emp;
     if_intro_false (

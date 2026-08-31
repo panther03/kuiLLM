@@ -31,6 +31,10 @@ open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
 open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState
 open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueLoopStep
 
+let euclidean_division_pat (a : nat) (b : pos)
+  : Lemma (a == a / b * b + a % b) [SMTPat (a / b)]
+= FStar.Math.Lemmas.euclidean_division_definition a b
+
 #push-options ""
 inline_for_extraction noextract
 fn epilogue_to
@@ -228,7 +232,7 @@ fn epilogue_to
   };
 
   assert pure (SZ.v !idx == SZ.v wm * SZ.v wn);
-  rewrite each !idx as (wm *^ wn);
+  rewrite each (SZ.v !idx) as (SZ.v wm * SZ.v wn);
   unfold output_epilogue_state
     gD bm bn tm tn wm wn bid wid lane
     (chest_comb comb_r rCWarp rAcc) (wm * wn);

@@ -4,9 +4,13 @@ include kuiper.mk
 .PHONY: infer infer-kuiper infer-batched infer-no-kuiper verify dump-kernels \
 	profile-kuiper-nsys profile-no-kuiper-nsys golden golden-compiled \
 	profile-golden profile-golden-triton profile-golden-no-triton test \
-	prepare verify-kuiops lint lint-fstar lint-generated list-admits
+	prepare verify-kuiops lint lint-fstar lint-generated list-admits \
+	print-kuiper-nightly
 
 KUIPER_INSTALLER_URL ?= https://raw.githubusercontent.com/FStarLang/kuiper/main/scripts/install-kuiper.sh
+
+print-kuiper-nightly:
+	@printf '%s\n' "$(KUIPER_NIGHTLY)"
 
 NSYS := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node
 NSYS_RANGE := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop

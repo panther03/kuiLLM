@@ -260,9 +260,12 @@ fn sdpa_flash_kf
   rewrite each (sdpa_flash_w nw nthr tid) as (tid /^ 32sz);
   rewrite each (sdpa_flash_lane nw nthr tid) as (tid %^ 32sz);
 
-
   sdpa_flash_block_prologue nw nthr d b hq sq rows
     gQ shQ shM shL shscale shO shgl tid bi r0 group kvh;
+  assert pure (thread_w nw (SZ.v tid) == SZ.v (tid /^ 32sz));
+  assert pure (thread_lane nw (SZ.v tid) == SZ.v (tid %^ 32sz));
+  rewrite each (thread_w nw (SZ.v tid)) as (SZ.v (tid /^ 32sz));
+  rewrite each (thread_lane nw (SZ.v tid)) as (SZ.v (tid %^ 32sz));
 
   with eQsh. assert (
     shQ |-> Frac (1.0R /. (SZ.v nthr)) eQsh);

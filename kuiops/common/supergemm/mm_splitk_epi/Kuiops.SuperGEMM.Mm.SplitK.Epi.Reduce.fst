@@ -383,6 +383,8 @@ fn rkf_at
   let gc : szp = n /^ chunk et_d;
   let di : szlt m = i /^ gc;
   let dj : szlt (SZ.v n / SZ.v (chunk et_d)) = i %^ gc;
+  assert pure (SZ.v di == SZ.v i / gcols et_d n);
+  assert pure (SZ.v dj == SZ.v i % gcols et_d n);
 
   unfold (d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n));
   assert pure (SZ.v (chunk et_acc) /?+ SZ.v (chunk et_d));

@@ -553,11 +553,12 @@ fn sp_mma
 
       array_fragment_extract_ro aFrags !resIdxM;
       array_fragment_extract_ro bFrags !resIdxN;
-      array_fragment_extract accFrags (!resIdxM * nfrag + !resIdxN);
+      let acc_idx = !resIdxM *^ nfrag +^ !resIdxN;
+      array_fragment_extract accFrags (SZ.v acc_idx);
 
       let a_frag = aFrags.(!resIdxM);
       let b_frag = bFrags.(!resIdxN);
-      let acc_frag = accFrags.(!resIdxM *^ nfrag +^ !resIdxN);
+      let acc_frag = accFrags.(acc_idx);
 
       with eAt. assert a_frag |-> eAt;
       with eBt. assert b_frag |-> eBt;
