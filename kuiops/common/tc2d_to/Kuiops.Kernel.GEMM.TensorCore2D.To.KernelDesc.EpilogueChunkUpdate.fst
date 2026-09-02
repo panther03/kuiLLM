@@ -180,6 +180,17 @@ let global_col_divides
   Kuiper.Divides.lemma_divides_sum w
     (mcol * bn + warpCol * (wn * cols) + mi * cols) col
 
+(* A cell inside a tile stays within the enclosing dimension.  Keeping this
+   arithmetic outside the Pulse context makes the instantiated bound cheap. *)
+let tile_cell_bound (tile : pos) (extent : nat) (tile_idx cell : nat)
+  : Lemma (requires tile /?+ extent /\ tile_idx < extent / tile /\ cell < tile)
+          (ensures tile_idx * tile + cell < extent)
+= let factor = Kuiper.Divides.get_factor tile extent in
+  ML.cancel_mul_div tile factor;
+  ML.lemma_mult_le_right tile (tile_idx + 1) factor;
+  ML.swap_mul factor tile;
+  ML.distributivity_add_left tile_idx 1 tile
+
 (* The target values of a run of fragment cells, in terms of the
    corresponding run of global [C] cells. *)
 let target_run_eq
@@ -304,6 +315,10 @@ fn epilogue_chunk_update
       + (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col + (chunk et_cd)
     <= (SZ.v warpCol + 1) * (SZ.v wn * SZ.v cols));
   assert pure ((SZ.v warpCol + 1) * (SZ.v wn * SZ.v cols) <= SZ.v bn);
+  tile_cell_bound (SZ.v rows) (SZ.v wm * SZ.v rows)
+    (SZ.v idx / SZ.v wn) (SZ.v row);
+  tile_cell_bound (SZ.v wm * SZ.v rows) (SZ.v bm) (SZ.v warpRow)
+    ((SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row);
   assert pure (
     SZ.v warpRow * (SZ.v wm * SZ.v rows)
       + (SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row

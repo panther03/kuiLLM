@@ -247,7 +247,7 @@ let flash_step_masked (#n : nat) (x y : natlt n -> GTot real) (p p' : pred n) (m
    [(m, l, o)].  Rescaling both to a common [gm] and adding merges them,
    because the invariant is linear in the key set once the [exp m] scaling is
    normalized away.  Iterating this absorbs any number of warps. *)
-#push-options "--z3rlimit 60"
+#push-options "--z3rlimit 5"
 let flash_combine (#n : nat) (x y : natlt n -> GTot real) (p1 p2 p' : pred n)
                   (m1 m2 gm l1 l2 o1 o2 : real)
   : Lemma (requires disjoint p1 p2 /\

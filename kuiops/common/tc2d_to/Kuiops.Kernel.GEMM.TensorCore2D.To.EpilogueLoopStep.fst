@@ -26,24 +26,6 @@ open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
 open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.Epilogue
 open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
-let comb_subtile_commute
-  (#et : Type) (#rows #cols : nat)
-  (f : et -> et -> et) (em1 em2 : chest2 et rows cols)
-  (tr : pos{tr /? rows}) (tc : pos{tc /? cols})
-  (r : natlt (rows / tr)) (c : natlt (cols / tc))
-  : Lemma
-      (ematrix_subtile (chest_comb f em1 em2) tr tc r c
-      == chest_comb f
-          (ematrix_subtile em1 tr tc r c)
-          (ematrix_subtile em2 tr tc r c))
-= assert (Kuiper.Chest.equal
-    (ematrix_subtile (chest_comb f em1 em2) tr tc r c)
-    (chest_comb f
-      (ematrix_subtile em1 tr tc r c)
-      (ematrix_subtile em2 tr tc r c)))
-#pop-options
-
 ghost
 fn forevery_extract_replace_eqtype
   (#a : eqtype)
@@ -85,53 +67,35 @@ fn forevery_extract_replace_eqtype
     };
 }
 
-let output_fragment_state_shift
+(* [output_fragment_state_at] mentions [done] only through [idx < done], so
+   bumping [done] leaves every index other than [done] itself unchanged. *)
+let output_fragment_state_at_bump
   (#et : Type0) {| scalar et, real_like et, has_vec_cpy et |}
   (#m #n : nat)
   (gD : array2 et (rm m n))
   (bm bn tm tn wm wn : pos)
-  (#bounds : squash (bm /?+ m /\ bn /?+ n /\
-                     wm * tm /?+ bm /\ wn * tn /?+ bn))
+  (#pf : squash (bm /?+ m /\ bn /?+ n /\
+                 wm * tm /?+ bm /\ wn * tn /?+ bn))
   (bid : natlt (m / bm * (n / bn)))
   (wid : natlt (bm / (wm * tm) * (bn / (wn * tn))))
   (lane : natlt warp_size)
   (rD : chest2 real (wm * tm) (wn * tn))
-  (done x : natlt (wm * wn))
-  : Lemma
-      (requires x =!= done)
-      (ensures
-        output_fragment_state_at
-          gD bm bn tm tn wm wn #bounds bid wid lane rD done x
-        == output_fragment_state_at
-          gD bm bn tm tn wm wn #bounds bid wid lane rD (done + 1) x)
-= if x < done then () else ()
-
-let output_fragment_state_shift_all
-  (#et : Type0) {| scalar et, real_like et, has_vec_cpy et |}
-  (#m #n : nat)
-  (gD : array2 et (rm m n))
-  (bm bn tm tn wm wn : pos)
-  (#bounds : squash (bm /?+ m /\ bn /?+ n /\
-                     wm * tm /?+ bm /\ wn * tn /?+ bn))
-  (bid : natlt (m / bm * (n / bn)))
-  (wid : natlt (bm / (wm * tm) * (bn / (wn * tn))))
-  (lane : natlt warp_size)
-  (rD : chest2 real (wm * tm) (wn * tn))
-  (done : natlt (wm * wn))
+  (done : nat { done < wm * wn })
   : Lemma
       (forall (x : natlt (wm * wn)). x =!= done ==>
         output_fragment_state_at
-          gD bm bn tm tn wm wn #bounds bid wid lane rD done x
+          gD bm bn tm tn wm wn #pf bid wid lane rD done x
         == output_fragment_state_at
-          gD bm bn tm tn wm wn #bounds bid wid lane rD (done + 1) x)
+          gD bm bn tm tn wm wn #pf bid wid lane rD (done + 1) x)
 = introduce forall (x : natlt (wm * wn)). x =!= done ==>
       output_fragment_state_at
-        gD bm bn tm tn wm wn #bounds bid wid lane rD done x
+        #_ #_ #_ #_ #_ gD bm bn tm tn wm wn #pf bid wid lane rD done x
       == output_fragment_state_at
-        gD bm bn tm tn wm wn #bounds bid wid lane rD (done + 1) x
+        #_ #_ #_ #_ #_ gD bm bn tm tn wm wn #pf bid wid lane rD (done + 1) x
   with introduce _ ==> _
-  with output_fragment_state_shift
-    gD bm bn tm tn wm wn #bounds bid wid lane rD done x
+  with begin
+    assert ((x < done) == (x < done + 1))
+  end
 
 ghost
 fn output_epilogue_extract_step
@@ -165,7 +129,7 @@ fn output_epilogue_extract_step
 {
   unfold output_epilogue_state
     gD bm bn tm tn wm wn bid wid lane rD (SZ.v done);
-  output_fragment_state_shift_all
+  output_fragment_state_at_bump
     gD bm bn tm tn wm wn #bounds bid wid lane rD (SZ.v done);
   forevery_extract_replace_eqtype
     #(natlt (wm * wn))
@@ -176,6 +140,8 @@ fn output_epilogue_extract_step
       gD bm bn tm tn wm wn bid wid lane rD (SZ.v done + 1));
 }
 
+(* The epilogue-state step needs a larger budget than the file default. *)
+#push-options "--z3rlimit 60"
 inline_for_extraction noextract
 fn epilogue_loop_step
   (#et_ab #et_cd #et_acc : Type0)
@@ -335,15 +301,7 @@ fn epilogue_loop_step
   let eAccFrag : chest2 et_acc tm tn =
     Seq.Base.index eAccFrags done;
 
-  FStar.Math.Lemmas.euclidean_division_definition (SZ.v done) (SZ.v wn);
-  assert pure (SZ.v done == (SZ.v done / SZ.v wn) * SZ.v wn + SZ.v done % SZ.v wn);
   assert pure (eAccFrag %~ rAccFrag);
-  comb_subtile_commute comb_r rCWarp rAcc
-    (SZ.v tm) (SZ.v tn) (SZ.v done / SZ.v wn) (SZ.v done % SZ.v wn);
-  assert pure (
-    ematrix_subtile (chest_comb comb_r rCWarp rAcc)
-      (SZ.v tm) (SZ.v tn) (SZ.v done / SZ.v wn) (SZ.v done % SZ.v wn)
-    == chest_comb comb_r rCFrag rAccFrag);
   epilogue_fragment_from_warp comb comb_r gC
     bm bn tm tn wm wn
     mrow mcol warpRow warpCol bid wid
@@ -363,6 +321,8 @@ fn epilogue_loop_step
       (output_fragment gD bm bn tm tn wm wn
         bid wid (SZ.v done / wn) (SZ.v done % wn))
       eOut lane;
+  chest_comb_subtile comb_r rCWarp rAcc tm tn
+    (SZ.v done / SZ.v wn) (SZ.v done % SZ.v wn);
   fold output_fragment_post
     gD bm bn tm tn wm wn bid wid lane
     (chest_comb comb_r rCWarp rAcc) done;
@@ -420,3 +380,5 @@ fn epilogue_loop_step
     (chest_comb comb_r rCWarp rAcc) (SZ.v done + 1);
   idx := sz_succ !idx;
 }
+
+#pop-options

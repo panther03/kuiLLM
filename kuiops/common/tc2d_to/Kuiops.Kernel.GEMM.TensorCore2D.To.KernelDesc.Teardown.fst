@@ -25,19 +25,19 @@ open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
 
 #push-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 
-let flatten_index_bound
-  (rows cols : pos) (row : natlt rows) (col : natlt cols)
-  : Lemma (row * cols + col < rows * cols)
-= ML.lemma_mult_le_right cols (row + 1) rows;
-  ML.distributivity_add_left row 1 cols
+let div_mod_of_mul_add (n : pos) (i : nat) (j : natlt n)
+  : Lemma ((i * n + j) / n == i /\ (i * n + j) % n == j)
+= ML.lemma_div_plus j i n;
+  ML.small_div j n;
+  ML.lemma_mod_plus j i n;
+  ML.small_mod j n
 
-let unflatten_row_col (cols : pos) (row : nat) (col : natlt cols)
-  : Lemma ((row * cols + col) / cols == row /\
-           (row * cols + col) % cols == col)
-= ML.lemma_div_plus col row cols;
-  ML.lemma_mod_plus col row cols;
-  ML.small_div col cols;
-  ML.small_mod col cols
+let flat_index_bound (rows cols : pos)
+  (row : natlt rows) (col : natlt cols)
+  : Lemma (row * cols + col < rows * cols)
+      [SMTPatOr [[SMTPat (row * cols + col); SMTPat (rows * cols)]]]
+= ML.lemma_eucl_div_bound col row cols;
+  ML.lemma_mult_le_right cols (row + 1) rows
 
 let in_lane_covers_all
   (w : pos)
@@ -420,9 +420,9 @@ fn gather_block
         pure (eWarp %~
           ematrix_subtile rBlock (wm * tm) (wn * tn) wr wc))
     fn wr wc {
-      flatten_index_bound
+      flat_index_bound
         (bm / (wm * tm)) (bn / (wn * tn)) wr wc;
-      unflatten_row_col (bn / (wn * tn)) wr wc;
+      div_mod_of_mul_add (bn / (wn * tn)) wr wc;
       rewrite each
         warp_tile dBlock (wm * tm) (wn * tn)
           (wr * (bn / (wn * tn)) + wc)

@@ -323,6 +323,7 @@ fn accumulate
       cell_aligned16 lW gW (SZ.v wrow) (SZ.v wcol);
       array2_vec_read gW wrow wcol vbuf;
       RL.ws_row_bound (SZ.v m) (SZ.v splits) (SZ.v mws) (SZ.v sv) (SZ.v di);
+      div_step (SZ.v (chunk et_acc)) (SZ.v ev) (SZ.v (chunk et_d));
       (* The vector just read is split [sv]'s contribution to columns
          [ev .. ev + chunk et_acc) of this granule. *)
       acc_chunk (chunk et_d) (chunk et_acc) abuf vbuf

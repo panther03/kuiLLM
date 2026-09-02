@@ -16,8 +16,6 @@ open Kuiper
 
 module I64 = FStar.Int64
 module SZ = Kuiper.SizeT
-(* The local FStar.Math.Sqrt.{fst,fsti} are an exact stand-in for F* PR #4510.
-   Remove them once the pinned Kuiper package contains the upstream module. *)
 module Sqrt = FStar.Math.Sqrt
 
 (* [f] approximates [g]: it maps any value approximating [r] to a value

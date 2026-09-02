@@ -708,7 +708,7 @@ let natlt_prod_scaled_pat (p q : nat) (x y : nat) (c : pos)
   Math.Lemmas.lemma_mult_lt_right c (x * q + y) (p * q)
 #pop-options
 
-#push-options "" // Would be nice to avoid
+#push-options "--ifuel 2"
 let tiles_approx_lemma
   (#et_c : Type0)
   {| scalar et_c |}

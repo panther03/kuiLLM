@@ -101,11 +101,18 @@ let loop_invariant_lemma
       == { Math.Lemmas.distributivity_add_right
              (wm * tm) (mrow * (bm / (wm * tm))) warpRow }
       (wm * tm) * (mrow * (bm / (wm * tm))) + (wm * tm) * warpRow;
-      == {}
+      == { Math.Lemmas.paren_mul_right
+             (wm * tm) mrow (bm / (wm * tm)) }
+      ((wm * tm) * mrow) * (bm / (wm * tm)) + (wm * tm) * warpRow;
+      == { Math.Lemmas.swap_mul (wm * tm) mrow }
+      (mrow * (wm * tm)) * (bm / (wm * tm)) + (wm * tm) * warpRow;
+      == { Math.Lemmas.paren_mul_right
+             mrow (wm * tm) (bm / (wm * tm)) }
       mrow * ((wm * tm) * (bm / (wm * tm))) + (wm * tm) * warpRow;
       == { Math.Lemmas.lemma_div_exact bm (wm * tm) }
       mrow * bm + (wm * tm) * warpRow;
-      == {}
+      == { Math.Lemmas.swap_mul mrow bm;
+           Math.Lemmas.swap_mul (wm * tm) warpRow }
       bm * mrow + warpRow * (wm * tm);
     } in
   let aux4 () :
@@ -117,11 +124,18 @@ let loop_invariant_lemma
       == { Math.Lemmas.distributivity_add_right
              (wn * tn) (mcol * (bn / (wn * tn))) warpCol }
       (wn * tn) * (mcol * (bn / (wn * tn))) + (wn * tn) * warpCol;
-      == {}
+      == { Math.Lemmas.paren_mul_right
+             (wn * tn) mcol (bn / (wn * tn)) }
+      ((wn * tn) * mcol) * (bn / (wn * tn)) + (wn * tn) * warpCol;
+      == { Math.Lemmas.swap_mul (wn * tn) mcol }
+      (mcol * (wn * tn)) * (bn / (wn * tn)) + (wn * tn) * warpCol;
+      == { Math.Lemmas.paren_mul_right
+             mcol (wn * tn) (bn / (wn * tn)) }
       mcol * ((wn * tn) * (bn / (wn * tn))) + (wn * tn) * warpCol;
       == { Math.Lemmas.lemma_div_exact bn (wn * tn) }
       mcol * bn + (wn * tn) * warpCol;
-      == {}
+      == { Math.Lemmas.swap_mul mcol bn;
+           Math.Lemmas.swap_mul (wn * tn) warpCol }
       bn * mcol + warpCol * (wn * tn);
     } in
   aux3 ();
