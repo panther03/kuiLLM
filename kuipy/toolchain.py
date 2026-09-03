@@ -148,7 +148,7 @@ def extract_cu(module: str, fst_text: str):
         pre_cu = C.KUIPY_JIT_PRE / f"{underscored}.cu"
         pre_h = C.KUIPY_JIT_PRE / f"{underscored}.h"
 
-        # 4) fixup (sed + indent), matching verify.mk
+        # 4) fixup and canonical formatting, matching verify.mk
         with P.stage("fixup", module):
             _fixup(pre_cu, cu_path)
             _fixup(pre_h, h_path)
@@ -173,6 +173,11 @@ def _make_decl_header(h_path: Path, decl_path: Path):
 def _fixup(src: Path, dst: Path):
     sed = subprocess.run(["sed", "-f", str(C.FIXUP_SED), str(src)],
                          capture_output=True, text=True, check=True)
-    indent = subprocess.run(["indent", "-linux", "-i4", "-nut"],
-                            input=sed.stdout, capture_output=True, text=True, check=True)
-    dst.write_text(indent.stdout)
+    formatted = subprocess.run([
+        str(C.CLANG_FORMAT),
+        "--Werror",
+        "--fail-on-incomplete-format",
+        f"--style=file:{C._REPO_ROOT / '.clang-format'}",
+        f"--assume-filename={dst}",
+    ], input=sed.stdout, capture_output=True, text=True, check=True)
+    dst.write_text(formatted.stdout)

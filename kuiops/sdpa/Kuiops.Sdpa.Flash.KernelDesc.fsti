@@ -11,7 +11,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.ForEvery
 open Kuiper.Kernel.FlashAttention.KernelDesc
 

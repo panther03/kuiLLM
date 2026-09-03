@@ -56,6 +56,22 @@ let nthr_pos bm bn wm wn =
 
 let nthr_le_max_threads et_ab et_acc bm bn bk wm wn skew = ()
 
+(* Keep this nonlinear comparison out of the much larger epilogue context. *)
+let fits_padded_row
+  (w rows cols pad extra : nat)
+  : Lemma
+      (requires w > 0 /\ extra <= rows * pad /\
+                SZ.fits (w * rows * (cols + pad)))
+      (ensures SZ.fits (rows * cols + extra))
+= ()
+
+let epilogue_band_fits et_ab et_acc bm bn bk wm wn skew =
+  warps_m_pos bm wm;
+  warps_m_pos bn wn;
+  fits_padded_row
+    (warps bm bn wm wn) frag (SZ.v wn) (eskew et_acc)
+    (SZ.v warp_size)
+
 let warp_divides_nthr bm bn wm wn =
   ML.cancel_mul_mod (warps bm bn wm wn) (SZ.v warp_size)
 

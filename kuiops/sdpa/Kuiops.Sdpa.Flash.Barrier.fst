@@ -17,12 +17,13 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 open Kuiper.TensorCore
 open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.Split
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module FC = Kuiper.Float.Casts
@@ -887,6 +888,7 @@ fn b2_o_transform_v
               (ematrix_stride_subtile
                 (ematrix_subtile eO 16 (SZ.v d <: pos) w 0)
                 warp_row_span 16 (lane / 16) (lane % 16)));
+  FStar.Math.Lemmas.lemma_div_exact (SZ.v nw * 16) 16;
   forevery_map #(natlt (SZ.v nw))
     (fun w ->
       forall+ (lane : natlt BW.warp_size).
@@ -1316,12 +1318,12 @@ fn flash_ml_to_pre
       cell_full (row l (SZ.v ws)) (SZ.v ls)));
   if lane_active 16sz ls {
     rewrite
-      (when__ l_True (fun _ ->
+      (when__ true (fun _ ->
         cell_full (row m (SZ.v ws)) (SZ.v ls)))
       as
       (cell_full (row m (SZ.v ws)) (SZ.v ls));
     rewrite
-      (when__ l_True (fun _ ->
+      (when__ true (fun _ ->
         cell_full (row l (SZ.v ws)) (SZ.v ls)))
       as
       (cell_full (row l (SZ.v ws)) (SZ.v ls));
@@ -1340,11 +1342,11 @@ fn flash_ml_to_pre
         (row l (SZ.v ws)) ls);
   } else {
     rewrite
-      (when__ l_False (fun _ ->
+      (when__ false (fun _ ->
         cell_full (row m (SZ.v ws)) (SZ.v ls)))
       as emp;
     rewrite
-      (when__ l_False (fun _ ->
+      (when__ false (fun _ ->
         cell_full (row l (SZ.v ws)) (SZ.v ls)))
       as emp;
     if_intro_false (

@@ -16,13 +16,14 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 open Kuiper.TensorCore
 open Pulse.Lib.Pledge
 open Kuiops.Sdpa.Flash.Split
 open Kuiops.Sdpa.Flash.Shmem
+open Kuiops.Sdpa.Flash.Types
 
 module SZ = Kuiper.SizeT
 module TRO = Kuiper.TensorRO

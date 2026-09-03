@@ -2,7 +2,7 @@ module Kuiops.SuperGEMM.Mm.Output
 
 (* Layout-generic output tiling for the software-pipelined tensor-core GEMM.
 
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc]'s [output_fragment] and
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc]'s [output_fragment] and
    [output_lane_live] hardcode the output operand to row-major
    ([gD : array2 et (rm m n)]).  SuperGEMM requires A, B *and* D to carry a
    [strided_row_major] typeclass witness rather than being pinned to row-major,
@@ -20,20 +20,42 @@ open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.EMatrix
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_fragment, output_lane_live,
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { output_fragment, output_lane_live,
                                                      live_lane_cells, own_lane_cells,
                                                      in_lane }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
-module VG = Kuiper.Array2.Vectorized.Group
+module VG = Kuiops.Array2.Vectorized.Group
+module ML = FStar.Math.Lemmas
 
 #set-options "--ifuel 1 --initial_fuel 0 --max_fuel 1"
 #set-options "--z3rlimit 15"
+
+let unflatten_row_col (cols : pos) (row : nat) (col : natlt cols)
+  : Lemma ((row * cols + col) / cols == row /\
+           (row * cols + col) % cols == col)
+= ML.lemma_div_plus col row cols;
+  ML.lemma_mod_plus col row cols;
+  ML.small_div col cols;
+  ML.small_mod col cols
+
+let flatten_index_bound
+  (rows cols : pos) (row : natlt rows) (col : natlt cols)
+  : Lemma (row * cols + col < rows * cols)
+= ML.lemma_mult_le_right cols (row + 1) rows;
+  ML.distributivity_add_left row 1 cols
+
+[@@"opaque_to_smt"]
+let flatten_index
+  (rows cols : pos) (row : natlt rows) (col : natlt cols)
+  : i : natlt (rows * cols) { i == row * cols + col }
+= flatten_index_bound rows cols row col;
+  row * cols + col
 
 (* ---- lane-cell split/join helpers (local copies of the private upstream
         helpers in [...To.KernelDesc] / [...To.KernelDesc.Teardown]) ---- *)
@@ -479,7 +501,7 @@ fn gather_block_live'
       exists* (eWarp : chest2 et (wm * tm) (wn * tn)).
         warp_tile (block_tile gD (SZ.v bm) (SZ.v bn) bid)
           (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc) |-> eWarp);
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) |-> eWarp);
   let dBlock = block_tile gD (SZ.v bm) (SZ.v bn) bid;
   rewrite each block_tile gD (SZ.v bm) (SZ.v bn) bid as dBlock;
   forevery_map_2
@@ -488,18 +510,22 @@ fn gather_block_live'
     (fun wr wc ->
       exists* (eWarp : chest2 et (wm * tm) (wn * tn)).
         warp_tile dBlock (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc) |-> eWarp)
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) |-> eWarp)
     (fun wr wc ->
       exists* (eWarp : chest2 et (wm * tm) (wn * tn)).
         array2_subtile dBlock (wm * tm) (wn * tn) wr wc |-> eWarp)
     fn wr wc {
+      unflatten_row_col (bn / (wn * tn)) wr wc;
+      flatten_index_bound (bm / (wm * tm)) (bn / (wn * tn)) wr wc;
       assert pure (
-        (wr * (bn / (wn * tn)) + wc) / (bn / (wn * tn)) == wr);
+        (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) /
+          (bn / (wn * tn)) == wr);
       assert pure (
-        (wr * (bn / (wn * tn)) + wc) % (bn / (wn * tn)) == wc);
+        (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) %
+          (bn / (wn * tn)) == wc);
       rewrite each
         warp_tile dBlock (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc)
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc)
       as array2_subtile dBlock (wm * tm) (wn * tn) wr wc;
     };
   array2_untile_underspec dBlock (wm * tm) (wn * tn);
@@ -613,7 +639,7 @@ fn gather_output_live'
 #pop-options
 
 (* ==== Functional (approximation) lane-cell join helpers ====
-   Ported from [Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown]
+   Ported from [Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.Teardown]
    ([own_lane_cells_rw], [join_lane_cells_approximates], [array2_untile_approximates]),
    which are already layout-generic there. *)
 
@@ -839,7 +865,7 @@ fn gather_warp_approximates'
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn gather_block_approximates'
   (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
@@ -901,7 +927,7 @@ fn gather_block_approximates'
       exists* (eWarp : chest2 et (wm * tm) (wn * tn)).
         warp_tile (block_tile gD (SZ.v bm) (SZ.v bn) bid)
           (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc) |-> eWarp **
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) |-> eWarp **
         pure (eWarp %~
           ematrix_subtile rBlock (wm * tm) (wn * tn) wr wc));
   let dBlock = block_tile gD (SZ.v bm) (SZ.v bn) bid;
@@ -912,7 +938,7 @@ fn gather_block_approximates'
     (fun wr wc ->
       exists* (eWarp : chest2 et (wm * tm) (wn * tn)).
         warp_tile dBlock (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc) |-> eWarp **
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) |-> eWarp **
         pure (eWarp %~
           ematrix_subtile rBlock (wm * tm) (wn * tn) wr wc))
     (fun wr wc ->
@@ -921,13 +947,17 @@ fn gather_block_approximates'
         pure (eWarp %~
           ematrix_subtile rBlock (wm * tm) (wn * tn) wr wc))
     fn wr wc {
+      unflatten_row_col (bn / (wn * tn)) wr wc;
+      flatten_index_bound (bm / (wm * tm)) (bn / (wn * tn)) wr wc;
       assert pure (
-        (wr * (bn / (wn * tn)) + wc) / (bn / (wn * tn)) == wr);
+        (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) /
+          (bn / (wn * tn)) == wr);
       assert pure (
-        (wr * (bn / (wn * tn)) + wc) % (bn / (wn * tn)) == wc);
+        (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc) %
+          (bn / (wn * tn)) == wc);
       rewrite each
         warp_tile dBlock (wm * tm) (wn * tn)
-          (wr * (bn / (wn * tn)) + wc)
+          (flatten_index (bm / (wm * tm)) (bn / (wn * tn)) wr wc)
       as array2_subtile dBlock (wm * tm) (wn * tn) wr wc;
     };
   array2_untile_approximates dBlock (wm * tm) (wn * tn) rBlock;

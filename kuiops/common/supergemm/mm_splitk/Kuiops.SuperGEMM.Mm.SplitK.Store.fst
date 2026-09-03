@@ -18,7 +18,9 @@ module Kuiops.SuperGEMM.Mm.SplitK.Store
 open Kuiper
 open Kuiper.Tensor { array2, layout2 }
 open Kuiper.Tensor.Tiling { array2_extract_tile_st, subtile_layout }
-open Kuiper.Array2.Strided { strided_row_major, strided_row_major_subtile }
+open Kuiops.Array2.Strided
+  { strided_row_major, to_kuiper_strided_row_major,
+    lemma_writable_strided_row_major_stride_positive }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, fragment, array_fragment_pts_to,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
@@ -29,7 +31,6 @@ open Kuiops.SuperGEMM.Mm.SplitK.StoreLemmas
     tile_approx_from_subtiles }
 open Pulse.Lib.Trade
 open Kuiops.SuperGEMM.Mm.Params { frag, frag_sz, mfrag, nfrag }
-open Pulse.Lib.Array { op_Array_Access }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
@@ -81,8 +82,11 @@ fn store_frag_row
     let idx : szlt (reveal a * reveal b) = i_sz *^ bsz +^ jv;
     array_fragment_pts_to_ref accFrags;
     array_fragment_extract_ro accFrags idx;
+    lemma_writable_strided_row_major_stride_positive lT strT #_;
     mma_store accFrags.(idx) #_
-      #(strided_row_major_subtile lT frag frag (SZ.v i_sz) (SZ.v jv))
+      #(Kuiper.Array2.Strided.strided_row_major_subtile lT
+          #_ #(to_kuiper_strided_row_major lT strT)
+          frag frag (SZ.v i_sz) (SZ.v jv))
       sTile;
     with vf. assert (sTile |-> Frac (1.0R /. warp_size) vf);
     assert pure (vf == Seq.index em0 (SZ.v idx));

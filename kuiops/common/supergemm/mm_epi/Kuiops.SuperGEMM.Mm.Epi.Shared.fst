@@ -22,7 +22,7 @@ open Kuiper
 
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { chest2, chest_comb }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_lane_approximates' }
@@ -271,7 +271,7 @@ let block_post_c
    C read share is simply carried alongside, unzipped on the way in and zipped
    back on the way out. *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_setup_c
   (#et_ab #et_acc : Type0)
@@ -317,7 +317,7 @@ fn block_setup_c
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_teardown_c
   (#et_ab #et_acc : Type0)
@@ -420,7 +420,7 @@ let kpre_sendable_c
     pC
     #base_send #sendC
 
-#push-options "--split_queries always"
+#push-options ""
 let kpost1_sendable_c
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
   (#et_c : Type0) {| scalar et_c |}

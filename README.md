@@ -12,6 +12,28 @@ import kuipy
 kuipy.enable() # hooks in Inductor backend
 ```
 
+## Formal verification
+
+kuiLLM is checked against the fixed Kuiper nightly recorded by
+`KUIPER_NIGHTLY` in `kuiper.mk`. The package contains the corresponding F*,
+Pulse, Karamel, extraction plugin, checked Kuiper library, and CUDA headers.
+No Kuiper source checkout is required.
+
+```bash
+make -j$(nproc) prepare
+make -j$(nproc) verify-kuiops
+```
+
+The first command downloads the package into the ignored `.kuiper/` directory.
+Set `KUIPER_HOME=/path/to/package` to use an existing binary package. Continuous
+integration runs this formal verification on hosted CPU machines; it does not
+need CUDA or a GPU.
+
+The Python integration and numerical comparisons require a CUDA system with a
+matching host toolkit. They can be run independently with `make test` and
+`make verify`. These experiments complement the formal verification but are
+not its basis.
+
 ## Organization
 
 - `kuipy/`: The Python code that supports JIT extraction, compilation, etc. and all the 
@@ -33,7 +55,7 @@ kuipy.enable() # hooks in Inductor backend
    the specialized kernel from the information available in the Python context.
    The fstar template gets extracted to CUDA and then linked against the cuda/C++ wrapper 
    that exposes a Torch::Tensor compatible interface.
-    - `kuiops/common` has generic kernel implementations and other reusable functions between different operators.
+    - `kuiops/common` has generic kernel implementations and other reusable functions between different operators. Project-owned extensions use the `Kuiops` namespace so they cannot shadow modules supplied by the Kuiper package.
 - `etc/`: Experiments and miscellaneous support files.
 - `tests/`: Unit tests for kuipy.
 - `infer.py`: Where the main Qwen2.5 integration test lives.

@@ -9,7 +9,7 @@ module Kuiops.SuperGEMM.Mm.SplitK.Output
    output capability here is a warp-tile share -- NOT the per-lane cell partition
    ([Mm.Output.output_lane_live']) the shared-scratch epilogue needs.
 
-   [warp_tile_pts_to] from [Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc] is
+   [warp_tile_pts_to] from [Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc] is
    already exactly that predicate, layout-generic; this module only adds the
    [live] split/gather around it. *)
 
@@ -18,8 +18,8 @@ module Kuiops.SuperGEMM.Mm.SplitK.Output
 open Kuiper
 open Kuiper.Tensor
 open Kuiper.Tensor.Tiling
-open Kuiper.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
+open Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc { warp_tile_pts_to, warp_tile_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { epilogue_warp_input }
 
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor

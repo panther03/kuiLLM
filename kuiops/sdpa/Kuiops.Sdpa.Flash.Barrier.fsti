@@ -17,7 +17,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Kernel.FlashAttention.KernelDesc
 
 open Kuiper.TensorCore
@@ -87,6 +87,15 @@ fn strided_cells2_gather
     (forall+ (tid : natlt nthr). strided_cells2 a nthr tid)
   ensures
     exists* (e : chest2 et rows cols). a |-> Frac 1.0R e
+
+ghost
+fn cells1_gather_v
+  (#et : Type0) (#len : nat) (#l : layout1 len)
+  (a : array1 et l) (e : chest1 et len)
+  requires
+    pure (SZ.fits (tlayout_ulen l)) **
+    (forall+ (i : natlt len). Cell a (idx1 i) |-> Frac 1.0R (acc1 e i))
+  ensures a |-> Frac 1.0R e
 
 ghost
 fn b0_o_transform
@@ -189,15 +198,6 @@ fn b2_scale_transform
     (forall+ (_tid : natlt (block_threads nw)).
       exists* (e : chest1 et 16).
         shgl |-> Frac (1.0R /. (block_threads nw)) e)
-
-ghost
-fn cells1_gather_v
-  (#et : Type0) (#len : nat) (#l : layout1 len)
-  (a : array1 et l) (e : chest1 et len)
-  requires
-    pure (SZ.fits (tlayout_ulen l)) **
-    (forall+ (i : natlt len). Cell a (idx1 i) |-> Frac 1.0R (acc1 e i))
-  ensures a |-> Frac 1.0R e
 
 ghost
 fn b2_o_transform_v

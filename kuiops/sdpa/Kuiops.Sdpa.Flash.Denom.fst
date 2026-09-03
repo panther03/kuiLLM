@@ -231,7 +231,7 @@ let rec row_sum_masked
 let nonneg_not_nan (#et : Type0) {| floating et |} (x : et)
   : Lemma (requires lte zero x) (ensures not_nan x)
   = introduce NaN? (kind x) ==> False
-    with _. FA.cmp_nan (zero #et) x
+    with FA.cmp_nan (zero #et) x
 
 let rec gmax_ok
   (#et : Type0) {| floating et |} (#nw #bm : nat)
@@ -371,11 +371,11 @@ let fmax_case_r (#et : Type0) {| floating et |} (x y : et)
           (ensures Finite? (kind y))
   = ok_not_nan x; ok_not_nan y;
     introduce y == neg #et infinity ==> False
-    with _. (SB.lte_ninf x; lte_is_lt_or_eq x y)
+    with (SB.lte_ninf x; lte_is_lt_or_eq x y)
 
 #pop-options
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 40 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
 
 (* ------------------------------------------------------------------ *)
 (* The warp invariant, and its preservation by one online-softmax step. *)
@@ -384,7 +384,7 @@ let fmax_case_r (#et : Type0) {| floating et |} (x y : et)
 let pos_not_nan (#et : Type0) {| floating et |} (x : et)
   : Lemma (requires lt zero x) (ensures not_nan x)
   = introduce NaN? (kind x) ==> False
-    with _. FA.cmp_nan (zero #et) x
+    with FA.cmp_nan (zero #et) x
 
 let ninf_not_finite (#et : Type0) {| floating et |} ()
   : Lemma (~(Finite? (kind (neg #et infinity))))
@@ -435,7 +435,7 @@ let step_inv
      else (mul_comm vl cw; mul_zero cw));
     FA.add_nonneg (vl `mul` cw) rs;
     introduce m' == neg #et infinity ==> (vl `mul` cw) `add` rs == zero
-    with _. begin
+    with begin
       ok_lte_ninf rm; ok_lte_ninf vm;
       introduce forall (t : natlt 16). acc1 es t == neg #et infinity
       with row_max_ninf_all es 16 t;
@@ -444,13 +444,12 @@ let step_inv
       add_zero (zero #et)
     end;
     introduce Finite? (kind m') ==> lt zero ((vl `mul` cw) `add` rs)
-    with _. begin
+    with begin
       if lt vm rm
       then begin
         row_max_cases es 16;
         eliminate exists (j : natlt 16). j < 16 /\ rm == acc1 es j
-        returns lt zero rs
-        with _. row_sum_pos es m' 16 j
+        with row_sum_pos es m' 16 j
       end
       else begin
         FA.sub_self vm;
@@ -554,7 +553,7 @@ let row_max_finite
     row_max_ub s k j;
     ninf_not_finite #et ();
     introduce SF.row_max s k == neg #et infinity ==> False
-    with _. ok_lte_ninf (acc1 s j)
+    with ok_lte_ninf (acc1 s j)
 
 (* Once the running maximum is finite it stays finite: [fmax] never returns
    the sentinel over a number. *)
@@ -649,7 +648,7 @@ let run_first_finite
 
 #pop-options
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 40 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
 
 (* ------------------------------------------------------------------ *)
 (* The block-wide denominator.                                          *)
@@ -713,17 +712,16 @@ let block_denom_pos
     gmax_cases eM i nw;
     ninf_not_finite #et_acc ();
     introduce SF.gmax eM i nw == neg #et_acc infinity ==> False
-    with _. ok_lte_ninf (acc2 eM 0 i);
+    with ok_lte_ninf (acc2 eM 0 i);
     introduce forall (w : natlt nw). lte (acc2 eM w i) (SF.gmax eM i nw)
     with gmax_ub eM i nw w;
     eliminate exists (w0 : natlt nw).
       w0 < nw /\ SF.gmax eM i nw == acc2 eM w0 i
-    returns lt zero (SF.gsum eM eL (SF.gmax eM i nw) i nw)
-    with _. gsum_pos eM eL (SF.gmax eM i nw) i nw w0
+    with gsum_pos eM eL (SF.gmax eM i nw) i nw w0
 
 #pop-options
 
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 40 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
 
 (* Warp [0] always runs at least once: an active row admits key [0], which
    lives in the first key tile. *)

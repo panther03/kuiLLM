@@ -10,7 +10,7 @@ module Kuiops.SuperGEMM.Mm.Stage
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 module SZ = Kuiper.SizeT
@@ -69,7 +69,7 @@ fn stage_tiles
   (#emBd : chest2 et bn bk) (fB : perm) (#eBs : chest2 et bn bk)
   (a_t_row a_t_col a_row_step a_iters : SZ.t)
   (b_t_row b_t_col b_row_step b_iters : SZ.t)
-  (b : Kuiper.PipelineCopy.pipeline_batch_t)
+  (b : Kuiops.PipelineCopy.pipeline_batch_t)
   (sqh : squash (
      SZ.v a_t_row == g_t_row bk (SZ.v (chunk et)) nthr tid /\
      SZ.v a_t_col == g_t_col bk (SZ.v (chunk et)) nthr tid /\
@@ -90,12 +90,12 @@ fn stage_tiles
   preserves gpu
   requires FB.own_strided_chunks mAd emAd nthr tid ** (mAs |-> Frac fA eAs) **
            FB.own_strided_chunks mBd emBd nthr tid ** (mBs |-> Frac fB eBs) **
-           Kuiper.PipelineCopy.batch_live b
-  returns b' : Kuiper.PipelineCopy.pipeline_batch_t
+           Kuiops.PipelineCopy.batch_live b
+  returns b' : Kuiops.PipelineCopy.pipeline_batch_t
   ensures
-    pledge0 (Kuiper.PipelineCopy.batch_done b)
+    pledge0 (Kuiops.PipelineCopy.batch_done b)
       (FB.own_strided_chunks mAd eAs nthr tid ** FB.own_strided_chunks mBd eBs nthr tid **
        (mAs |-> Frac fA eAs) ** (mBs |-> Frac fB eBs)) **
-    Kuiper.PipelineCopy.batch_committed b **
-    Kuiper.PipelineCopy.batch_live b' **
+    Kuiops.PipelineCopy.batch_committed b **
+    Kuiops.PipelineCopy.batch_live b' **
     pure (fst b' == fst b /\ snd b' > snd b)

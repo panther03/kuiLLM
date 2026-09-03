@@ -157,6 +157,20 @@ fn join_array2_from_strided_chunks_underspec
   ensures
     live m
 
+(* The odd branch indexes tile [it / 2].  Make the arithmetic fact explicit;
+   recent F* versions verify each leaf goal independently. *)
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let half_lt_quot (it shared bk : nat)
+  : Lemma (requires shared > 0 /\ bk > 0 /\ shared % bk = 0 /\ it < 2 * shared / bk)
+          (ensures it / 2 < shared / bk)
+          [SMTPat (it / 2); SMTPat (shared / bk)]
+  = let q = shared / bk in
+    FStar.Math.Lemmas.lemma_div_exact shared bk;
+    assert (2 * shared == (2 * q) * bk);
+    FStar.Math.Lemmas.multiple_division_lemma (2 * q) bk;
+    FStar.Math.Lemmas.euclidean_division_definition it 2
+#pop-options
+
 let barrier_p
   (#etA : Type0) (#etB : Type0)
   {| sized etA, has_vec_cpy etA, sized etB, has_vec_cpy etB |}
@@ -182,9 +196,11 @@ let barrier_p
     else
       let mrow = bid / (cols/bn) in
       let mcol = bid % (cols/bn) in
+      half_lt_quot it shared bk;
       own_strided_chunks m1 (ematrix_subtile eA bm bk mrow (it / 2)) nthr tid **
       own_strided_chunks_cm m2 (ematrix_subtile eB bk bn (it / 2) mcol) nthr tid
 
+#push-options "--z3rlimit 40"
 let barrier_q
   (#etA : Type0) (#etB : Type0)
   {| sized etA, has_vec_cpy etA, sized etB, has_vec_cpy etB |}
@@ -210,8 +226,10 @@ let barrier_q
     else
       let mrow = bid / (cols/bn) in
       let mcol = bid % (cols/bn) in
+      half_lt_quot it shared bk;
       bp_sharing m1 (ematrix_subtile eA bm bk mrow (it / 2)) nthr **
       bp_sharing m2 (ematrix_subtile eB bk bn (it / 2) mcol) nthr
+#pop-options
 
 let contract
   (#etA : Type0) (#etB : Type0)

@@ -13,8 +13,7 @@ dependencies:
   - pip
   - make
   - curl
-  # GNU indent + sed: the karamel output fix-up pass (kuipy/toolchain.py).
-  - indent
+  # The generated-code fix-up pass uses sed plus a pinned clang-format binary.
   - sed
   # Used by torch.utils.cpp_extension to build the JIT kernel .so.
   - ninja

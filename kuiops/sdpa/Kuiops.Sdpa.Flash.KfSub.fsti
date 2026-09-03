@@ -9,7 +9,7 @@ open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Slice
 open Kuiper.Tensor.Layout.Alg
 open Kuiper.Tensor.Tiling
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorCore
 open Kuiper.Kernel.FlashAttention.KernelDesc
 open Kuiper.EMatrix
@@ -344,6 +344,105 @@ let jt_rest
     jt_rest_v #et_ab #et_acc d sk b hq sq shK shV shS shP shO shQ shPVc shcw shm shl
       gK gV gmask #fQ #fKg #fVg #fmask #eQ #eKg #eVg #emask vm vl eOw i
 
+
+val tile_idx_lem (s i r n : nat)
+  : Lemma (requires s > 0 /\ (s /? n) /\ i < n / s /\ r < s) (ensures s * i + r < n)
+
+ghost
+fn when__elim_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
+  requires when__ b q
+  ensures q ()
+
+ghost
+fn when__elim_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
+  requires when__ b q
+  ensures emp
+
+ghost
+fn when__intro_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
+  requires q ()
+  ensures when__ b q
+
+ghost
+fn when__intro_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
+  requires emp
+  ensures when__ b q
+
+ghost
+fn when_elim_true (b:bool{b == true}) (q : slprop)
+  requires when_ b q
+  ensures q
+
+ghost
+fn when_elim_false (b:bool{b == false}) (q : slprop)
+  requires when_ b q
+  ensures emp
+
+ghost
+fn when_intro_true (b:bool{b == true}) (q : slprop)
+  requires q
+  ensures when_ b q
+
+ghost
+fn when_intro_false (b:bool{b == false}) (q : slprop)
+  ensures when_ b q
+
+ghost
+fn stride_reindex
+  (#et:Type0) (#cols:nat) (#l:layout2 16 cols)
+  (#_ : squash (warp_row_span /?+ 16))
+  (#_ : squash (16 /?+ cols))
+  (shX : array2 et l)
+  (i j : natlt BW.warp_size)
+  requires
+    pure (i == j) **
+    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
+       array2_stride_subtile shX warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
+  ensures
+    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
+       array2_stride_subtile shX warp_row_span 16 (j / 16) (j % 16) |-> Frac 1.0R r)
+
+ghost
+fn row_reindex
+  (#et:Type0) (#l : layout2 16 16)
+  (shA : array2 et l)
+  (i j : natlt BW.warp_size)
+  requires pure (i == j) ** when__ (i < 16) (fun _ -> row_subtile shA i)
+  ensures when__ (j < 16) (fun _ -> row_subtile shA j)
+
+ghost
+fn when__pin_cell16 (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (lane : natlt BW.warp_size) (dflt : et)
+  requires when__ (lane < 16) (fun _ -> cell_full shA lane)
+  returns v : Ghost.erased et
+  ensures  when__ (lane < 16) (fun _ -> cell_full_v shA lane (reveal v))
+
+ghost
+fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (lane : natlt BW.warp_size) (v : et)
+  requires when__ (lane < 16) (fun _ -> cell_full_v shA lane v)
+  ensures  when__ (lane < 16) (fun _ -> cell_full shA lane)
+
+(* Re-express a pinned row cell as a cell of a whole-matrix value, at the same
+   time renaming the warp/lane indices. *)
+ghost
+fn when__cell16_setval (#et:Type0) (#rows:nat) (#l:layout2 rows 16)
+  (a : array2 et l) (w1 w2 : natlt rows) (lane1 lane2 : natlt BW.warp_size)
+  (e : chest2 et rows 16) (v : et)
+  requires
+    when__ (lane1 < 16) (fun _ -> cell_full_v (row a w1) lane1 v)
+    ** pure (w1 == w2 /\ lane1 == lane2 /\
+             (lane1 < 16 ==> v == acc2 e w1 (clamp_nat_lt 16 lane1)))
+  ensures
+    when__ (lane2 < 16) (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2))
+
+ghost
+fn cell_reindex
+  (#et:Type0) (#l:layout1 16)
+  (shA : array1 et l) (i j : natlt BW.warp_size)
+  requires pure (i == j) ** when__ (i < 16) (fun _ -> cell_full shA i)
+  ensures when__ (j < 16) (fun _ -> cell_full shA j)
+
 inline_for_extraction noextract
 fn sdpa_flash_jt_body
   (#et_ab #et_acc : Type0)
@@ -424,102 +523,3 @@ fn sdpa_flash_jt_body
                    (SZ.v bi) (SZ.v qh) (SZ.v qpos) (SZ.v k0) (SZ.v cbound) scale
                    (jt_score_row (SZ.v d) eQ eKg (SZ.v k0) (SZ.v lane))
                    vm vl sr' pr' m' l' cw' /\ Finite? (kind cw')))
-
-ghost
-fn stride_reindex
-  (#et:Type0) (#cols:nat) (#l:layout2 16 cols)
-  (#_ : squash (warp_row_span /?+ 16))
-  (#_ : squash (16 /?+ cols))
-  (shX : array2 et l)
-  (i j : natlt BW.warp_size)
-  requires
-    pure (i == j) **
-    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
-       array2_stride_subtile shX warp_row_span 16 (i / 16) (i % 16) |-> Frac 1.0R r)
-  ensures
-    (exists* (r:chest2 et (16 / warp_row_span) (cols / 16)).
-       array2_stride_subtile shX warp_row_span 16 (j / 16) (j % 16) |-> Frac 1.0R r)
-
-ghost
-fn row_reindex
-  (#et:Type0) (#l : layout2 16 16)
-  (shA : array2 et l)
-  (i j : natlt BW.warp_size)
-  requires pure (i == j) ** when__ (i < 16) (fun _ -> row_subtile shA i)
-  ensures when__ (j < 16) (fun _ -> row_subtile shA j)
-
-ghost
-fn cell_reindex
-  (#et:Type0) (#l:layout1 16)
-  (shA : array1 et l) (i j : natlt BW.warp_size)
-  requires pure (i == j) ** when__ (i < 16) (fun _ -> cell_full shA i)
-  ensures when__ (j < 16) (fun _ -> cell_full shA j)
-
-
-val tile_idx_lem (s i r n : nat)
-  : Lemma (requires s > 0 /\ (s /? n) /\ i < n / s /\ r < s) (ensures s * i + r < n)
-
-ghost
-fn when__elim_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
-  requires when__ b q
-  ensures q ()
-
-ghost
-fn when__elim_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
-  requires when__ b q
-  ensures emp
-
-ghost
-fn when__intro_true (b:bool{b == true}) (q : squash (b2t b) -> slprop)
-  requires q ()
-  ensures when__ b q
-
-ghost
-fn when__intro_false (b:bool{b == false}) (q : squash (b2t b) -> slprop)
-  requires emp
-  ensures when__ b q
-
-ghost
-fn when__pin_cell16 (#et:Type0) (#l:layout1 16)
-  (shA : array1 et l) (lane : natlt BW.warp_size) (dflt : et)
-  requires when__ (lane < 16) (fun _ -> cell_full shA lane)
-  returns v : Ghost.erased et
-  ensures  when__ (lane < 16) (fun _ -> cell_full_v shA lane (reveal v))
-
-ghost
-fn when__forget_cell16 (#et:Type0) (#l:layout1 16)
-  (shA : array1 et l) (lane : natlt BW.warp_size) (v : et)
-  requires when__ (lane < 16) (fun _ -> cell_full_v shA lane v)
-  ensures  when__ (lane < 16) (fun _ -> cell_full shA lane)
-
-(* Re-express a pinned row cell as a cell of a whole-matrix value, at the same
-   time renaming the warp/lane indices. *)
-ghost
-fn when__cell16_setval (#et:Type0) (#rows:nat) (#l:layout2 rows 16)
-  (a : array2 et l) (w1 w2 : natlt rows) (lane1 lane2 : natlt BW.warp_size)
-  (e : chest2 et rows 16) (v : et)
-  requires
-    when__ (lane1 < 16) (fun _ -> cell_full_v (row a w1) lane1 v)
-    ** pure (w1 == w2 /\ lane1 == lane2 /\
-             (lane1 < 16 ==> v == acc2 e w1 (clamp_nat_lt 16 lane1)))
-  ensures
-    when__ (lane2 < 16) (fun _ -> cell_full_v (row a w2) lane2 (acc2 e w2 lane2))
-
-ghost
-fn when_elim_true (b:bool{b == true}) (q : slprop)
-  requires when_ b q
-  ensures q
-
-ghost
-fn when_elim_false (b:bool{b == false}) (q : slprop)
-  requires when_ b q
-  ensures emp
-
-ghost
-fn when_intro_true (b:bool{b == true}) (q : slprop)
-  requires q
-  ensures when_ b q
-
-ghost
-fn when_intro_false (b:bool{b == false}) (q : slprop)
-  ensures when_ b q

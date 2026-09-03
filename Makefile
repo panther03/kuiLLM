@@ -1,14 +1,22 @@
-.PHONY: infer infer-kuiper infer-batched infer-no-kuiper verify dump-kernels profile-kuiper-nsys profile-no-kuiper-nsys golden golden-compiled profile-golden profile-golden-triton profile-golden-no-triton test verify-kuiops install-kuiper-src install-kuiper-release install-kuiper-nightly _reset-kuiper-touch _install-kuiper-package _install-kuiper-tree
+include kuiper.mk
 
-# Default install location (cwd/inst), matching Kuiper's install-kuiper.sh.
-KUIPER_INST ?= $(CURDIR)/inst
+.DEFAULT_GOAL := verify-kuiops
+.PHONY: infer infer-kuiper infer-batched infer-no-kuiper verify dump-kernels \
+	profile-kuiper-nsys profile-no-kuiper-nsys golden golden-compiled \
+	profile-golden profile-golden-triton profile-golden-no-triton test \
+	prepare verify-kuiops lint lint-fstar lint-generated list-admits \
+	print-kuiper-nightly
+
 KUIPER_INSTALLER_URL ?= https://raw.githubusercontent.com/FStarLang/kuiper/main/scripts/install-kuiper.sh
+
+print-kuiper-nightly:
+	@printf '%s\n' "$(KUIPER_NIGHTLY)"
 
 NSYS := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node
 NSYS_RANGE := nsys profile --force-overwrite=true -t cuda --cuda-graph-trace=node --capture-range=cudaProfilerApi --capture-range-end=stop
 
 # Compiled Qwen2.5 with Kuiper kernels hooked into torch.compile (default).
-infer-kuiper:
+infer-kuiper: prepare
 	python3 infer.py
 
 # Build every matched kernel in one combined compilation (batch compile).
@@ -18,7 +26,7 @@ infer-kuiper:
 # replays a graph containing no Kuiper kernels and reports the stock number
 # (155.5 vs 65.2 tok/s/seq on an A6000). Use `make infer-kuiper`. See the
 # comment at the batch_capture() call in infer.py.
-infer-batched:
+infer-batched: prepare
 	python3 infer.py --batch-compile
 
 infer: infer-batched
@@ -28,7 +36,7 @@ infer-no-kuiper:
 	python3 infer.py --no-kuiper
 
 # Check every Kuiper op against stock PyTorch (relative-Frobenius tolerance).
-verify:
+verify: prepare
 	python3 infer.py --verify
 
 # Trace the compiled graph and write its visualization and inventory to KERNELS.md.
@@ -68,70 +76,63 @@ profile-golden-no-triton:
 # .checked cache (see kuipy/toolchain.py) these run fully in parallel, and a
 # cold-cache run is dominated by F* extraction, so this scales well.
 NPROCS ?= 12
-test:
+test: prepare
 	KUIPY_JIT_NVCC_FAST=1 python3 -m pytest tests/ -n $(NPROCS)
 
-_reset-kuiper-touch:
-	@rm -f .kuiper.touch
+prepare: $(KUIPER_MARKER) $(CLANG_FORMAT) $(KUIPER_PLUGIN).cmxs
 
-install-kuiper-src: _reset-kuiper-touch
-	@if [ -z "$(KUIPER_HOME)" ]; then \
-		echo "Error: KUIPER_HOME is not defined." >&2; \
-		exit 1; \
-	fi
-	@+set -e; \
-	KUIPER_HOME=$$(realpath "$(KUIPER_HOME)"); \
-	$(MAKE) -C "$$KUIPER_HOME" -f verify.mk prepare verify-all ADMIT=1; \
-	$(MAKE) _install-kuiper-tree KUIPER_TREE="$$KUIPER_HOME"
-
-install-kuiper-release: _reset-kuiper-touch
-	@+$(MAKE) _install-kuiper-package KUIPER_PACKAGE_SOURCE=release
-
-install-kuiper-nightly: _reset-kuiper-touch
-	@+$(MAKE) _install-kuiper-package KUIPER_PACKAGE_SOURCE=nightly
-
-# TODO: "update-kuiper" for faster iteration (just copy over the .checked files without removing the whole thing)
-
-_install-kuiper-package:
-	@+set -e; \
-	case "$(KUIPER_PACKAGE_SOURCE)" in release|nightly) ;; \
-		*) echo "Error: invalid KUIPER_PACKAGE_SOURCE '$(KUIPER_PACKAGE_SOURCE)'." >&2; exit 1 ;; \
-	esac; \
+ifeq ($(KUIPER_HOME_MANAGED),1)
+$(KUIPER_MARKER):
+	@set -e; \
 	workdir=$$(mktemp -d); \
 	trap 'rm -rf "$$workdir"' EXIT; \
 	curl -fsSL "$(KUIPER_INSTALLER_URL)" -o "$$workdir/install-kuiper.sh"; \
-	bash "$$workdir/install-kuiper.sh" --$(KUIPER_PACKAGE_SOURCE) \
+	bash "$$workdir/install-kuiper.sh" --nightly --version "$(KUIPER_NIGHTLY)" \
 		--dest "$$workdir/kuiper" --no-link; \
-	$(MAKE) _install-kuiper-tree KUIPER_TREE="$$workdir/kuiper"
+	test -f "$$workdir/kuiper/.packaged"; \
+	rm -rf "$(KUIPER_HOME)"; \
+	mv "$$workdir/kuiper" "$(KUIPER_HOME)"; \
+	rm -rf .kuipy_cache; \
+	rm -f .depend; \
+	touch "$@"
+else
+$(KUIPER_MARKER):
+	$(error KUIPER_HOME does not contain a binary Kuiper package: $(KUIPER_HOME))
+endif
 
-_install-kuiper-tree:
-	@if [ -z "$(KUIPER_TREE)" ]; then \
-		echo "Error: KUIPER_TREE is not defined." >&2; \
-		exit 1; \
-	fi
-	@+set -e; \
-	KUIPER_TREE=$$(realpath "$(KUIPER_TREE)"); \
-	KUIPER_INST=$$(realpath -m "$(KUIPER_INST)"); \
-	rm -rf "$$KUIPER_INST"; \
-	cp -r "$$KUIPER_TREE/inst" "$$KUIPER_INST"; \
-	mkdir -p "$$KUIPER_INST/lib/fstar/kuiper.checked/"; \
-	find "$$KUIPER_TREE/obj" -name "*.checked" -type f -exec cp {} "$$KUIPER_INST/lib/fstar/kuiper.checked/" \; ; \
-	mkdir -p "$$KUIPER_INST/lib/fstar/kuiper"; \
-	find "$$KUIPER_TREE/src" -type f \( -name "*.fst" -o -name "*.fsti" \) -exec cp {} "$$KUIPER_INST/lib/fstar/kuiper/" \; ; \
-	echo "kuiper" >> "$$KUIPER_INST/lib/fstar/fstar.include"; \
-	echo "kuiper.checked" >> "$$KUIPER_INST/lib/fstar/fstar.include"; \
-	mkdir -p "$$KUIPER_INST/kuiper_extr/"; \
-	cp -r "$$KUIPER_TREE"/extraction/dune/_build/default/kuiper_extr* "$$KUIPER_INST/kuiper_extr/"; \
-	cp "$$KUIPER_TREE"/scripts/fixup.sed "$$KUIPER_INST/"; \
-	mkdir -p "$$KUIPER_INST"/include/kuiper; \
-	cp -r "$$KUIPER_TREE"/include/* "$$KUIPER_INST"/include/kuiper; \
-	touch .kuiper.touch
+$(CLANG_FORMAT): scripts/install-clang-format.sh
+	@CLANG_FORMAT_VERSION=$(CLANG_FORMAT_VERSION) \
+		./scripts/install-clang-format.sh "$(TOOLS_DIR)/clang-format-$(CLANG_FORMAT_VERSION)"
 
-.kuiper.touch:
-	@+$(MAKE) install-kuiper-src
+$(KUIPER_PLUGIN).cmxs: | $(KUIPER_MARKER)
+	@test -f "$(KUIPER_PLUGIN_SOURCE)"
+	@mkdir -p "$(dir $(KUIPER_PLUGIN))"
+	@ln -sf "$(KUIPER_PLUGIN_SOURCE)" "$@"
 
-verify-kuiops: .kuiper.touch
+verify-kuiops: prepare
 	@+$(MAKE) -f verify.mk verify-kuiops
+
+lint: lint-fstar lint-generated
+
+lint-fstar: $(KUIPER_MARKER)
+	( cd kuiops && "$(KUIPER_HOME)/scripts/git-sed" 's/[[:space:]]*$$//' )
+	( cd kuiops && "$(KUIPER_HOME)/scripts/find-pulse-noix.sh" )
+	( cd kuiops && "$(KUIPER_HOME)/scripts/check-attrs.sh" )
+
+lint-generated:
+	@for sh in $$(find kuiops -type f -name '*.fst.sh'); do \
+		fst=$${sh%.sh}; \
+		if git ls-files --error-unmatch "$$fst" >/dev/null 2>&1; then \
+			echo "ERROR: $$fst is generated from $$sh and should not be tracked" >&2; \
+			exit 1; \
+		fi; \
+	done
+
+list-admits: $(KUIPER_MARKER)
+	@git ls-files -z -- \
+		':(glob)kuiops/*.fst' ':(glob)kuiops/*.fsti' \
+		':(glob)kuiops/**/*.fst' ':(glob)kuiops/**/*.fsti' | \
+		xargs -0 python3 "$(KUIPER_HOME)/scripts/list-admits.py"
 
 # Delegate
 .PHONY: .force

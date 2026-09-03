@@ -32,7 +32,7 @@ module Kuiops.SuperGEMM.Mm.Shared
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 
 module SZ = Kuiper.SizeT
@@ -40,7 +40,7 @@ module SZ = Kuiper.SizeT
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
 open Kuiper.Chest { chest_map }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { own_lane_cells }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual }

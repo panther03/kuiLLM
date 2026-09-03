@@ -28,17 +28,17 @@ fn gather_async
   (eIdx : chest di (szlt (do @! (SZ.v dim))))
   (s : stream_t)
   (#fInp #fIdx : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (gInp |-> Frac fInp eInp) ** on gpu_loc (gIdx |-> Frac fIdx eIdx) **
            on gpu_loc (live gOut)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gInp |-> Frac fInp eInp) ** (gIdx |-> Frac fIdx eIdx) **
                    (gOut |-> gather_chest di do eInp dim eIdx)))
 {
   with eOut. assert on gpu_loc (gOut |-> eOut);
-  launch (gather_kd di do cdi cdo dim gInp gIdx gOut n eInp eIdx #eOut #fInp #fIdx) s;
+  Kuiops.Kernel.launch (gather_kd di do cdi cdo dim gInp gIdx gOut n eInp eIdx #eOut #fInp #fIdx) s;
 }

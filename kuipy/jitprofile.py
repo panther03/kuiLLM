@@ -2,7 +2,7 @@
 
 Enabled with ``KUIPY_JIT_PROFILE=1`` (or ``=<path>`` to also dump a JSON trace).
 Every expensive stage of a kernel build -- F* check, F* extract, karamel, the
-sed/indent fixup, lock waits, and the nvcc/ninja compile -- is wrapped in
+sed/clang-format fixup, lock waits, and the nvcc/ninja compile -- is wrapped in
 ``stage()``; a summary is printed at interpreter exit.
 
 The report has two views: per-stage aggregates (where the wall time goes across

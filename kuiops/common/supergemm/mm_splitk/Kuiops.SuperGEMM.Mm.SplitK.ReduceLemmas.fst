@@ -22,6 +22,42 @@ let ws_cell
   then acc2 eW (z * rows + i) j
   else zero
 
+let ws_run
+  (#et : Type0) {| scalar et |}
+  (#mws #cols : nat) (rows splits : nat)
+  (eW : chest2 et mws cols) (i base e z : nat)
+  : GTot et
+= ws_cell rows splits eW i (base + e) z
+
+let rec sum_upto_ext
+  (#et : Type0) {| scalar et |}
+  (f g : nat -> GTot et) (t : nat)
+  : Lemma (requires forall (z : nat). z < t ==> f z == g z)
+          (ensures sum_upto f t == sum_upto g t)
+          (decreases t)
+= if t = 0 then () else sum_upto_ext f g (t - 1)
+
+let ws_run_sum
+  (#et : Type0) {| scalar et |}
+  (#mws #cols : nat) (rows splits : nat)
+  (eW : chest2 et mws cols) (i base y t : nat)
+  : Lemma (sum_upto (ws_run rows splits eW i base y) t
+           == sum_upto (ws_cell rows splits eW i (base + y)) t)
+= sum_upto_ext (ws_run rows splits eW i base y)
+               (ws_cell rows splits eW i (base + y)) t
+
+let ws_run_sum_all
+  (#et : Type0) {| scalar et |}
+  (#mws #cols : nat) (rows splits : nat)
+  (eW : chest2 et mws cols) (i base c t : nat)
+  : Lemma (forall (y : natlt c).
+             sum_upto (ws_run rows splits eW i base y) t
+             == sum_upto (ws_cell rows splits eW i (base + y)) t)
+= introduce forall (y : natlt c).
+    sum_upto (ws_run rows splits eW i base y) t
+    == sum_upto (ws_cell rows splits eW i (base + y)) t
+  with ws_run_sum rows splits eW i base y t
+
 let rws_cell
   (#mws #cols : nat) (rows splits : nat)
   (rW : chest2 real mws cols) (i j z : nat)
@@ -59,7 +95,7 @@ let reduce_ws_cell_approx
 = introduce forall (z : nat).
       z < splits ==> ws_cell rows splits eW i j z %~ rws_cell rows splits rW i j z
   with introduce _ ==> _
-  with _. ws_cell_approx1 rows splits eW rW i j z;
+  with ws_cell_approx1 rows splits eW rW i j z;
   sum_upto_approx (ws_cell rows splits eW i j) (rws_cell rows splits rW i j) splits
 
 (* Row [z*rows+i] of the workspace is what split [z] contributed to output row

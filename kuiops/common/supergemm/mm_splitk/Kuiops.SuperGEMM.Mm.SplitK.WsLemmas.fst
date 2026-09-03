@@ -26,6 +26,28 @@ module SH = Kuiops.SuperGEMM.Mm.Shared
 
 #set-options "--fuel 1 --ifuel 1 --z3rlimit 15"
 
+(* F* does not infer these integer nonnegativity facts reliably after the
+   division expressions enter a large chest-tiling context.  Narrow triggers
+   keep them available precisely at the refined-index coercions below. *)
+private let div_nonneg_pat (a : nat) (b : pos)
+  : Lemma (a / b >= 0) [SMTPat (a / b)]
+= FStar.Math.Lemmas.nat_over_pos_is_nat a b
+
+private let mul_add_nonneg_pat (a b c : nat)
+  : Lemma (a * b + c >= 0) [SMTPat (a * b + c)]
+= ()
+
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 5"
+let reassoc_index (rows bm wm : pos) (z block idx : nat)
+  (_ : squash (bm /? rows /\ wm /? bm))
+  : Lemma (
+      (z * (rows / bm) + block) * (bm / wm) + idx
+      == z * (rows / wm) + (block * (bm / wm) + idx))
+= SH.div_compose rows bm wm;
+  ML.distributivity_add_left (z * (rows / bm)) block (bm / wm);
+  ML.paren_mul_right z (rows / bm) (bm / wm)
+#pop-options
+
 (* The whole workspace, as a real matrix: slab [z] is split [z]'s partial.
    [mws] and [shared] are separate indices tied to [splits] by the squash, so
    callers holding a [chest2 real rows k] with [k == splits*ks] need no
@@ -60,7 +82,7 @@ let ws_target_slab
 (* Index algebra only: re-associating the (block, warp) tiling of an abstract
    [mws x cols] matrix as (slab, warp).  Kept free of [ws_target] so it never
    unfolds [ematrix_from_tiles]. *)
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 20 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
 let subtile_reassoc
   (#mws #cols : pos)
   (rW : chest2 real mws cols)
@@ -92,18 +114,30 @@ let subtile_reassoc
   Kuiper.Divides.lemma_divides_trans wm rows mws;
   SH.grow_bound mws rows bm z block_row;
   SH.grow_bound mws rows wm z grow;
-  SH.div_compose rows bm wm;
-  ML.distributivity_add_left (z * (rows / bm)) block_row (bm / wm);
-  ML.paren_mul_right z (rows / bm) (bm / wm);
-  assert (brg * (bm / wm) + idx_m == z * (rows / wm) + grow);
-  subtile_subtile_compose rW bm bn wm wn brg bcol idx_m idx_n ();
+  reassoc_index rows bm wm z block_row idx_m ();
+  let rr : natlt (mws / wm) = z * (rows / wm) + grow in
+  let cc : natlt (cols / wn) = gcol in
+  let whole = ematrix_subtile rW wm wn rr cc in
+  let lhs =
+    ematrix_subtile (ematrix_subtile rW bm bn brg bcol)
+      wm wn idx_m idx_n in
+  let rhs =
+    ematrix_subtile (ematrix_subtile rW rows cols z 0)
+      wm wn grow gcol in
+  subtile_subtile_compose rW bm bn wm wn brg bcol idx_m idx_n ()
+    rr cc () ();
+  Kuiper.Chest.lemma_equal_intro lhs whole;
+  Kuiper.Chest.ext lhs whole;
   subtile_subtile_compose rW rows cols wm wn z 0 grow gcol ()
+    rr cc () ();
+  Kuiper.Chest.lemma_equal_intro rhs whole;
+  Kuiper.Chest.ext rhs whole
 #pop-options
 
 (* The three-level composition: the (bm,bn) block [brg,bcol] of the workspace,
    further tiled at (wm,wn) by [idx_m,idx_n], is the warp's [warp_matmul] over
    split [z]'s k-slice. *)
-#push-options "--fuel 1 --ifuel 1 --z3rlimit 20 --split_queries always"
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
 let ws_warp_target
   (#rows #cols #shared : pos) (mws splits ks : pos)
   (rA : chest2 real rows shared) (rB : chest2 real cols shared)

@@ -17,9 +17,9 @@ module Kuiops.SuperGEMM.Mm.SplitK.Reduce
 
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
-open Kuiper.Array2.Vectorized { array2_vec_read, array2_vec_write }
+open Kuiops.Array2.Vectorized { array2_vec_read, array2_vec_write }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.ForEvery
 open Kuiper.Tensor.Tiling { array2_subtile, array2_tile, array2_untile_underspec, subtile_layout }
@@ -113,7 +113,7 @@ let gran_ub (m : nat) (gc : pos) : prop =
 let gran_ub_lemma (m : nat) (gc : pos) : Lemma (gran_ub m gc)
 = introduce forall (x : nat). x < m * gc ==> x / gc < m
   with introduce _ ==> _
-  with _. div_ub x m gc
+  with div_ub x m gc
 
 unfold
 let gcols (et_d : Type0) {| sized et_d, has_vec_cpy et_d |} (n : szp) : nat
@@ -144,7 +144,7 @@ let d_gran_at
     (array2_subtile gD 1 (SZ.v (chunk et_d)) di dj |-> v) **
     pure (v %~ ematrix_subtile rD 1 (SZ.v (chunk et_d)) di dj)
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn rsetup
   (#et_acc #et_d : Type0)
@@ -190,7 +190,7 @@ fn rsetup
 }
 #pop-options
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 ghost
 fn rteardown
   (#et_acc #et_d : Type0)
@@ -245,6 +245,75 @@ fn rteardown
 }
 #pop-options
 
+let gran_col_bound (c : pos) (n : nat) (dj y : nat)
+  : Lemma (requires c /?+ n /\ dj < n / c /\ y < c)
+          (ensures dj * c + y < n)
+= let z = Kuiper.Divides.get_factor c n in
+  ML.cancel_mul_div c z;
+  ML.lemma_mult_le_right c (dj + 1) z;
+  ML.swap_mul z c;
+  ML.distributivity_add_left dj 1 c
+
+let gran_col_bound_all (c : pos) (n : nat) (dj : nat)
+  : Lemma (requires c /?+ n /\ dj < n / c)
+          (ensures forall (y : natlt c). dj * c + y < n)
+= introduce forall (y : natlt c). dj * c + y < n
+  with gran_col_bound c n dj y
+
+(* Add one vector read to a contiguous run of the wider accumulator buffer.
+   Keeping this generic inner loop separate avoids asking the solver to carry
+   the tensor and kernel contracts through the pointwise sequence update. *)
+#push-options "--z3rlimit 10 --fuel 1 --ifuel 1"
+inline_for_extraction noextract
+fn acc_chunk
+  (#et_acc : Type0) {| scalar et_acc |}
+  (cd ca : szp)
+  (abuf vbuf : A.array et_acc)
+  (g : nat -> nat -> GTot et_acc)
+  (sv : erased nat)
+  (ev : SZ.t { SZ.v ev + SZ.v ca <= SZ.v cd })
+  (#bv : erased (seq et_acc))
+  (#av0 : erased (seq et_acc))
+  ()
+  preserves vbuf |-> bv
+  requires abuf |-> av0
+  requires pure (
+    A.length abuf == SZ.v cd /\ A.length vbuf == SZ.v ca /\
+    Seq.length av0 == SZ.v cd /\ Seq.length bv == SZ.v ca /\
+    (forall (x : natlt (SZ.v ca)). Seq.index bv x == g (SZ.v ev + x) sv) /\
+    (forall (e : natlt (SZ.v cd)).
+       Seq.index av0 e
+       == SL.sum_upto (g e) (if e < SZ.v ev then sv + 1 else sv)))
+  ensures exists* (av : seq et_acc).
+    abuf |-> av **
+    pure (Seq.length av == SZ.v cd /\
+          (forall (e : natlt (SZ.v cd)).
+             Seq.index av e
+             == SL.sum_upto (g e)
+                  (if e < SZ.v ev + SZ.v ca then sv + 1 else sv)))
+{
+  let mut xc = 0sz;
+  while (!xc <^ ca)
+    invariant exists* (xv : SZ.t) (av : seq et_acc).
+      xc |-> xv ** abuf |-> av **
+      pure (SZ.v xv <= SZ.v ca /\ Seq.length av == SZ.v cd /\
+            (forall (e : natlt (SZ.v cd)).
+               Seq.index av e
+               == SL.sum_upto (g e)
+                    (if e < SZ.v ev + SZ.v xv then sv + 1 else sv)))
+    decreases (SZ.v ca - SZ.v !xc)
+  {
+    let xv = !xc;
+    let b = A.op_Dot_Lparen_Rparen vbuf xv;
+    with av. assert abuf |-> av;
+    let ax : szlt (SZ.v cd) = ev +^ xv;
+    let a = A.op_Dot_Lparen_Rparen abuf ax;
+    A.op_Dot_Lparen_Rparen_Less_Minus abuf ax (add a b);
+    xc := !xc +^ 1sz;
+  };
+}
+#pop-options
+
 (* ---------------------------------------------------------------------- *)
 (* per-thread body                                                          *)
 (* ---------------------------------------------------------------------- *)
@@ -271,7 +340,7 @@ let rk_sq
   aligned_strided_row_major (SZ.v (chunk et_d)) strD /\
   SZ.fits lD.ulen /\ SZ.fits lW.ulen
 
-#push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries no"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 inline_for_extraction noextract
 fn rkf_at
   (#et_acc #et_d : Type0)
@@ -330,8 +399,8 @@ fn rkf_at
             (forall (e : natlt (SZ.v (chunk et_d))).
                Seq.index av e
                == SL.sum_upto
-                    (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
-                       (SZ.v dj * SZ.v (chunk et_d) + e))
+                    (RL.ws_run (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                       (SZ.v dj * SZ.v (chunk et_d)) e)
                     (SZ.v sv)))
     decreases (SZ.v splits - SZ.v !sc)
   {
@@ -347,13 +416,14 @@ fn rkf_at
               (forall (e : natlt (SZ.v (chunk et_d))).
                  Seq.index av e
                  == SL.sum_upto
-                      (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
-                         (SZ.v dj * SZ.v (chunk et_d) + e))
+                      (RL.ws_run (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                         (SZ.v dj * SZ.v (chunk et_d)) e)
                       (if e < SZ.v ev then SZ.v sv + 1 else SZ.v sv)))
       decreases (SZ.v (chunk et_d) - SZ.v !ec)
     {
       let ev = !ec;
       let wcol : szlt (SZ.v n - SZ.v (chunk et_acc) + 1) = dj *^ chunk et_d +^ ev;
+      assert pure (SZ.v wcol == SZ.v dj * SZ.v (chunk et_d) + SZ.v ev);
       Kuiper.Divides.lemma_divides_product_r (SZ.v (chunk et_acc)) (SZ.v dj) (SZ.v (chunk et_d));
       Kuiper.Divides.lemma_divides_sum (SZ.v (chunk et_acc))
         (SZ.v dj * SZ.v (chunk et_d)) (SZ.v ev);
@@ -363,31 +433,11 @@ fn rkf_at
       cell_aligned16 lW gW (SZ.v wrow) (SZ.v wcol);
       array2_vec_read gW wrow wcol vbuf;
       RL.ws_row_bound (SZ.v m) (SZ.v splits) (SZ.v mws) (SZ.v sv) (SZ.v di);
-      let mut xc = 0sz;
-      while (!xc <^ chunk et_acc)
-        invariant exists* (xv : SZ.t) (av bv : seq et_acc).
-          xc |-> xv ** abuf |-> av ** vbuf |-> bv **
-          pure (SZ.v xv <= SZ.v (chunk et_acc) /\
-                Seq.length av == SZ.v (chunk et_d) /\
-                Seq.length bv == SZ.v (chunk et_acc) /\
-                (forall (x : natlt (SZ.v (chunk et_acc))).
-                   Seq.index bv x == acc2 eW (SZ.v wrow) (SZ.v wcol + x)) /\
-                (forall (e : natlt (SZ.v (chunk et_d))).
-                   Seq.index av e
-                   == SL.sum_upto
-                        (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
-                           (SZ.v dj * SZ.v (chunk et_d) + e))
-                        (if e < SZ.v ev + SZ.v xv then SZ.v sv + 1 else SZ.v sv)))
-        decreases (SZ.v (chunk et_acc) - SZ.v !xc)
-      {
-        let xv = !xc;
-        with bv. assert vbuf |-> bv;
-        let b = A.op_Array_Access vbuf xv #1.0R #bv;
-        with av. assert abuf |-> av;
-        let a = A.op_Array_Access abuf (ev +^ xv) #1.0R #av;
-        A.op_Array_Assignment abuf (ev +^ xv) (add a b) #av;
-        xc := !xc +^ 1sz;
-      };
+      div_step (SZ.v (chunk et_acc)) (SZ.v ev) (SZ.v (chunk et_d));
+      acc_chunk (chunk et_d) (chunk et_acc) abuf vbuf
+        (RL.ws_run (SZ.v m) (SZ.v splits) eW (SZ.v di)
+          (SZ.v dj * SZ.v (chunk et_d)))
+        (SZ.v sv) ev ();
       Kuiper.Divides.lemma_divides_sum (SZ.v (chunk et_acc))
         (SZ.v ev) (SZ.v (chunk et_acc));
       div_step (SZ.v (chunk et_acc)) (SZ.v ev) (SZ.v (chunk et_d));
@@ -406,8 +456,8 @@ fn rkf_at
             (forall (e : natlt (SZ.v (chunk et_d))).
                Seq.index av e
                == SL.sum_upto
-                    (RL.ws_cell (SZ.v m) (SZ.v splits) eW (SZ.v di)
-                       (SZ.v dj * SZ.v (chunk et_d) + e))
+                    (RL.ws_run (SZ.v m) (SZ.v splits) eW (SZ.v di)
+                       (SZ.v dj * SZ.v (chunk et_d)) e)
                     (SZ.v splits)) /\
             (forall (y : natlt (SZ.v (chunk et_d))).
                y < SZ.v yv ==> Seq.index ov y == post_map (Seq.index av y)))
@@ -415,9 +465,9 @@ fn rkf_at
   {
     let yv = !yc;
     with av. assert abuf |-> av;
-    let a = A.op_Array_Access abuf yv #1.0R #av;
+    let a = abuf.(yv);
     with ov. assert obuf |-> ov;
-    A.op_Array_Assignment obuf yv (post_map a) #ov;
+    A.op_Dot_Lparen_Rparen_Less_Minus obuf yv (post_map a);
     yc := !yc +^ 1sz;
   };
 
@@ -432,6 +482,9 @@ fn rkf_at
 
   with v'. assert
     (array2_subtile gD 1 (SZ.v (chunk et_d)) (SZ.v di) (SZ.v dj) |-> v');
+  gran_col_bound_all (SZ.v (chunk et_d)) (SZ.v n) (SZ.v dj);
+  RL.ws_run_sum_all (SZ.v m) (SZ.v splits) eW (SZ.v di)
+    (SZ.v dj * SZ.v (chunk et_d)) (SZ.v (chunk et_d)) (SZ.v splits);
   RL.gran_approx (SZ.v m) (SZ.v splits) eW rW post_map post_map_r
     (SZ.v (chunk et_d)) v' (SZ.v di) (SZ.v dj) ();
   fold (d_gran_at gD ()
@@ -566,7 +619,7 @@ let rk_post_sendable
     #(approx_pts_to_sendable gW ((fW /. 2) /. njobs) rW)
     #(d_gran_at_sendable gD () rD (i / gcols et_d n) (i % gcols et_d n))
 
-#push-options "--z3rlimit 15 --fuel 1 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 15 --fuel 1 --ifuel 1"
 inline_for_extraction noextract
 let mk_reduce_kernel
   (#et_acc #et_d : Type0)

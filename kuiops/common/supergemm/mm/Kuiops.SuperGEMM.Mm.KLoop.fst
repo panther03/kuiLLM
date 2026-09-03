@@ -9,18 +9,17 @@ open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
 open Kuiper.Tensor.Layout
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiper.TensorCore
 open Kuiper.Chest { chest_map, equal, chest2, acc2, const }
-open Kuiper.EMatrix { mtranspose }
+open Kuiper.EMatrix { mtranspose, lemma_approximates_intro }
 open Kuiper.EMatrix.Tiling { update_tile_self }
 open Kuiper.Spec.GEMM { matmul, matplus, __gmatmul_single, __gmatmul_single_lemma,
                         gmatmul_single, matmul_tiles_lemma }
 open Kuiops.SuperGEMM.Mm.Spec { warp_matmul, mtranspose_subtile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 open Pulse.Lib.Array { length }
-open Pulse.Lib.Array.PtsTo { op_Array_Access }
 open Pulse.Lib.Trade
 open Pulse.Lib.Pledge
 
@@ -40,10 +39,42 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module B = Kuiper.Barrier
 module FB = Kuiops.GEMM.T.FlipFlopBarrier2
-module PC = Kuiper.PipelineCopy
+module PC = Kuiops.PipelineCopy
 module D = Kuiper.Divides
 module TR = Kuiops.Tensor.Transpose2
 module P = Kuiops.SuperGEMM.Mm.Params
+module KL = Kuiops.SuperGEMM.Mm.KernelLemmas
+module SH = Kuiops.SuperGEMM.Mm.Shared
+
+(* Native Kuiper witnesses for the two shared-memory layouts consumed by the
+   tensor-core package API.  Keeping these records direct prevents the
+   generalized broadcast-capable KuiLLM witness from entering loop proofs. *)
+inline_for_extraction noextract
+[@@"opaque_to_smt"]
+let kuiper_srm_l2_skewed_row_major
+  (#rows : erased nat) (#cols #pad : erased nat)
+  (ld : SZ.t { SZ.v ld == cols + pad })
+  (#_ : squash (cols + pad > 0))
+  : Kuiper.Array2.Strided.strided_row_major
+      (l2_skewed_row_major rows cols pad)
+= {
+    offset = 0sz;
+    stride = (ld <: szp);
+    pf = (fun i j -> ());
+  }
+
+inline_for_extraction noextract
+[@@"opaque_to_smt"]
+let kuiper_scm_of_srm
+  (#rows #cols : erased nat) (#l : layout2 rows cols)
+  (srm : Kuiper.Array2.Strided.strided_row_major l)
+  : Kuiper.Array2.Strided.strided_col_major (TR.ltranspose l)
+= {
+    offset = srm.offset;
+    stride = srm.stride;
+    pf = (fun (j : natlt cols) (i : natlt rows) ->
+            TR.ltranspose_cell l i j; srm.pf i j);
+  }
 
 let acc_len_reveal wm wn = reveal_opaque (`%acc_len) acc_len
 
@@ -70,22 +101,11 @@ let a_tile_bound (bm wm : pos) (warp_m i : nat)
   : Lemma (requires frag /?+ wm /\ wm /?+ bm /\
                     warp_m < bm / wm /\ i < wm / frag)
           (ensures warp_m * (wm / frag) + i < bm / frag)
-= let q1 = bm / wm in
-  let q2 = wm / frag in
-  Kuiper.Divides.lemma_nat_divides_pos_divides wm bm;
-  Kuiper.Divides.lemma_nat_divides_pos_divides frag wm;
-  let g1 = Kuiper.Divides.get_factor wm bm in   // wm * g1 == bm, g1 == q1
-  let g2 = Kuiper.Divides.get_factor frag wm in  // frag * g2 == wm, g2 == q2
-  FStar.Math.Lemmas.multiple_division_lemma q1 wm;
-  FStar.Math.Lemmas.multiple_division_lemma q2 frag;
-  // bm == q1 * q2 * frag, so bm / frag == q1 * q2
-  FStar.Math.Lemmas.paren_mul_right q1 q2 frag;
-  FStar.Math.Lemmas.multiple_division_lemma (q1 * q2) frag;
-  ()
+= SH.grow_bound bm wm frag warp_m i
 
 (* ----------------------------------------------------------------------------
    Functional (real-approximation) layer for one warp's k-tile of fragment
-   math.  Mirrors Kuiper.Kernel.GEMM.TensorCore2D.To.Fragments, specialized to
+   math.  Mirrors Kuiops.Kernel.GEMM.TensorCore2D.To.Fragments, specialized to
    the constant 16x16x16 fragment dims and to B's FragLCM tag (B consumed
    transposed for free by the tensor core).  Everything here is ghost/spec;
    the executable structure of [sp_load_a]/[sp_load_b]/[sp_mma] is unchanged.
@@ -181,25 +201,8 @@ let sp_b_tile_approx
    [subproducts_buf] advances by to the [__gmatmul_single] step of the k-loop
    accumulator invariant. ---- *)
 
-(* generic tile index bound: obr*(oR/iR)+ibr < R/iR *)
-let lemma_tile_index_bound (bigR oR iR : pos) (obr ibr : nat)
-  : Lemma (requires iR /?+ oR /\ oR /?+ bigR /\ obr < bigR/oR /\ ibr < oR/iR)
-          (ensures obr*(oR/iR)+ibr < bigR/iR)
-= let q1 = bigR / oR in
-  let q2 = oR / iR in
-  D.lemma_nat_divides_pos_divides oR bigR;
-  D.lemma_nat_divides_pos_divides iR oR;
-  let g1 = D.get_factor oR bigR in
-  let g2 = D.get_factor iR oR in
-  FStar.Math.Lemmas.multiple_division_lemma q1 oR;
-  FStar.Math.Lemmas.multiple_division_lemma q2 iR;
-  FStar.Math.Lemmas.paren_mul_right q1 q2 iR;
-  FStar.Math.Lemmas.multiple_division_lemma (q1 * q2) iR;
-  ()
-
 (* nested subtile composition (general): the inner tile of an outer tile is one
    subtile at the fine granularity with a composed index. *)
-#push-options "--fuel 0 --ifuel 0 --z3rlimit 30 --split_queries always"
 let ematrix_subtile_compose
   (#et : Type) (#bigR #bigC : nat)
   (m : chest2 et bigR bigC)
@@ -211,24 +214,13 @@ let ematrix_subtile_compose
                 tr == obr*(oR/iR)+ibr /\ tc == obc*(oC/iC)+ibc))
   : Lemma (ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc
            == ematrix_subtile m iR iC tr tc)
-= D.lemma_nat_divides_pos_divides iR oR;
-  D.lemma_nat_divides_pos_divides oR bigR;
-  let gr = D.get_factor iR oR in
-  let gc = D.get_factor iC oC in
-  FStar.Math.Lemmas.multiple_division_lemma gr iR;
-  FStar.Math.Lemmas.multiple_division_lemma gc iC;
-  let lhs = ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc in
-  let rhs = ematrix_subtile m iR iC tr tc in
-  introduce forall (i:natlt iR) (j:natlt iC). acc2 lhs i j == acc2 rhs i j
-  with (
-    FStar.Math.Lemmas.distributivity_add_left obr (oR/iR) iR;
-    FStar.Math.Lemmas.distributivity_add_left obc (oC/iC) iC;
-    FStar.Math.Lemmas.paren_mul_right obr (oR/iR) iR;
-    FStar.Math.Lemmas.paren_mul_right obc (oC/iC) iC;
-    ()
-  );
-  assert (equal lhs rhs)
-#pop-options
+= KL.subtile_subtile_compose m oR oC iR iC obr obc ibr ibc sq tr tc sq sq;
+  Kuiper.Chest.lemma_equal_intro
+    (ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc)
+    (ematrix_subtile m iR iC tr tc);
+  Kuiper.Chest.ext
+    (ematrix_subtile (ematrix_subtile m oR oC obr obc) iR iC ibr ibc)
+    (ematrix_subtile m iR iC tr tc)
 
 (* a subtile of a constant chest is the constant chest at the tile shape; the
    source dimensions are irrelevant.  Used to bridge the zeroed accumulator
@@ -350,7 +342,7 @@ fn sp_load_a
   (fmap : et_ab -> et_ab)
   (aFrags : array (fragment et_ab FragA frag frag frag FragLRM))
   (#lA : layout2 (SZ.v bm) (SZ.v bk)) {| T.ctlayout lA |}
-       {| strided_row_major (vtlayout_of_tlayout lA) |}
+       {| Kuiper.Array2.Strided.strided_row_major lA |}
   (gA : array2 et_ab lA)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
   (rA : chest2 real (SZ.v bm) (SZ.v bk) { eA %~ rA })
@@ -422,7 +414,7 @@ fn sp_load_b
   (fmap : et_ab -> et_ab)
   (bFrags : array (fragment et_ab FragB frag frag frag FragLCM))
   (#lB : layout2 (SZ.v bk) (SZ.v bn)) {| T.ctlayout lB |}
-       {| strided_col_major (vtlayout_of_tlayout lB) |}
+       {| Kuiper.Array2.Strided.strided_col_major lB |}
   (gB : array2 et_ab lB)
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))
   (rB : chest2 real (SZ.v bk) (SZ.v bn) { eB %~ rB })
@@ -561,11 +553,12 @@ fn sp_mma
 
       array_fragment_extract_ro aFrags !resIdxM;
       array_fragment_extract_ro bFrags !resIdxN;
-      array_fragment_extract accFrags (!resIdxM * nfrag + !resIdxN);
+      let acc_idx = !resIdxM *^ nfrag +^ !resIdxN;
+      array_fragment_extract accFrags (SZ.v acc_idx);
 
       let a_frag = aFrags.(!resIdxM);
       let b_frag = bFrags.(!resIdxN);
-      let acc_frag = accFrags.(!resIdxM *^ nfrag +^ !resIdxN);
+      let acc_frag = accFrags.(acc_idx);
 
       with eAt. assert a_frag |-> eAt;
       with eBt. assert b_frag |-> eBt;
@@ -734,10 +727,10 @@ fn subproducts
   (bFrags  : array (fragment et_ab FragB   frag frag frag FragLCM))
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (#lA : layout2 (SZ.v bm) (SZ.v bk)) {| T.ctlayout lA |}
-       {| strided_row_major (vtlayout_of_tlayout lA) |}
+       {| Kuiper.Array2.Strided.strided_row_major lA |}
   (gA : array2 et_ab lA)
   (#lB : layout2 (SZ.v bk) (SZ.v bn)) {| T.ctlayout lB |}
-       {| strided_col_major (vtlayout_of_tlayout lB) |}
+       {| Kuiper.Array2.Strided.strided_col_major lB |}
   (gB : array2 et_ab lB)
   (#eA : chest2 et_ab (SZ.v bm) (SZ.v bk))
   (#eB : chest2 et_ab (SZ.v bk) (SZ.v bn))
@@ -1197,17 +1190,28 @@ fn subproducts_buf
 
   lemma_ctranspose_approx eB_tile rB_phys ();
 
+  let layoutA = l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew);
+  let kuiper_strA =
+    kuiper_srm_l2_skewed_row_major
+      #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz #_;
+  let layoutB =
+    TR.ltranspose (l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew));
+  let kuiper_strB =
+    kuiper_scm_of_srm
+      (kuiper_srm_l2_skewed_row_major
+        #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz #_);
+
   subproducts bm bn bk wm wn fmap aFrags bFrags accFrags
-    #(l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew))
+    #layoutA
     #(c_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
-    #(srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
+    #kuiper_strA
     (skewed_view bm bk skew curbufA)
-    #(TR.ltranspose (l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew)))
+    #layoutB
     #(TR.ctlayout_ltranspose_inst
         #(SZ.v bn) #(SZ.v bk)
         #(l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew))
         #(c_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz) #())
-    #(TR.scm_of_srm (srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz))
+    #kuiper_strB
     (TR.atranspose (skewed_view bn bk skew curbufB))
     #eA_tile
     #(TR.ctranspose eB_tile)
@@ -1835,7 +1839,8 @@ fn unfold_cstage_nostage
 let kloop_acc_identity
   (#m #n #k : nat) (bm bn bk wm wn : pos)
   (rA : chest2 real m k) (rB : chest2 real n k)
-  (block_row block_col warp_m warp_n grow gcol vkt : nat)
+  (block_row block_col warp_m warp_n : nat)
+  (grow : natlt (m / wm)) (gcol : natlt (n / wn)) (vkt : nat)
   (sq : squash (
      bm /? m /\ bn /? n /\ bk /? k /\ wm /? bm /\ wn /? bn /\
      block_row < m / bm /\ block_col < n / bn /\
@@ -1848,8 +1853,10 @@ let kloop_acc_identity
       ==
       matmul (ematrix_subtile rA wm bk grow vkt)
              (ematrix_subtile (mtranspose rB) bk wn vkt gcol))
-= lemma_tile_index_bound m bm wm block_row warp_m;
-  lemma_tile_index_bound n bn wn block_col warp_n;
+= SH.grow_bound m bm wm block_row warp_m;
+  SH.grow_bound n bn wn block_col warp_n;
+  assert (grow < m / wm);
+  assert (gcol < n / wn);
   ematrix_subtile_compose rA bm bk wm bk block_row vkt warp_m 0 grow vkt ();
   ematrix_subtile_compose (mtranspose rB) bk bn bk wn vkt block_col 0 warp_n vkt gcol ()
 
@@ -1864,7 +1871,8 @@ fn kloop_acc_step
   (#m #n #k : nat) (bm bn bk wm wn : pos)
   (accFrags : array (fragment et_acc FragAcc frag frag frag FragLAcc))
   (rA : chest2 real m k) (rB : chest2 real n k)
-  (block_row block_col warp_m warp_n grow gcol vkt : nat)
+  (block_row block_col warp_m warp_n : nat)
+  (grow : natlt (m / wm)) (gcol : natlt (n / wn)) (vkt : nat)
   (sq : squash (
      length accFrags == (wm / frag) * (wn / frag) /\
      frag /? wm /\ frag /? wn /\
@@ -1885,8 +1893,6 @@ fn kloop_acc_step
       (__gmatmul_single (const _ 0.0R) matmul matplus
          (ematrix_tiled rA wm bk) (ematrix_tiled (mtranspose rB) bk wn) grow gcol (vkt + 1))
 {
-  lemma_tile_index_bound m bm wm block_row warp_m;
-  lemma_tile_index_bound n bn wn block_col warp_n;
   kloop_acc_identity bm bn bk wm wn rA rB block_row block_col warp_m warp_n grow gcol vkt ();
   subproducts_step_eq #m #k #n wm bk wn () (const _ 0.0R) rA (mtranspose rB) grow gcol vkt;
   unfold fragarrayAcc_approximates (wm / frag) (wn / frag) accFrags

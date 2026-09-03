@@ -165,7 +165,7 @@ let corr_weight_step
     row_max_not_nan s bn;
     fmax_not_nan vm (SF.row_max s bn);
     introduce Finite? (kind vm) ==> cw' == fexp (vm `sub` m')
-    with _. corr_weight_exp vm m'
+    with corr_weight_exp vm m'
 
 (* The fold returns the sentinel or one of the entries it folded, so with
    every admitted entry finite it never manufactures an infinity. *)
@@ -183,7 +183,7 @@ let rec row_max_where_cases
       then introduce row_max_where s q (k - 1) == neg #et infinity ==>
                      (row_max_where s q k == neg #et infinity \/
                       Finite? (kind (row_max_where s q k)))
-           with _. fmax_ninf_l (acc1 s (k - 1))
+           with fmax_ninf_l (acc1 s (k - 1))
       else ()
     end
 
@@ -200,7 +200,7 @@ let rec row_max_where_finite
       if q (k - 1)
       then introduce row_max_where s q (k - 1) == neg #et infinity ==>
                      Finite? (kind (row_max_where s q k))
-           with _. fmax_ninf_l (acc1 s (k - 1))
+           with fmax_ninf_l (acc1 s (k - 1))
       else row_max_where_finite s q (k - 1)
     end
 
@@ -373,6 +373,30 @@ let step_pre
     (Finite? (kind vm) ==> cw' == fexp (vm `sub` m')) /\
     m' == fmax vm (SF.row_max es bn) /\
     l' == (vl `mul` cw') `add` (SF.row_sum es m' bn)
+
+let step_pre_intro
+  (#et : Type0) {| floating et |} {| real_like et |}
+  (#n #bn : nat) (x : natlt n -> GTot real) (p t p' : SO.pred n)
+  (q : SO.pred bn) (xt : natlt bn -> GTot real) (k0 : natle n)
+  (es : chest1 et bn) (vm vl m' l' cw' : et)
+  (#_ : squash (SO.disjoint p t))
+  (#_ : squash (forall (j : natlt n). p' j == (p j || t j)))
+  (#_ : squash (forall (j : natlt n). t j ==> (k0 <= j /\ j < k0 + bn)))
+  (#_ : squash (forall (i : natlt bn). k0 + i < n ==> q i == t (k0 + i)))
+  (#_ : squash (forall (i : natlt bn). k0 + i >= n ==> ~(q i)))
+  (#_ : squash (forall (i : natlt bn). q i ==>
+    (k0 + i < n /\ xt i == x (k0 + i))))
+  (#_ : squash (forall (i : natlt bn). not_nan (acc1 es i)))
+  (#_ : squash (forall (i : natlt bn). ~(q i) ==> acc1 es i == neg infinity))
+  (#_ : squash (forall (i : natlt bn). q i ==>
+    (Finite? (kind (acc1 es i)) /\ acc1 es i %~ xt i)))
+  (#_ : squash (not_nan vm))
+  (#_ : squash (Finite? (kind cw')))
+  (#_ : squash (Finite? (kind vm) ==> cw' == fexp (vm `sub` m')))
+  (#_ : squash (m' == fmax vm (SF.row_max es bn)))
+  (#_ : squash (l' == (vl `mul` cw') `add` (SF.row_sum es m' bn)))
+  : Lemma (step_pre x p t p' q xt k0 es vm vl m' l' cw')
+= ()
 
 (* The tile predicate is empty exactly when the tile absorbs nothing. *)
 let tile_empty

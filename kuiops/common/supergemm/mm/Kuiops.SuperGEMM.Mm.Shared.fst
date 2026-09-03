@@ -8,13 +8,13 @@ open Kuiper
 
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.Tensor.Tiling
 open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 
 module SZ = Kuiper.SizeT
 
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc { live_lane_cells }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc { live_lane_cells }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile_idx_rows, block_tile_idx_cols, warp_tile_idx_rows, warp_tile_idx_cols }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiops.Array2.Layout.Skewed { l2_skewed_row_major, skew_residual, skew_split, skew_join }
@@ -165,7 +165,7 @@ fn gather_pipe_buffer_live
 (* Split the skewed epilogue scratch into per-warp / per-lane shares.  *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn split_scratch_to_threads
   (#et_ab #et_acc : Type0)
@@ -270,7 +270,7 @@ fn split_scratch_to_threads
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn gather_scratch_from_threads
   (#et_ab #et_acc : Type0)
@@ -356,7 +356,7 @@ fn gather_scratch_from_threads
 (* block_setup / block_teardown                                        *)
 (* ------------------------------------------------------------------ *)
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_setup
   (#et_ab #et_acc : Type0)
@@ -462,7 +462,7 @@ fn block_setup
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 (* Resolve the parity of the last-used k-tile [it0] and gather the four
    pipeline buffers back to full ownership.  Factored into its own [fn] with an
    explicit postcondition so the two-way parity [if] does not force Pulse to
@@ -561,7 +561,7 @@ fn gather_last_pipe_buffers
 }
 #pop-options
 
-#push-options "--split_queries no"
+#push-options ""
 ghost
 fn block_teardown
   (#et_ab #et_acc : Type0)
@@ -743,13 +743,13 @@ let shmem_inv_components
       is_block_array (sar_scratch bm bn bk wm wn skew sh))
 =
   assert (c_shmem_inv (fst sh));
-  assert (c_shmems_inv (snd sh));
+  assert (c_shmems_block_inv (snd sh));
   assert (c_shmem_inv (fst (snd sh)));
-  assert (c_shmems_inv (snd (snd sh)));
+  assert (c_shmems_block_inv (snd (snd sh)));
   assert (c_shmem_inv (fst (snd (snd sh))));
-  assert (c_shmems_inv (snd (snd (snd sh))));
+  assert (c_shmems_block_inv (snd (snd (snd sh))));
   assert (c_shmem_inv (fst (snd (snd (snd sh)))));
-  assert (c_shmems_inv (snd (snd (snd (snd sh)))));
+  assert (c_shmems_block_inv (snd (snd (snd (snd sh)))));
   assert (c_shmem_inv (fst (snd (snd (snd (snd sh))))));
   ()
 
@@ -844,7 +844,7 @@ let shared_thread_final_sendable
     scratch_tile_live_sendable bm bn bk wm wn skew nthr sh #_ tid in
   is_send_across_star _ _ #sendQ #sendScratch
 
-#push-options "--split_queries always"
+#push-options ""
 let output_lane_live_sendable
   (#et : Type0) {| scalar et, has_vec_cpy et |}
   (#m #n : szp)
@@ -883,7 +883,7 @@ let output_lane_live_sendable
    tactic ([solve]) discharges it the same way the live body is handled.  The
    two [cancel_mul_div] calls line up [(wm*tm)/wm == tm] / [(wn*tn)/wn == tn]
    for the fragment indices, mirroring [output_lane_approximates_sendable_to]. *)
-#push-options "--split_queries always"
+#push-options ""
 let output_lane_approximates_sendable'
   (#et : Type0) {| scalar et, has_vec_cpy et, real_like et |}
   (#m #n : szp)
@@ -1012,7 +1012,7 @@ let kpre_sendable
     (shared_thread_live bm bn bk wm wn skew sh nthr tid)
     #base_send #shared_send
 
-#push-options "--split_queries always"
+#push-options ""
 let kpost1_sendable
   (#et_ab : Type0) {| scalar et_ab, has_vec_cpy et_ab |}
   (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
@@ -1123,7 +1123,7 @@ let kpost_sendable
     (shared_thread_final bm bn bk wm wn skew sh nthr (last_ktiles k bk ()) tid)
     #base_send #shared_send
 
-#push-options "--split_queries always"
+#push-options ""
 let shared_buffers_aligned16
   (#et_ab #et_acc : Type0)
   {| scalar et_ab, has_vec_cpy et_ab, scalar et_acc, has_vec_cpy et_acc |}

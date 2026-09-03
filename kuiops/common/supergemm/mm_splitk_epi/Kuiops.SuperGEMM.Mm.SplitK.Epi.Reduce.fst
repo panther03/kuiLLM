@@ -33,9 +33,9 @@ module Kuiops.SuperGEMM.Mm.SplitK.Epi.Reduce
 
 open Kuiper
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
-open Kuiper.Array2.Vectorized { array2_vec_read, array2_vec_write }
+open Kuiops.Array2.Vectorized { array2_vec_read, array2_vec_write }
 open Kuiper.Tensor
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.ForEvery
 open Kuiper.Tensor.Tiling { array2_subtile, subtile_layout }
@@ -213,10 +213,11 @@ fn acc_chunk
     decreases (SZ.v ca - SZ.v !xc)
   {
     let xv = !xc;
-    let b = A.op_Array_Access vbuf xv #1.0R #bv;
+    let b = A.op_Dot_Lparen_Rparen vbuf xv;
     with av. assert abuf |-> av;
-    let a = A.op_Array_Access abuf (ev +^ xv) #1.0R #av;
-    A.op_Array_Assignment abuf (ev +^ xv) (add a b) #av;
+    let ax : szlt (SZ.v cd) = ev +^ xv;
+    let a = A.op_Dot_Lparen_Rparen abuf ax;
+    A.op_Dot_Lparen_Rparen_Less_Minus abuf ax (add a b);
     xc := !xc +^ 1sz;
   };
 }
@@ -232,7 +233,7 @@ fn acc_chunk
    combined query was both slow and brittle.  Nothing here mentions C, D or
    the combiner -- this phase is IDENTICAL to the no-epi kernel's, which is
    the point. *)
-#push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries no"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 inline_for_extraction noextract
 fn accumulate
   (#et_acc #et_d : Type0)
@@ -322,6 +323,7 @@ fn accumulate
       cell_aligned16 lW gW (SZ.v wrow) (SZ.v wcol);
       array2_vec_read gW wrow wcol vbuf;
       RL.ws_row_bound (SZ.v m) (SZ.v splits) (SZ.v mws) (SZ.v sv) (SZ.v di);
+      div_step (SZ.v (chunk et_acc)) (SZ.v ev) (SZ.v (chunk et_d));
       (* The vector just read is split [sv]'s contribution to columns
          [ev .. ev + chunk et_acc) of this granule. *)
       acc_chunk (chunk et_d) (chunk et_acc) abuf vbuf
@@ -343,7 +345,7 @@ fn accumulate
 (* per-thread body                                                          *)
 (* ---------------------------------------------------------------------- *)
 
-#push-options "--z3rlimit 20 --fuel 1 --ifuel 1 --split_queries no"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 inline_for_extraction noextract
 fn rkf_at
   (#et_acc #et_c #et_d : Type0)
@@ -382,6 +384,8 @@ fn rkf_at
   let gc : szp = n /^ chunk et_d;
   let di : szlt m = i /^ gc;
   let dj : szlt (SZ.v n / SZ.v (chunk et_d)) = i %^ gc;
+  assert pure (SZ.v di == SZ.v i / gcols et_d n);
+  assert pure (SZ.v dj == SZ.v i % gcols et_d n);
 
   unfold (d_gran gD () (SZ.v i / gcols et_d n) (SZ.v i % gcols et_d n));
   assert pure (SZ.v (chunk et_acc) /?+ SZ.v (chunk et_d));
@@ -431,9 +435,9 @@ fn rkf_at
     let ccol : szlt n = dj *^ chunk et_d +^ yv;
     let cv = RO.tensor_read gC (di, (ccol, ()));
     with av. assert abuf |-> av;
-    let a = A.op_Array_Access abuf yv #1.0R #av;
+    let a = A.op_Dot_Lparen_Rparen abuf yv;
     with ov. assert obuf |-> ov;
-    A.op_Array_Assignment obuf yv (comb cv a) #ov;
+    A.op_Dot_Lparen_Rparen_Less_Minus obuf yv (comb cv a);
     yc := !yc +^ 1sz;
   };
 
@@ -456,9 +460,6 @@ fn rkf_at
   fold (d_gran_at gD ()
           (EL.gran_target (SZ.v m) (SZ.v splits) rC rW comb_r)
           (SZ.v di) (SZ.v dj));
-  assert pure (SZ.v gc == SZ.v n / SZ.v (chunk et_d));
-  assert pure (SZ.v di == SZ.v i / gcols et_d n);
-  assert pure (SZ.v dj == SZ.v i % gcols et_d n);
   rewrite each (SZ.v di) as (SZ.v i / gcols et_d n);
   rewrite each (SZ.v dj) as (SZ.v i % gcols et_d n);
 }

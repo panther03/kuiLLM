@@ -3,56 +3,53 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    # Self-hosted: the suite needs a CUDA GPU and a host CUDA 12.x toolkit
-    # (nvcc), which kuipy invokes through torch.utils.cpp_extension.
-    runs-on: self-hosted
-    timeout-minutes: 180
+  verify:
+    name: Verify Kuiops
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/fstarlang/kuiper-base-nocuda:latest
     defaults:
       run:
-        # Login shell so the micromamba environment is active in every step.
-        shell: bash -leo pipefail {0}
+        shell: bash
     steps:
+      - name: Clean runner workspace
+        run: find . -delete
+
       - uses: actions/checkout@v6
 
-      - name: Set up micromamba environment
-        uses: mamba-org/setup-micromamba@v3
-        with:
-          download-micromamba: false
-          micromamba-binary-path: ~/micromamba-bin/micromamba
-          environment-file: environment.yml
-          environment-name: kuillm
-          cache-environment: true
+      - name: Read Kuiper package pin
+        id: kuiper
+        run: echo "nightly=$(make -s print-kuiper-nightly)" >> "$GITHUB_OUTPUT"
 
-      - name: Report toolchain
+      - name: Set up build environment
         run: |
-          python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())"
-          nvcc --version
-          nvidia-smi
+          echo "HOME=/home/vscode" >> "$GITHUB_ENV"
+          echo "PATH=/usr/local/bin:$PATH" >> "$GITHUB_ENV"
 
-      - name: Install latest Kuiper nightly
-        run: make install-kuiper-nightly
-
-      - name: Run test suite
-        # Override NPROCS on a dispatch run if the GPU can't hold one CUDA
-        # context per worker.
-        run: make test NPROCS="$(nproc)"
-
-      - name: Upload JIT build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
+      - name: Restore Kuiper package
+        uses: actions/cache@v5
         with:
-          name: kuipy-cache
-          path: |
-            .kuipy_cache/src
-            .kuipy_cache/cu
-            .kuipy_cache/build/**/*.log
-          if-no-files-found: ignore
-          retention-days: 7
+          path: .kuiper
+          key: kuiper-nightly-${{ steps.kuiper.outputs.nightly }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Prepare pinned toolchain
+        run: make -j2 prepare
+
+      - name: Verify local modules
+        run: |
+          jobs=$(scripts/ci-jobs.sh 3072)
+          echo "Verifying with $jobs job(s)."
+          make -j"$jobs" verify-kuiops

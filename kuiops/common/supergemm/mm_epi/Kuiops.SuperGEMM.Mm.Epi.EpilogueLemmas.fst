@@ -24,25 +24,25 @@ open Kuiper.Tensor { array2, layout2, idx2 }
 open Kuiper.Tensor.Layout.Alg { l2_row_major as rm }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
   { own_lane_cells, live_lane_cells, in_lane }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
 open Kuiper.Kernel.GEMM.Tiled.Common.Vec { block_tile, warp_tile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueCell
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueCell
   { tiled_cell }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
   { lane_coincide, own_lane_cells_rw, lane_fade, lane_fade_start, lane_fade_done }
 
-open Kuiper.Array2.Vectorized { row_cells }
+open Kuiops.Array2.Vectorized { row_cells }
 open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout, c_subtile_layout, cell_convert_eq }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
   { strided_row_major, strided_row_major_l2_row_major, strided_row_major_subtile,
     cell_of_pos, aligned_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { mk2, acc2, chest2, chest_map, chest_comb }
 open Kuiper.EMatrix { lemma_approximates_intro }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 
 open Kuiper.Concrete { concrete_sz, concrete_sz_sz }
 open Pulse.Lib.Trade
@@ -59,9 +59,8 @@ open Kuiops.SuperGEMM.Mm.Params
 module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module A = Pulse.Lib.Array
-open Pulse.Lib.Array { op_Array_Access }
 module P = Kuiops.SuperGEMM.Mm.Params
-module VG = Kuiper.Array2.Vectorized.Group
+module VG = Kuiops.Array2.Vectorized.Group
 module ML = FStar.Math.Lemmas
 module SH = Kuiops.SuperGEMM.Mm.Shared
 
@@ -85,6 +84,17 @@ let acc2_mk2 (#et : Type) (#d0 #d1 : nat)
           [SMTPat (acc2 (mk2 f) a b)]
 = ()
 
+let tile_index_lt
+  (extent : nat)
+  (tile : pos { tile /?+ extent })
+  (i : nat)
+  (_ : squash (i * tile + tile <= extent))
+  : Lemma (i < extent / tile)
+= Kuiper.Divides.lemma_nat_divides_pos_divides tile extent;
+  Kuiper.Divides.lemma_divides_exact tile extent;
+  if extent / tile <= i then
+    ML.lemma_mult_le_left tile (extent / tile) i
+
 (* [ematrix_subtile] of a [frag x wn] row-band, sliced at column [j], is the
    [frag x frag] accumulator subtile [(iv, j)] of the whole warp tile. *)
 let subtile_band_frag
@@ -95,15 +105,32 @@ let subtile_band_frag
   (iv j : nat)
   (_ : squash (frag /? rows /\ wn /? cols /\ frag /? wn /\
                iv * frag + frag <= rows /\ j * frag + frag <= wn /\
-               (j * frag) < cols))
+               (j * frag) < cols /\ iv < rows / frag /\
+               j < wn / frag /\ j < cols / frag))
   : Lemma
       (ematrix_subtile (ematrix_subtile rAcc frag wn iv 0) frag frag 0 j
        == ematrix_subtile rAcc frag frag iv j)
-= let lhs = ematrix_subtile (ematrix_subtile rAcc frag wn iv 0) frag frag 0 j in
-  let rhs = ematrix_subtile rAcc frag frag iv j in
-  assert (forall (a : natlt frag) (b : natlt frag).
-    acc2 lhs a b == acc2 rhs a b);
-  Kuiper.Chest.ext lhs rhs
+= tile_index_lt rows frag iv ();
+  tile_index_lt wn frag j ();
+  let iv' : natlt (rows / frag) = iv in
+  let jw : natlt (wn / frag) = j in
+  assert (cols > 0);
+  Kuiper.Divides.lemma_divides_trans frag wn cols;
+  Kuiper.Divides.lemma_divides_le wn cols;
+  assert (j * frag + frag <= cols);
+  tile_index_lt cols frag j ();
+  let jc : natlt (cols / frag) = j in
+  introduce forall (a : natlt frag) (b : natlt frag).
+    acc2 (ematrix_subtile (ematrix_subtile rAcc frag wn iv' 0)
+                          frag frag 0 jw) a b
+    == acc2 (ematrix_subtile rAcc frag frag iv' jc) a b
+  with assert_norm (
+    acc2 (ematrix_subtile (ematrix_subtile rAcc frag wn iv' 0)
+                          frag frag 0 jw) a b
+    == acc2 (ematrix_subtile rAcc frag frag iv' jc) a b);
+  Kuiper.Chest.ext
+    (ematrix_subtile (ematrix_subtile rAcc frag wn iv' 0) frag frag 0 jw)
+    (ematrix_subtile rAcc frag frag iv' jc)
 
 (* A [frag x wn] band approximates the real band [rBand] as soon as each of its
    [nfrag] [frag x frag] slices approximates the matching slice of [rBand]. *)
@@ -123,7 +150,7 @@ let band_approx_from_subtiles
     ML.lemma_div_mod b frag;
     ML.div_exact_r wn frag;
     introduce (b / frag) >= (wn / frag) ==> False
-    with _. ML.lemma_mult_le_right frag (wn / frag) (b / frag);
+    with ML.lemma_mult_le_right frag (wn / frag) (b / frag);
     assert (j < wn / frag);
     assert (b == j * frag + b');
     assert (acc2 (ematrix_subtile e frag frag 0 j) a b'
@@ -150,6 +177,22 @@ let cband (#et : Type0) (#d0 #d1 : nat) (eC : chest2 et d0 d1)
   (_ : squash (crb + rows <= d0 /\ ccb + cols <= d1))
   : chest2 et rows cols
 = mk2 (fun (a : natlt rows) (b : natlt cols) -> acc2 eC (crb + a) (ccb + b))
+
+(* A contiguous run in a C window is the same run at the corresponding global
+   coordinates.  Isolating this definitional fact keeps the epilogue's large
+   Pulse context out of the equality proof. *)
+let cband_run_global
+  (#et : Type0) (#d0 #d1 : nat) (eC : chest2 et d0 d1)
+  (rows cols crb ccb : nat)
+  (sq : squash (crb + rows <= d0 /\ ccb + cols <= d1))
+  (row : natlt rows) (col : natlt cols) (width : pos)
+  (global_row : natlt d0) (global_col : natlt d1)
+  (_ : squash (col + width <= cols /\ global_col + width <= d1 /\
+               crb + row == global_row /\ ccb + col == global_col))
+  : Lemma (forall (x : natlt width).
+      acc2 (cband eC rows cols crb ccb sq) row (col + x)
+      == acc2 eC global_row (global_col + x))
+= ()
 
 let cband_approx (#et : Type0) {| scalar et, real_like et |}
   (#d0 #d1 : nat) (eC : chest2 et d0 d1) (rC : chest2 real d0 d1)
@@ -274,6 +317,25 @@ let window_bound (m bm wm block_row warp_m : nat)
   ML.lemma_div_exact bm wm;
   ML.swap_mul (bm / wm) wm
 
+(* A row inside a lane's [rows]-high fragment is still inside the enclosing
+   block tile.  Keeping this nested flattening fact out of the Pulse drain
+   avoids asking SMT to normalize two exact divisions in its large context. *)
+let nested_row_bound (bm wm rows : pos) (warp_row lane_row row : nat)
+  : Lemma
+      (requires bm % (wm * rows) == 0 /\
+                warp_row < bm / (wm * rows) /\ lane_row < wm /\ row < rows)
+      (ensures warp_row * (wm * rows) + lane_row * rows + row < bm)
+= ML.div_exact_r (wm * rows) rows;
+  Kuiper.Divides.lemma_divides_trans rows (wm * rows) bm;
+  SH.grow_bound bm (wm * rows) rows warp_row lane_row;
+  let g = warp_row * wm + lane_row in
+  assert (g < bm / rows);
+  ML.lemma_mult_le_right rows (g + 1) (bm / rows);
+  ML.lemma_div_exact bm rows;
+  ML.distributivity_add_left g 1 rows;
+  ML.distributivity_add_left (warp_row * wm) lane_row rows;
+  ML.paren_mul_right warp_row wm rows
+
 (* The lane's window of C: the [wm x wn] tile of C the lane's warp is
    responsible for, in the epilogue's reshaped dimensions.  Same [bid]/[tid]
    decoding as [Shared.lane_target], so [Epi.Shared.kpost1] and the epilogue's
@@ -307,7 +369,7 @@ let lane_c_target
     (block_col * SZ.v bn + warp_n * SZ.v wn) ()
 (* ---------------------------------------------------------------------------
    Pure helper lemmas copied from
-   Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueChunkUpdate
+   Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueChunkUpdate
    (that module has no interface, so its helpers cannot be imported).
    --------------------------------------------------------------------------- *)
 
@@ -557,7 +619,7 @@ fn row_cells_global_to_frag
 
 (* ---------------------------------------------------------------------------
    Pure helper lemmas copied from
-   Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep.
+   Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep.
    --------------------------------------------------------------------------- *)
 
 let group_gap (a b : nat) (lane : natlt Kuiper.Barrier.Warp.warp_size)
@@ -587,7 +649,7 @@ let lane_fade_others
         acc2 (lane_fade em0 em1 lane vg) i j
         == acc2 (lane_fade em0 em1 lane (vg + Kuiper.Barrier.Warp.warp_size)) i j
   with introduce _ ==> _
-  with _. (
+  with (
     let g = VG.group_of (chunk et #_ #hvc) cols i j in
     if vg < g then group_gap vg g lane)
 
@@ -633,10 +695,6 @@ let div_lt_mul (a q d : nat)
       assert ((q - 1) * d + (d - 1) == q * d - 1)
     end
 
-let div_rem_one (x : nat) : Lemma (x / 1 == x /\ x % 1 == 0)
-  = FStar.Math.Lemmas.lemma_div_mod x 1;
-    FStar.Math.Lemmas.lemma_mod_lt x 1
-
 let sz_v_one : squash (SZ.v 1sz == 1) = ()
 
 inline_for_extraction noextract
@@ -677,7 +735,7 @@ let epi_scratch_tile_ctlayout
           #(eskew et_acc #(Kuiper.Scalars.Base.is_sized #et_acc) #_) ld)
       frag (SZ.v cols) (SZ.v wid) 0
 
-#push-options "--split_queries always --z3rlimit 15"
+#push-options " --z3rlimit 15"
 
 (* Swap the (eD-independent) drain target [rA] under an [exists* eD] for an
    equal chest [rB].  Needed because a [rewrite]'s slprop-equivalence cannot see
@@ -788,6 +846,10 @@ let epi_mixed
    unchanged when [mi <> kk] (it stays on the same side of the pivot).  Used to
    re-establish the drain loop invariant after draining band [kk]. *)
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 15"
+let nat_lt_or_gt (a b : nat)
+  : Lemma (requires a <> b) (ensures a < b \/ a > b)
+= ()
+
 let epi_mixed_shift
   (#et_d : Type0) {| scalar et_d, has_vec_cpy et_d, real_like et_d |}
   (#m #n : szp) (#lD : layout2 (SZ.v m) (SZ.v n))
@@ -802,7 +864,15 @@ let epi_mixed_shift
   : Lemma (requires mi <> kk)
           (ensures epi_mixed gD bm bn wm wn nblk nthr sq bid tid rD kk mi
                 == epi_mixed gD bm bn wm wn nblk nthr sq bid tid rD (kk + 1) mi)
-= ()
+= nat_lt_or_gt mi kk;
+  if mi < kk then begin
+    assert (mi < kk + 1);
+    ()
+  end else begin
+    assert (mi > kk);
+    assert (~(mi < kk + 1));
+    ()
+  end
 #pop-options
 
 (* [forall]-lifted pivot-shift: discharges the [squash] argument of
@@ -826,7 +896,7 @@ let epi_mixed_shift_all
       epi_mixed gD bm bn wm wn nblk nthr sq bid tid rD kk mi
    == epi_mixed gD bm bn wm wn nblk nthr sq bid tid rD (kk + 1) mi
   with introduce _ ==> _
-  with _. epi_mixed_shift gD bm bn wm wn nblk nthr sq bid tid rD kk mi
+  with epi_mixed_shift gD bm bn wm wn nblk nthr sq bid tid rD kk mi
 #pop-options
 
 (* Extract element [z] and hand back a trade that, once [z] is re-provided at the
@@ -836,7 +906,7 @@ let epi_mixed_shift_all
    mismatched by the matcher.
    TODO(upstream): the library already has this as a private
    [forevery_extract_replace_eqtype] in
-   [Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueLoopStep]; expose it in that
+   [Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueLoopStep]; expose it in that
    module's [.fsti] and drop this copy. *)
 #push-options "--ifuel 1 --initial_fuel 0 --max_fuel 1 --z3rlimit 15"
 ghost

@@ -78,6 +78,7 @@ let constraints
   SZ.v (chunk et_ab) * nthr bm bn wm wn /?+ (SZ.v bm * SZ.v bk) /\
   SZ.v (chunk et_ab) * nthr bm bn wm wn /?+ (SZ.v bn * SZ.v bk) /\
   nthr bm bn wm wn <= SZ.v max_threads /\
+  SZ.v warp_size <= frag * eskew et_acc /\
   SZ.fits (SZ.v bm * ldt bk skew) /\
   SZ.fits (SZ.v bn * ldt bk skew) /\
   SZ.fits (warps bm bn wm wn * frag * lde et_acc wn)
@@ -132,6 +133,14 @@ val nthr_le_max_threads
   : Lemma (requires constraints et_ab et_acc bm bn bk wm wn skew)
           (ensures nthr bm bn wm wn <= SZ.v max_threads /\
                    SZ.fits (nthr bm bn wm wn))
+
+(* The padded scratch row is large enough for the epilogue's final
+   warp-stride lookahead, and the complete scratch allocation fits. *)
+val epilogue_band_fits
+  (et_ab et_acc : Type0) {| sized et_ab, has_vec_cpy et_ab, sized et_acc, has_vec_cpy et_acc |}
+  (bm bn bk wm wn skew : szp)
+  : Lemma (requires constraints et_ab et_acc bm bn bk wm wn skew)
+          (ensures SZ.fits (frag * SZ.v wn + SZ.v warp_size))
 
 val warp_divides_nthr
   (bm bn wm wn : szp)

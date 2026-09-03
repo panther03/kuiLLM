@@ -29,7 +29,7 @@ let seq_slice_approx
   = introduce forall (k:nat). k < j - i ==>
       (Seq.slice s i j @! k) %~ (Seq.slice t i j @! k)
     with introduce _ ==> _
-    with _. (
+    with (
       Seq.lemma_index_slice s i j k;
       Seq.lemma_index_slice t i j k
     )
@@ -152,7 +152,7 @@ let kpre
   (tid : natlt nth)
   : slprop
   = a |-> Frac ((1 /. rows) /. nth) va **
-    if_ (op_Equality #nat tid 0)
+    if_ (bool_eq #nat tid 0)
       (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)) **
     exists* (v : et).
       tensor_pts_to_cell (from_array (l1_forward nth) shmem._1) (tid, ()) v
@@ -178,7 +178,7 @@ let kpost
   (tid : natlt nth)
   : slprop
   = a |-> Frac ((1 /. rows) /. nth) va **
-    if_ (op_Equality #nat tid 0) (
+    if_ (bool_eq #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
       (exists* (v : et_o).
         Cell output (unflatten d bid) |-> v **
@@ -220,6 +220,7 @@ fn kf
   ()
   requires
     gpu **
+    pure (c_shmems_inv shmem) **
     kpre rows cols nth a output va vout shmem bid tid **
     thread_id nth tid **
     block_id rows bid **
@@ -297,16 +298,16 @@ fn kf
     (if_ (div_pow2 it tid)
       (array1_pts_to_slice_red (approx_red #et f_r rparts) sa tid (min (tid + pow2 it) nth)))
   as
-    (if_ (op_Equality #nat tid 0)
+    (if_ (bool_eq #nat tid 0)
       (array1_pts_to_slice_red (approx_red #et f_r rparts) sa 0 nth));
 
   log2_hreduce (v nth) it;
   rewrite (B.barrier_state it) as (B.barrier_state (hreduce_barrier_count nth));
 
   if (tid = 0sz) {
-    if_elim_true' (op_Equality #nat tid 0)
+    if_elim_true' (bool_eq #nat tid 0)
       (array1_pts_to_slice_red (approx_red #et f_r rparts) sa 0 nth);
-    if_elim_true' (op_Equality #nat tid 0)
+    if_elim_true' (bool_eq #nat tid 0)
       (Cell output (unflatten d (SZ.v bid)) |-> acc vout (unflatten d (SZ.v bid)));
     unfold array1_pts_to_slice_red (approx_red #et f_r rparts) sa 0 nth;
     unfold array1_pts_to_slice_red_inner (approx_red #et f_r rparts) sa 0 nth;
@@ -341,18 +342,18 @@ fn kf
       (fun (i : abs (nth @| INil)) -> tensor_pts_to_cell sa i (acc (reveal css) i));
     tensor_implode sa;
     rewrite each sa as from_array (l1_forward nth) shmem._1;
-    if_intro_true' (op_Equality #nat tid 0) (
+    if_intro_true' (bool_eq #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
       (exists* (v : et_o).
         Cell output (unflatten d (SZ.v bid)) |-> v **
         pure (approx_out f_r pre_map_r post_map_r vr (unflatten d (SZ.v bid)) v))
     )
   } else {
-    if_elim_false' (op_Equality #nat tid 0)
+    if_elim_false' (bool_eq #nat tid 0)
       (array1_pts_to_slice_red (approx_red #et f_r rparts) sa 0 nth);
-    if_elim_false' (op_Equality #nat tid 0)
+    if_elim_false' (bool_eq #nat tid 0)
       (Cell output (unflatten d (SZ.v bid)) |-> acc vout (unflatten d (SZ.v bid)));
-    if_intro_false' (op_Equality #nat tid 0) (
+    if_intro_false' (bool_eq #nat tid 0) (
       live (from_array (l1_forward nth) shmem._1) **
       (exists* (v : et_o).
         Cell output (unflatten d (SZ.v bid)) |-> v **
@@ -402,9 +403,9 @@ fn block_setup
   forevery_if_intro #(natlt nth) 0 (fun _ ->
     Cell output (unflatten d bid) |-> acc vout (unflatten d bid));
   forevery_ext
-    (fun tid -> if_ (op_Equality #(natlt nth) tid 0)
+    (fun tid -> if_ (bool_eq #(natlt nth) tid 0)
       (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)))
-    (fun tid -> if_ (op_Equality #nat tid 0)
+    (fun tid -> if_ (bool_eq #nat tid 0)
       (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)));
 
   forevery_zip (fun _ -> a |-> Frac ((1 /. rows) /. nth) va) _;
@@ -416,7 +417,7 @@ fn block_setup
   forevery_zip #(natlt nth)
   (fun tid ->
     a |-> Frac ((1 /. rows) /. nth) va **
-    if_ (op_Equality #nat tid 0)
+    if_ (bool_eq #nat tid 0)
       (Cell output (unflatten d bid) |-> acc vout (unflatten d bid)))
   _;
 
@@ -424,7 +425,7 @@ fn block_setup
     #(natlt nth)
     (fun tid ->
       (a |-> Frac ((1 /. rows) /. nth) va **
-       if_ (op_Equality #nat tid 0)
+       if_ (bool_eq #nat tid 0)
          (Cell output (unflatten d bid) |-> acc vout (unflatten d bid))) **
       tensor_pts_to_cell (from_array (l1_forward nth) gsa)
         (abs_bij.gg (tid <: natlt nth))
@@ -477,13 +478,13 @@ fn block_teardown
 
   forevery_ext #(natlt nth)
     (fun tid ->
-      if_ (op_Equality #nat tid 0) (
+      if_ (bool_eq #nat tid 0) (
         live (from_array (l1_forward nth) shmem._1) **
         (exists* (v : et_o).
           Cell output (unflatten d bid) |-> v **
           pure (approx_out f_r pre_map_r post_map_r vr (unflatten d bid) v))))
     (fun tid ->
-      if_ (op_Equality #(natlt nth) tid 0) (
+      if_ (bool_eq #(natlt nth) tid 0) (
         live (from_array (l1_forward nth) shmem._1) **
         (exists* (v : et_o).
           Cell output (unflatten d bid) |-> v **
@@ -739,14 +740,14 @@ fn reduce
   (#vin : chest (snoc_shape d cols) et_i)
   (#vr : chest (snoc_shape d cols) real)
   (#vout : chest d et_o)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
   requires pure (vin %~ vr)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc (
         (input |-> vin) **
         (exists* (vout' : chest d et_o).
@@ -754,6 +755,6 @@ fn reduce
           pure (out_approx f_r pre_map_r post_map_r vr vout'))))
 {
   let rows = Kuiper.Shape.csizeof cd;
-  launch (kernel cd f f_r pre_map pre_map_r post_map post_map_r rows cols nth
+  Kuiops.Kernel.launch (kernel cd f f_r pre_map pre_map_r post_map post_map_r rows cols nth
     index index_up input output #vin #vr) s;
 }

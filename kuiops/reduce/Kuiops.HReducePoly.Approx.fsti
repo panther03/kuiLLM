@@ -63,14 +63,14 @@ fn reduce
   (#vin : chest (snoc_shape d cols) et_i)
   (#vr : chest (snoc_shape d cols) real)
   (#vout : chest d et_o)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
   requires pure (vin %~ vr)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc (
         (input |-> vin) **
         (exists* (vout' : chest d et_o).

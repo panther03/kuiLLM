@@ -16,6 +16,7 @@ open Kuiper.Floating
 open Kuiper.Shape
 open Kuiper.EMatrix
 open Kuiper.EMatrix.Tiling
+open Kuiops.Floating
 
 module FC = Kuiper.Float.Casts
 module BM = Kuiops.Common.BlockMatmul

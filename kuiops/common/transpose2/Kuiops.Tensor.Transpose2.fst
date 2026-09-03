@@ -36,7 +36,7 @@ open Kuiper.Tensor
 open Kuiper.Tensor.Layout
 open Kuiper.Tensor.Layout.Bijection
 open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
-open Kuiper.Array2.Strided
+open Kuiops.Array2.Strided
 open Pulse.Lib.Trade { (@==>) }
 
 module SZ = Kuiper.SizeT

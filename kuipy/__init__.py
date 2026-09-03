@@ -22,10 +22,8 @@ from . import verify
 
 
 def is_available() -> bool:
-    """True if the Kuiper JIT toolchain (F* + the kuiper repo) is reachable."""
-    if C.KUIPER_INST is None:
-        return False
-    return (C.KUIPER_INST / "bin" / "fstar.exe").exists()
+    """True if the pinned Kuiper package is available."""
+    return C.FSTAR_EXE.exists()
 
 
 def run(op, **kwargs):

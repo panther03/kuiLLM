@@ -61,7 +61,7 @@ module Kuiops.Array.LocalAligned
    This axiom makes explicit, in one auditable place, the assumption that is
    scattered as [assume pure (aligned 16 local); // FIXME local arrays do not
    need alignment] throughout upstream Kuiper
-   ([Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueChunkUpdate],
+   ([Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueChunkUpdate],
    [Kuiper.Kernel.GEMM.Copy.Vec2], ...).
 
    TODO(upstream): the correct long-term fix is an aligned-local-allocation

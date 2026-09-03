@@ -25,20 +25,22 @@ open Kuiper.Array.Vectorized { has_vec_cpy, chunk }
 open Kuiper.Tensor { array2, layout2, idx2 }
 open Kuiper.TensorCore { FragAcc, FragLAcc, value_for, array_fragment_pts_to, fragment,
                          array_fragment_pts_to_ref, array_fragment_extract_ro, mma_store }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc
   { own_lane_cells, live_lane_cells, in_lane }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueCell { tiled_cell }
 open Kuiops.SuperGEMM.Mm.Output { output_lane_live', output_fragment', output_lane_approximates' }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
+open Kuiops.Kernel.GEMM.TensorCore2D.To.KernelDesc.EpilogueStep
   { own_lane_cells_rw, lane_fade, lane_fade_start, lane_fade_done }
 
-open Kuiper.Array2.Vectorized { row_cells }
+open Kuiops.Array2.Vectorized { row_cells }
 open Kuiper.Tensor.Tiling { array2_subtile, array2_extract_tile_st, subtile_layout }
-open Kuiper.Array2.Strided
-  { strided_row_major, strided_row_major_subtile, cell_of_pos, aligned_strided_row_major }
+open Kuiops.Array2.Strided
+  { strided_row_major, strided_row_major_subtile, cell_of_pos,
+    aligned_strided_row_major, to_kuiper_strided_row_major }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 open Kuiper.Chest { mk2, acc2, chest2, chest_comb }
 open Kuiper.EMatrix.Tiling { ematrix_subtile }
-open Kuiper.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
+open Kuiops.Kernel.GEMM.TensorCore2D.To.EpilogueState { fragarrayAcc_approximates }
 
 open Pulse.Lib.Trade
 
@@ -57,10 +59,34 @@ module SZ = Kuiper.SizeT
 module T = Kuiper.Tensor
 module RO = Kuiper.TensorRO
 module A = Pulse.Lib.Array
-open Pulse.Lib.Array { op_Array_Access }
 module P = Kuiops.SuperGEMM.Mm.Params
-module VG = Kuiper.Array2.Vectorized.Group
+module VG = Kuiops.Array2.Vectorized.Group
 module ML = FStar.Math.Lemmas
+
+[@@"opaque_to_smt"]
+let fragment_index
+  (rows cols : pos) (row : natlt rows) (col : natlt cols)
+  : i : natlt (rows * cols) { i == row * cols + col }
+= ML.lemma_mult_le_right cols (row + 1) rows;
+  ML.distributivity_add_left row 1 cols;
+  row * cols + col
+
+(* Flattening three nested tiles is just the corresponding row-major sum.
+   State it once in a small pure context so resource conversions do not have
+   to normalize the arithmetic while also reasoning about the heap. *)
+let tiled_cell3_flat
+  (e0 e1 e2 e3 : pos)
+  (#_ : squash (e1 /?+ e0 /\ e2 /?+ e1 /\ e3 /?+ e2))
+  (i0 : natlt (e0 / e1))
+  (i1 : natlt (e1 / e2))
+  (i2 : natlt (e2 / e3))
+  (i3 : natlt e3)
+  : Lemma
+      (tiled_cell e0 e1 i0
+        (tiled_cell e1 e2 i1 (tiled_cell e2 e3 i2 i3))
+       == i0 * e1 + i1 * e2 + i2 * e3 + i3)
+= ()
+
 (* ---------------------------------------------------------------------------
    drain_group: drain one vec-group [vg] of band [idx]'s (rows x cols) D
    fragment to the global output: read the fp32 scratch band [acc], read the
@@ -104,13 +130,16 @@ fn drain_group
   (#fs : perm)
   (#eAcc : chest2 et_acc (SZ.v rows) (SZ.v cols))
   (idx : szlt (wm * wn))
+  (idxRow : szlt wm)
+  (idxCol : szlt wn)
+  (#_ : squash (SZ.v idx == SZ.v idxRow * SZ.v wn + SZ.v idxCol))
   (crb ccb : erased nat)
   (#_ : squash (
     reveal crb + SZ.v rows <= SZ.v m /\ reveal ccb + SZ.v cols <= SZ.v n /\
     reveal crb == SZ.v mrow * SZ.v bm + SZ.v warpRow * (SZ.v wm * SZ.v rows)
-                  + (SZ.v idx / SZ.v wn) * SZ.v rows /\
+                  + (SZ.v idxRow) * SZ.v rows /\
     reveal ccb == SZ.v mcol * SZ.v bn + SZ.v warpCol * (SZ.v wn * SZ.v cols)
-                  + (SZ.v idx % SZ.v wn) * SZ.v cols))
+                  + (SZ.v idxCol) * SZ.v cols))
   (lane : szlt warp_size)
   (#_ : squash (SZ.fits (SZ.v rows * SZ.v cols + Kuiper.Barrier.Warp.warp_size)))
   (eD0 eTarget : chest2 et_d (SZ.v rows) (SZ.v cols))
@@ -137,7 +166,7 @@ fn drain_group
   requires
     own_lane_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (lane_fade eD0 eTarget (SZ.v lane) (SZ.v vg))
       (SZ.v lane)
   ensures
@@ -145,7 +174,7 @@ fn drain_group
   ensures
     own_lane_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (lane_fade eD0 eTarget (SZ.v lane)
         (SZ.v vg + Kuiper.Barrier.Warp.warp_size))
       (SZ.v lane)
@@ -164,11 +193,11 @@ fn drain_group
 
   unfold own_lane_cells
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     em (SZ.v lane);
   VG.cells_extract_group
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     (chunk et_d) em
     (fun ij -> in_lane (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v lane) ij)
     (SZ.v vg) ();
@@ -180,19 +209,19 @@ fn drain_group
       VG.group_of (chunk et_d) (SZ.v cols) ij._1 ij._2 =!= SZ.v vg})
     (fun ij -> T.tensor_pts_to_cell
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (idx2 ij._1 ij._2)
       (acc2 em ij._1 ij._2))
     (fun ij -> T.tensor_pts_to_cell
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (idx2 ij._1 ij._2)
       (acc2 em' ij._1 ij._2));
 
   rewrite
     row_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       1.0R
       (VG.grow (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
       (VG.gcol (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
@@ -201,15 +230,15 @@ fn drain_group
   as
     row_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       1.0R (SZ.v row) (SZ.v col) (chunk et_d)
       (VG.group_seq (chunk et_d) em (SZ.v vg));
 
   // ---- Compute the global coordinates of the run, mirror epilogue_chunk_update.
-  assert pure (SZ.v idx / SZ.v wn < SZ.v wm);
-  assert pure (SZ.v idx % SZ.v wn < SZ.v wn);
+  assert pure (SZ.v idxRow < SZ.v wm);
+  assert pure (SZ.v idxCol < SZ.v wn);
   assert pure (
-    (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col + (chunk et_d)
+    (SZ.v idxCol) * SZ.v cols + SZ.v col + (chunk et_d)
     <= SZ.v wn * SZ.v cols);
   assert pure (SZ.v warpCol + 1 <= SZ.v bn / (SZ.v wn * SZ.v cols));
   ML.div_exact_r (SZ.v bn) (SZ.v wn * SZ.v cols);
@@ -217,36 +246,38 @@ fn drain_group
     (SZ.v bn / (SZ.v wn * SZ.v cols)) * (SZ.v wn * SZ.v cols) == SZ.v bn);
   assert pure (
     SZ.v warpCol * (SZ.v wn * SZ.v cols)
-      + (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col + (chunk et_d)
+      + (SZ.v idxCol) * SZ.v cols + SZ.v col + (chunk et_d)
     <= (SZ.v warpCol + 1) * (SZ.v wn * SZ.v cols));
   assert pure ((SZ.v warpCol + 1) * (SZ.v wn * SZ.v cols) <= SZ.v bn);
+  nested_row_bound (SZ.v bm) (SZ.v wm) (SZ.v rows)
+    (SZ.v warpRow) (SZ.v idxRow) (SZ.v row);
   assert pure (
     SZ.v warpRow * (SZ.v wm * SZ.v rows)
-      + (SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row
+      + (SZ.v idxRow) * SZ.v rows + SZ.v row
     < SZ.v bm);
   assert pure (
     SZ.v warpCol * (SZ.v wn * SZ.v cols)
-      + (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col + (chunk et_d)
+      + (SZ.v idxCol) * SZ.v cols + SZ.v col + (chunk et_d)
     <= SZ.v bn);
   assert pure (
     SZ.v mrow * SZ.v bm + SZ.v warpRow * (SZ.v wm * SZ.v rows)
-      + (SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row
+      + (SZ.v idxRow) * SZ.v rows + SZ.v row
     < SZ.v m);
   assert pure (
     SZ.v mcol * SZ.v bn + SZ.v warpCol * (SZ.v wn * SZ.v cols)
-      + (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col + (chunk et_d)
+      + (SZ.v idxCol) * SZ.v cols + SZ.v col + (chunk et_d)
     <= SZ.v n);
   let globalRow : szlt m =
-    mrow *^ bm +^ warpRow *^ (wm *^ rows) +^ (idx /^ wn) *^ rows +^ row;
+    mrow *^ bm +^ warpRow *^ (wm *^ rows) +^ idxRow *^ rows +^ row;
   let globalCol : szlt (n -^ (chunk et_d) +^ 1sz) =
-    mcol *^ bn +^ warpCol *^ (wn *^ cols) +^ (idx %^ wn) *^ cols +^ col;
+    mcol *^ bn +^ warpCol *^ (wn *^ cols) +^ idxCol *^ cols +^ col;
 
   global_col_divides (chunk et_d) (SZ.v bn) (SZ.v rows) (SZ.v cols)
     (SZ.v wm) (SZ.v wn)
-    (SZ.v mcol) (SZ.v warpCol) (SZ.v idx % SZ.v wn) (SZ.v col);
+    (SZ.v mcol) (SZ.v warpCol) (SZ.v idxCol) (SZ.v col);
   assert pure (SZ.v globalCol ==
     SZ.v mcol * SZ.v bn + SZ.v warpCol * (SZ.v wn * SZ.v cols)
-      + (SZ.v idx % SZ.v wn) * SZ.v cols + SZ.v col);
+      + (SZ.v idxCol) * SZ.v cols + SZ.v col);
   let strD_off = strD.offset;
   let strD_str = strD.stride;
   strD.pf globalRow globalCol;
@@ -271,9 +302,19 @@ fn drain_group
     (cell_of_pos lD (SZ.v globalRow) (SZ.v globalCol)));
 
   // ---- Convert the run to global coordinates, store, convert back.
+  tiled_cell3_flat (SZ.v m) (SZ.v bm) (SZ.v wm * SZ.v rows) (SZ.v rows)
+    (SZ.v bid / (SZ.v n / SZ.v bn))
+    (SZ.v wid / (SZ.v bn / (SZ.v wn * SZ.v cols)))
+    (SZ.v idxRow) (SZ.v row);
+  assert pure (SZ.v globalRow ==
+    tiled_cell (SZ.v m) (SZ.v bm) (SZ.v bid / (SZ.v n / SZ.v bn))
+      (tiled_cell (SZ.v bm) (SZ.v wm * SZ.v rows)
+        (SZ.v wid / (SZ.v bn / (SZ.v wn * SZ.v cols)))
+        (tiled_cell (SZ.v wm * SZ.v rows) (SZ.v rows)
+          (SZ.v idxRow) (SZ.v row))));
   row_cells_frag_to_global gD
     (SZ.v bm) (SZ.v bn) (SZ.v rows) (SZ.v cols) (SZ.v wm) (SZ.v wn)
-    (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn)
+    (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol)
     (SZ.v row) (SZ.v col) (chunk et_d)
     (SZ.v globalRow) (SZ.v globalCol) 1.0R
     (VG.group_seq (chunk et_d) em (SZ.v vg));
@@ -291,6 +332,9 @@ fn drain_group
   // two agree cell by cell.
   assert pure (reveal crb + SZ.v row == SZ.v globalRow);
   assert pure (reveal ccb + SZ.v col == SZ.v globalCol);
+  cband_run_global eC (SZ.v rows) (SZ.v cols) (reveal crb) (reveal ccb) ()
+    (SZ.v row) (SZ.v col) (SZ.v (chunk et_d))
+    (SZ.v globalRow) (SZ.v globalCol) ();
   with nv. assert
     (row_cells gD 1.0R (SZ.v globalRow) (SZ.v globalCol) (chunk et_d) nv
        ** obuf |-> nv);
@@ -316,7 +360,7 @@ fn drain_group
 
   row_cells_global_to_frag gD
     (SZ.v bm) (SZ.v bn) (SZ.v rows) (SZ.v cols) (SZ.v wm) (SZ.v wn)
-    (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn)
+    (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol)
     (SZ.v row) (SZ.v col) (chunk et_d)
     (SZ.v globalRow) (SZ.v globalCol) 1.0R
     (VG.group_seq (chunk et_d) em' (SZ.v vg));
@@ -324,13 +368,13 @@ fn drain_group
   rewrite
     row_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       1.0R (SZ.v row) (SZ.v col) (chunk et_d)
       (VG.group_seq (chunk et_d) em' (SZ.v vg))
   as
     row_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       1.0R
       (VG.grow (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
       (VG.gcol (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v vg))
@@ -339,13 +383,13 @@ fn drain_group
 
   VG.cells_restore_group
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     (chunk et_d) em'
     (fun ij -> in_lane (chunk et_d) (SZ.v rows) (SZ.v cols) (SZ.v lane) ij)
     (SZ.v vg) ();
   fold own_lane_cells
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     em' (SZ.v lane);
 }
 #pop-options
@@ -396,13 +440,16 @@ fn drain_band
   (#eAcc : chest2 et_acc (SZ.v rows) (SZ.v cols))
   (rBand : chest2 real (SZ.v rows) (SZ.v cols))
   (idx : szlt (wm * wn))
+  (idxRow : szlt wm)
+  (idxCol : szlt wn)
+  (#_ : squash (SZ.v idx == SZ.v idxRow * SZ.v wn + SZ.v idxCol))
   (crb ccb : erased nat)
   (#_ : squash (
     reveal crb + SZ.v rows <= SZ.v m /\ reveal ccb + SZ.v cols <= SZ.v n /\
     reveal crb == SZ.v mrow * SZ.v bm + SZ.v warpRow * (SZ.v wm * SZ.v rows)
-                  + (SZ.v idx / SZ.v wn) * SZ.v rows /\
+                  + (SZ.v idxRow) * SZ.v rows /\
     reveal ccb == SZ.v mcol * SZ.v bn + SZ.v warpCol * (SZ.v wn * SZ.v cols)
-                  + (SZ.v idx % SZ.v wn) * SZ.v cols))
+                  + (SZ.v idxCol) * SZ.v cols))
   (lane : szlt warp_size)
   (#_ : squash (SZ.fits (SZ.v rows * SZ.v cols + Kuiper.Barrier.Warp.warp_size)))
   (#_ : squash (SZ.fits (SZ.v m * SZ.v n)))
@@ -421,7 +468,7 @@ fn drain_band
   requires
     live_lane_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       (SZ.v lane)
   ensures
     (exists* (bufv : seq et_d). obuf |-> bufv)
@@ -429,7 +476,7 @@ fn drain_band
     (exists* (eD : chest2 et_d (SZ.v rows) (SZ.v cols)).
       own_lane_cells
         (output_fragment' gD bm bn rows cols wm wn
-          (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+          (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
         eD (SZ.v lane) **
       pure (eD %~ chest_comb comb_r
                     (cband rC (SZ.v rows) (SZ.v cols) crb ccb ()) rBand))
@@ -441,17 +488,17 @@ fn drain_band
              (acc2 eAcc a b));
   unfold live_lane_cells
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     (SZ.v lane);
   with (eD0 : chest2 _ _ _).
     assert own_lane_cells
       (output_fragment' gD bm bn rows cols wm wn
-        (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+        (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
       eD0 (SZ.v lane);
   lane_fade_start eD0 eTarget (SZ.v lane);
   own_lane_cells_rw
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     (SZ.v lane) eD0 (lane_fade eD0 eTarget (SZ.v lane) (SZ.v lane));
 
   let area = rows *^ cols /^ chunk et_d;
@@ -464,7 +511,7 @@ fn drain_band
     invariant
       own_lane_cells
         (output_fragment' gD bm bn rows cols wm wn
-          (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+          (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
         (lane_fade eD0 eTarget (SZ.v lane) (SZ.v !vg))
         (SZ.v lane)
     invariant pure (SZ.v !vg % Kuiper.Barrier.Warp.warp_size == SZ.v lane)
@@ -473,7 +520,8 @@ fn drain_band
   {
     let vvg = !vg;
     drain_group gD gC comb obuf bm bn rows cols wm wn
-      mrow mcol warpRow warpCol bid wid acc idx crb ccb lane eD0 eTarget vvg ();
+      mrow mcol warpRow warpCol bid wid acc idx idxRow idxCol crb ccb
+      lane eD0 eTarget vvg ();
     FStar.Math.Lemmas.add_div_mod_1 (SZ.v vvg) Kuiper.Barrier.Warp.warp_size;
     assert pure (SZ.v vvg < SZ.v vvg + Kuiper.Barrier.Warp.warp_size);
     assert pure (SZ.v (!vg +^ Kuiper.warp_size)
@@ -484,7 +532,7 @@ fn drain_band
   lane_fade_done eD0 eTarget (SZ.v lane) (SZ.v !vg);
   own_lane_cells_rw
     (output_fragment' gD bm bn rows cols wm wn
-      (SZ.v bid) (SZ.v wid) (SZ.v idx / SZ.v wn) (SZ.v idx % SZ.v wn))
+      (SZ.v bid) (SZ.v wid) (SZ.v idxRow) (SZ.v idxCol))
     (SZ.v lane)
     (lane_fade eD0 eTarget (SZ.v lane) (SZ.v !vg))
     eTarget;
@@ -516,13 +564,15 @@ fn store_band
       frag (SZ.v wn) (SZ.v wid_sz) 0))
   (#e0 : chest2 et_acc frag (SZ.v wn))
   (#_ : squash (Pulse.Lib.Array.length accFrags == mfrag wm * nfrag wn))
+  (#_ : squash (nfrag wn * frag == SZ.v wn))
   ()
   preserves array_fragment_pts_to accFrags #1.0R em0
   requires
     band |-> Frac (1.0R /. warp_size) e0 **
     pure (Seq.length em0 == mfrag wm * nfrag wn /\
           (forall (i : natlt (mfrag wm)) (j : natlt (nfrag wn)).
-            Seq.index em0 (i * nfrag wn + j) %~ ematrix_subtile rAcc frag frag i j))
+            Seq.index em0 (fragment_index (mfrag wm) (nfrag wn) i j)
+              %~ ematrix_subtile rAcc frag frag i j))
   ensures
     exists* (e : chest2 et_acc frag (SZ.v wn)).
       band |-> Frac (1.0R /. warp_size) e **
@@ -569,14 +619,17 @@ fn store_band
     // warp-collective. Removing it requires dropping the [__syncwarp] element from
     // that overwrite branch upstream, out of scope for this module.
     mma_store accFrags.(idx) #_
-      #(strided_row_major_subtile
+      #(Kuiper.Array2.Strided.strided_row_major_subtile
           (subtile_layout
             (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc))
             frag (SZ.v wn) (SZ.v wid_sz) 0)
-          #_ #(strided_row_major_subtile
+          #_ #(Kuiper.Array2.Strided.strided_row_major_subtile
             (l2_skewed_row_major (warps bm bn wm wn * frag) (SZ.v wn) (eskew et_acc))
-            #_ #(srm_l2_skewed_row_major
-                   #(warps bm bn wm wn * frag) #(SZ.v wn) #(eskew et_acc) ld_sz)
+            #_ #(to_kuiper_strided_row_major
+                   (l2_skewed_row_major (warps bm bn wm wn * frag)
+                     (SZ.v wn) (eskew et_acc))
+                   (srm_l2_skewed_row_major
+                     #(warps bm bn wm wn * frag) #(SZ.v wn) #(eskew et_acc) ld_sz))
             frag (SZ.v wn) (SZ.v wid_sz) 0)
           frag frag 0 (SZ.v jv))
       sTile;

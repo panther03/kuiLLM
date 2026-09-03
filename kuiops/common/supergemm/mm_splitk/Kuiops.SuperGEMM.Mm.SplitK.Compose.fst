@@ -22,7 +22,7 @@ let rec rsum_upto_ext (f g : nat -> GTot real) (t : nat)
           (decreases t)
 = if t = 0 then () else rsum_upto_ext f g (t - 1)
 
-#push-options "--z3rlimit 20 --split_queries always"
+#push-options "--z3rlimit 20"
 let reduce_ws_target
   (#rows #cols #shared : pos) (mws splits ks : pos)
   (rA : chest2 real rows shared) (rB : chest2 real cols shared)
@@ -40,7 +40,7 @@ let reduce_ws_target
         rws_cell rows splits rW i j z
         == (if z < shared / ks then acc2 (split_partial ks rA rBt z) i j else 0.0R)
     with introduce _ ==> _
-    with _. begin
+    with begin
       ws_row_bound rows splits mws z i;
       ws_target_slab mws splits ks rA rB sq z
     end;

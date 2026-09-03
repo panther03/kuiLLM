@@ -28,20 +28,20 @@ fn scatter_async
   (eIdx : chest di (szlt (do @! (SZ.v dim))) { chest_inj di do (SZ.v dim) eIdx })
   (s : stream_t)
   (#fInp #fIdx : perm)
-  (#e : epoch_t)
+  (#e : Kuiops.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires epoch_live s e
+  requires Kuiops.Epoch.epoch_live s e
   requires on gpu_loc (gInp |-> Frac fInp eInp) **
            on gpu_loc (gIdx |-> Frac fIdx (eIdx <: chest di (szlt (do @! (SZ.v dim))))) **
            on gpu_loc (live gOut)
   ensures
-    epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
+    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
       (on gpu_loc ((gInp |-> Frac fInp eInp) **
                    (gIdx |-> Frac fIdx (eIdx <: chest di (szlt (do @! (SZ.v dim))))) **
                    (exists* eOut. (gOut |-> eOut) **
                       pure (vscatter_chest di do (SZ.v dim) eInp eIdx eOut))))
 {
   with eOut. assert on gpu_loc (gOut |-> eOut);
-  launch (scatter_kd di do cdi cdo dim gInp gIdx gOut n eInp eIdx #eOut #fInp #fIdx) s;
+  Kuiops.Kernel.launch (scatter_kd di do cdi cdo dim gInp gIdx gOut n eInp eIdx #eOut #fInp #fIdx) s;
 }

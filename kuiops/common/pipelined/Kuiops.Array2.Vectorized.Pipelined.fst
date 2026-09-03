@@ -5,12 +5,12 @@ module Kuiops.Array2.Vectorized.Pipelined
 open Kuiper
 open Kuiper.Array.Vectorized
 open Kuiper.Chest
-open Kuiper.PipelineCopy
+open Kuiops.PipelineCopy
 open Pulse.Lib.Pledge
 
 open Kuiper.Tensor { array2, layout2, idx2 }
-open Kuiper.Array2.Strided
-open Kuiper.Array2.Vectorized { row_cells, row_cells_to_slice, row_slice_to_cells }
+open Kuiops.Array2.Strided
+open Kuiops.Array2.Vectorized { row_cells, row_cells_to_slice, row_slice_to_cells }
 open Kuiper.TensorRO { vtlayout_of_tlayout }
 
 module T = Kuiper.Tensor
