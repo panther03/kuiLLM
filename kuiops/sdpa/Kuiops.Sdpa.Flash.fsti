@@ -70,9 +70,9 @@ fn sdpa_flash_async
   (#eK #eV : chest (b @| hkv @| sk @| d @| INil) et_ab)
   (#emask : chest (b @| hq @| sq @| sk @| INil) et_ab)
   (s : stream_t)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     on gpu_loc (
       (gQ |-> Frac fQ eQ) **
@@ -83,8 +83,8 @@ fn sdpa_flash_async
     pure (FSpec.sdpa_flash_finite (SZ.v group) (SZ.v rows)
             eQ eK emask has_mask causal scale)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc (
         (gQ |-> Frac fQ eQ) **
         (gK |-> Frac fK eK) **

@@ -558,20 +558,20 @@ fn reduce
   (s : stream_t)
   (#va : chest (snoc_shape d cols) et_i)
   (#vout : chest d et_o)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves
     cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     on gpu_loc (a |-> va) ** on gpu_loc (output |-> vout)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc (
         (a |-> va) **
         (output |-> mk d (fun i -> reduced f pre_map post_map va i))))
 {
   let rows = Kuiper.Shape.csizeof cd;
-  Kuiops.Kernel.launch (kernel cd f pre_map post_map rows cols nth
+  Kuiper.launch (kernel cd f pre_map post_map rows cols nth
     index index_up a output) s;
 }

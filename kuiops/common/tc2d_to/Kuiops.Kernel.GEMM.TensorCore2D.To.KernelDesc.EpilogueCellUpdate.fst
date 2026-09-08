@@ -70,9 +70,21 @@ let epilogue_fragment_target_eq
         eAcc)
 = ()
 
-(* Unfold the nested target-tile construction in a small pure context.  Doing
-   this at the final [rewrite] inside the Pulse proof is prone to timing out. *)
-#push-options "--z3rlimit 200"
+let epilogue_chest_acc2
+  (#et_cd #et_acc : Type0)
+  {| scalar et_cd, scalar et_acc |}
+  (comb : et_cd -> et_acc -> et_cd)
+  (#rows #cols : nat)
+  (eC : chest2 et_cd rows cols)
+  (eAcc : chest2 et_acc rows cols)
+  (row : natlt rows) (col : natlt cols)
+  : Lemma (
+      acc2 (epilogue_chest comb eC eAcc) row col
+      == comb (acc2 eC row col) (acc2 eAcc row col))
+= Kuiper.EMatrix.macc_mkM
+    (fun i j -> comb (acc2 eC i j) (acc2 eAcc i j)) row col
+
+#push-options "--z3rlimit 20"
 let epilogue_fragment_target_cell
   (#et_cd #et_acc : Type0)
   {| scalar et_cd, scalar et_acc |}
@@ -101,7 +113,34 @@ let epilogue_fragment_target_cell
            mrow mcol warpRow warpCol idx eAcc)
         row col
       == comb (acc2 eC globalRow globalCol) (acc2 eAcc row col))
-= ()
+= epilogue_fragment_target_eq comb eC bm bn rows cols wm wn
+    mrow mcol warpRow warpCol idx eAcc;
+  let fragRow = tiled_cell (wm * rows) rows (idx / wn) row in
+  let fragCol = tiled_cell (wn * cols) cols (idx % wn) col in
+  let warpCellRow = tiled_cell bm (wm * rows) warpRow fragRow in
+  let warpCellCol = tiled_cell bn (wn * cols) warpCol fragCol in
+  let globalRow' = tiled_cell m bm mrow warpCellRow in
+  let globalCol' = tiled_cell n bn mcol warpCellCol in
+  assert (globalRow == globalRow');
+  assert (globalCol == globalCol');
+  epilogue_chest_acc2 comb
+    (ematrix_subtile
+      (ematrix_subtile
+        (ematrix_subtile eC bm bn mrow mcol)
+        (wm * rows) (wn * cols) warpRow warpCol)
+      rows cols (idx / wn) (idx % wn))
+    eAcc row col;
+  FStar.Math.Lemmas.nat_over_pos_is_nat idx wn;
+  subtile_acc2
+    (ematrix_subtile
+      (ematrix_subtile eC bm bn mrow mcol)
+      (wm * rows) (wn * cols) warpRow warpCol)
+    rows cols (idx / wn) (idx % wn) row col;
+  subtile_acc2
+    (ematrix_subtile eC bm bn mrow mcol)
+    (wm * rows) (wn * cols) warpRow warpCol
+    fragRow fragCol;
+  subtile_acc2 eC bm bn mrow mcol warpCellRow warpCellCol
 #pop-options
 
 inline_for_extraction noextract
@@ -179,6 +218,13 @@ fn epilogue_cell_update
   assert pure (
     (SZ.v warpCol + 1) * (SZ.v wn * SZ.v cols)
     <= SZ.v bn);
+  FStar.Matrix.flattened_index_is_under_flattened_size
+    (SZ.v wm) (SZ.v rows) (SZ.v idx / SZ.v wn) (SZ.v row);
+  FStar.Math.Lemmas.div_exact_r
+    (SZ.v bm) (SZ.v wm * SZ.v rows);
+  FStar.Matrix.flattened_index_is_under_flattened_size
+    (SZ.v bm / (SZ.v wm * SZ.v rows)) (SZ.v wm * SZ.v rows)
+    (SZ.v warpRow) ((SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row);
   assert pure (
     SZ.v warpRow * (SZ.v wm * SZ.v rows)
       + (SZ.v idx / SZ.v wn) * SZ.v rows + SZ.v row

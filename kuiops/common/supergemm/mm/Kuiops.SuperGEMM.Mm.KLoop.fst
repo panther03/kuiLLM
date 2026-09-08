@@ -235,8 +235,13 @@ let ematrix_subtile_const
         ematrix_subtile #real #rows #cols (const _ v) tr tc i j
         `equal` (const _ v <: chest2 real tr tc))
       [SMTPat (ematrix_subtile #real #rows #cols (const _ v) tr tc i j)]
-= assert (equal (ematrix_subtile #real #rows #cols (const _ v) tr tc i j)
-                (const _ v <: chest2 real tr tc))
+= let src : chest2 real rows cols = const _ v in
+  let tile = ematrix_subtile src tr tc i j in
+  let dst : chest2 real tr tc = const _ v in
+  introduce forall (r : natlt tr) (c : natlt tc).
+    acc2 tile r c == acc2 dst r c
+  with (Kuiper.EMatrix.Tiling.subtile_acc2 src tr tc i j r c);
+  Kuiper.EMatrix.lemma_equal_intro tile dst
 #pop-options
 
 (* subtile of an approximation is an approximation *)
@@ -1099,6 +1104,7 @@ fn stage_next
 
   lemma_subtile_aligned lA (SZ.v bm) (SZ.v bk) (SZ.v block_row) (SZ.v kt) (SZ.v (chunk et_ab));
   lemma_subtile_aligned lB (SZ.v bn) (SZ.v bk) (SZ.v block_col) (SZ.v kt) (SZ.v (chunk et_ab));
+  FStar.Math.Lemmas.modulo_distributivity (SZ.v bk) (SZ.v skew) (SZ.v (chunk et_ab));
   lemma_aligned_srm_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz (SZ.v (chunk et_ab));
   lemma_aligned_srm_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz (SZ.v (chunk et_ab));
 
@@ -1191,27 +1197,24 @@ fn subproducts_buf
   lemma_ctranspose_approx eB_tile rB_phys ();
 
   let layoutA = l2_skewed_row_major (SZ.v bm) (SZ.v bk) (SZ.v skew);
-  let kuiper_strA =
-    kuiper_srm_l2_skewed_row_major
-      #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz #_;
   let layoutB =
     TR.ltranspose (l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew));
-  let kuiper_strB =
-    kuiper_scm_of_srm
-      (kuiper_srm_l2_skewed_row_major
-        #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz #_);
 
+  (* Inline the witnesses so their noextract record types do not escape. *)
   subproducts bm bn bk wm wn fmap aFrags bFrags accFrags
     #layoutA
     #(c_l2_skewed_row_major #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz)
-    #kuiper_strA
+    #(kuiper_srm_l2_skewed_row_major
+        #(SZ.v bm) #(SZ.v bk) #(SZ.v skew) ldsz #_)
     (skewed_view bm bk skew curbufA)
     #layoutB
     #(TR.ctlayout_ltranspose_inst
         #(SZ.v bn) #(SZ.v bk)
         #(l2_skewed_row_major (SZ.v bn) (SZ.v bk) (SZ.v skew))
         #(c_l2_skewed_row_major #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz) #())
-    #kuiper_strB
+    #(kuiper_scm_of_srm
+        (kuiper_srm_l2_skewed_row_major
+          #(SZ.v bn) #(SZ.v bk) #(SZ.v skew) ldsz #_))
     (TR.atranspose (skewed_view bn bk skew curbufB))
     #eA_tile
     #(TR.ctranspose eB_tile)

@@ -86,17 +86,17 @@ fn supergemm_mm_splitk_async
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#fA #fB : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
   requires
-    Kuiops.Epoch.epoch_live s e **
+    Kuiper.Epoch.epoch_live s e **
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next (Kuiper.Epoch.epoch_next e)) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next (Kuiper.Epoch.epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).
@@ -111,7 +111,7 @@ fn supergemm_mm_splitk_async
   assert pure (SZ.v nblk == SZ.v mws / SZ.v bm * (SZ.v cols / SZ.v bn));
   assert pure (SZ.v nthr == P.nthr bm bn wm wn);
 
-  Kuiops.Kernel.launch (
+  Kuiper.launch (
     mk_kernel gA #eA gB #eB gW (to_real_matrix eA) (to_real_matrix eB)
       bm bn bk wm wn skew splits ks fA fB nblk nthr ()
   ) s;
@@ -123,8 +123,8 @@ fn supergemm_mm_splitk_async
   (* Bring the reduce kernel's precondition to the queue position pass 1 left
      behind: [live gD] is owned outright, so it is injected with a trivial
      pledge and joined onto pass 1's.  A and B ride along as a frame -- pass 2
-     never touches them, but [Kuiops.Kernel.launch_pledged] consumes the whole pledge. *)
-  return_pledge (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e)) (on gpu_loc (live gD))
+     never touches them, but [Kuiper.launch_pledged] consumes the whole pledge. *)
+  return_pledge (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e)) (on gpu_loc (live gD))
     #(is_send_placeless (on gpu_loc (live gD)) #(placeless_on gpu_loc (live gD)));
   join_pledge
     (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
@@ -149,7 +149,7 @@ fn supergemm_mm_splitk_async
         live gD)))
     #emp_inames fn () { () };
 
-  Kuiops.Kernel.launch_pledged
+  Kuiper.launch_pledged
     (desc_frame ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB))
        (mk_reduce_kernel gW gD splits post_map post_map_r () njobs 1.0R
           (ws_target (SZ.v mws) (SZ.v splits) (SZ.v ks)

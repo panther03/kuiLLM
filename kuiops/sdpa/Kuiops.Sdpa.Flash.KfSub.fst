@@ -838,6 +838,39 @@ let kv_rows_done (#et:Type0) (#nrow #ncol : nat) (cur tgt : chest2 et nrow ncol)
 let kv_cells_done (#et:Type0) (#nrow #ncol : nat) (cur tgt : chest2 et nrow ncol) (r nc : nat) : prop
 = r < nrow /\ (forall (j : natlt ncol). j < nc ==> acc2 cur r j == acc2 tgt r j)
 
+let kv_write_cell
+  (#et : Type0) (#nrow #ncol : nat)
+  (cur tgt : chest2 et nrow ncol)
+  (r : natlt nrow) (c : natlt ncol) (v : et)
+  : Lemma
+      (requires kv_rows_done cur tgt r /\ kv_cells_done cur tgt r c /\
+                v == acc2 tgt r c)
+      (ensures kv_rows_done (upd2 cur r c v) tgt r /\
+               kv_cells_done (upd2 cur r c v) tgt r (c + 1))
+= introduce forall (i : natlt nrow) (j : natlt ncol).
+    i < r ==> acc2 (upd2 cur r c v) i j == acc2 tgt i j
+  with (macc_mupd cur r c v i j);
+  introduce forall (j : natlt ncol).
+    j < c + 1 ==> acc2 (upd2 cur r c v) r j == acc2 tgt r j
+  with (macc_mupd cur r c v r j)
+
+let kv_stride_tile_acc2
+  (#et : Type0) (#sk : pos) (#d : nat)
+  (bn : nat) (e : chest2 et sk d) (k0 : nat)
+  (sr : pos { sr /? bn }) (sc : pos { sc /? d })
+  (tr : natlt sr) (tc : natlt sc)
+  (i : natlt (bn / sr)) (j : natlt (d / sc))
+  : Lemma (
+      acc2 (ematrix_stride_subtile (SF.kv_tile bn e k0) sr sc tr tc) i j
+      == acc2 e (SF.clamp_nat sk (k0 + i * sr + tr)) (j * sc + tc))
+= tile_idx_lem sr i tr bn;
+  tile_idx_lem sc j tc d;
+  macc_mkM #et #bn #d (fun r c -> acc2 e (SF.clamp_nat sk (k0 + r)) c)
+    (i * sr + tr) (j * sc + tc);
+  macc_mkM #et #(bn / sr) #(d / sc)
+    (fun i j -> acc2 (SF.kv_tile bn e k0) (i * sr + tr) (j * sc + tc))
+    i j
+
 inline_for_extraction noextract
 fn sdpa_flash_kv_load
   (#et : Type0)
@@ -901,7 +934,9 @@ fn sdpa_flash_kv_load
     let arow : szlt (SZ.v bn / warp_row_span) = va0;
     tile_idx_lem warp_row_span (SZ.v arow) (SZ.v tr) (SZ.v bn);
     let trow : szlt bn = warp_row_span_sz *^ arow +^ tr;
+    assert pure (SZ.v trow == SZ.v arow * warp_row_span + SZ.v lane / 16);
     let kr : szlt sk = clamp_lt sk (k0base +^ trow);
+    assert pure (SZ.v kr == SF.clamp_nat (SZ.v sk) (SZ.v k0base + SZ.v trow));
 
     let mut b : sz = 0sz;
     while (!b <^ ncol)
@@ -920,8 +955,18 @@ fn sdpa_flash_kv_load
       let bcol : szlt (SZ.v d / 16) = vb0;
       tile_idx_lem 16 (SZ.v bcol) (SZ.v tc) (SZ.v d);
       let dd : szlt d = 16sz *^ bcol +^ tc;
+      assert pure (SZ.v dd == SZ.v bcol * 16 + SZ.v lane % 16);
 
+      with eKc. assert (array2_stride_subtile shK warp_row_span 16
+        (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eKc);
+      with eVc. assert (array2_stride_subtile shV warp_row_span 16
+        (SZ.v lane / 16) (SZ.v lane % 16) |-> Frac 1.0R eVc);
       let vk = tensor_read gK (cidx2 kr dd);
+      assert pure (vk == acc2 eK (SZ.v kr) (SZ.v dd));
+      kv_stride_tile_acc2 (SZ.v bn) eK (SZ.v k0base) warp_row_span 16
+        (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v arow) (SZ.v bcol);
+      assert pure (vk == acc2 tgtK (SZ.v arow) (SZ.v bcol));
+      kv_write_cell eKc tgtK (SZ.v arow) (SZ.v bcol) vk;
       tensor_write #_ #_ #_ #_
         #(c_stride_subtile_layout lshK #cshK
             warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))
@@ -929,6 +974,11 @@ fn sdpa_flash_kv_load
           (SZ.v lane / 16) (SZ.v lane % 16))
         (cidx2 arow bcol) vk;
       let vv = tensor_read gV (cidx2 kr dd);
+      assert pure (vv == acc2 eV (SZ.v kr) (SZ.v dd));
+      kv_stride_tile_acc2 (SZ.v bn) eV (SZ.v k0base) warp_row_span 16
+        (SZ.v lane / 16) (SZ.v lane % 16) (SZ.v arow) (SZ.v bcol);
+      assert pure (vv == acc2 tgtV (SZ.v arow) (SZ.v bcol));
+      kv_write_cell eVc tgtV (SZ.v arow) (SZ.v bcol) vv;
       tensor_write #_ #_ #_ #_
         #(c_stride_subtile_layout lshV #cshV
             warp_row_span 16 (SZ.v lane / 16) (SZ.v lane % 16))

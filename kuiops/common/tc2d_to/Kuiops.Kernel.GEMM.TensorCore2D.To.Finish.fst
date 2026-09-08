@@ -123,11 +123,44 @@ ghost fn prepare_epilogue
     bm bn bk tm tn tk wm wn nthr sh accFrags rAcc tid;
 }
 
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 30"
+let tile_offset_bound
+  (whole : pos) (tile : pos { tile /? whole })
+  (t : natlt (whole / tile)) (i : natlt tile)
+  : Lemma (t * tile + i < whole)
+= Kuiper.Divides.lemma_divides_exact tile whole;
+  FStar.Matrix.flattened_index_is_under_flattened_size
+    (whole / tile) tile t i
+
+let nested_subtile_eq
+  (#et : Type) (#m #n : pos)
+  (matrix : chest2 et m n)
+  (bm : pos { bm /? m }) (bn : pos { bn /? n })
+  (tr : pos { tr /? bm }) (tc : pos { tc /? bn })
+  (br : natlt (m / bm)) (bc : natlt (n / bn))
+  (wr : natlt (bm / tr)) (wc : natlt (bn / tc))
+  (r : enatlt (m / tr) { r * tr == br * bm + wr * tr })
+  (c : enatlt (n / tc) { c * tc == bc * bn + wc * tc })
+  : Lemma (
+      ematrix_subtile (ematrix_subtile matrix bm bn br bc) tr tc wr wc
+      == ematrix_subtile matrix tr tc r c)
+= let lhs = ematrix_subtile (ematrix_subtile matrix bm bn br bc) tr tc wr wc in
+  let rhs = ematrix_subtile matrix tr tc r c in
+  introduce forall (i : natlt tr) (j : natlt tc).
+    acc2 lhs i j == acc2 rhs i j
+  with (
+    tile_offset_bound bm tr wr i;
+    tile_offset_bound bn tc wc j;
+    subtile_acc2 (ematrix_subtile matrix bm bn br bc) tr tc wr wc i j;
+    subtile_acc2 matrix bm bn br bc (wr * tr + i) (wc * tc + j);
+    subtile_acc2 matrix tr tc r c i j
+  );
+  Kuiper.EMatrix.lemma_equal_intro lhs rhs;
+  Kuiper.Chest.ext lhs rhs
+#pop-options
+
 #push-options "--ifuel 1 --initial_fuel 0 --max_fuel 1"
-// The pointwise [lemma_equal_intro rOutLocal rOutTarget] obligation below is a
-// nonlinear, seed-sensitive index-arithmetic query.  Keep retries local to this
-// proof so an unrelated context change does not make verification flaky.
-#push-options "--z3rlimit 30 --retry 5"
+#push-options "--z3rlimit 30"
 
 noextract
 ghost fn normalize_output
@@ -171,14 +204,7 @@ ghost fn normalize_output
           nthr bid (tid / warp_size))) })
   requires
     output_lane_approximates gD bm bn tm tn wm wn bid tid
-      (chest_comb comb_r
-        (ematrix_subtile
-          (ematrix_subtile rC bm bn
-            (bid / (n / bn)) (bid % (n / bn)))
-          (wm * tm) (wn * tn)
-          ((tid / warp_size) / (bn / (wn * tn)))
-          ((tid / warp_size) % (bn / (wn * tn))))
-        rAcc)
+      (epilogue_warp_output comb_r rC bm bn tm tn wm wn bid tid rAcc)
   ensures
     output_lane_approximates gD bm bn tm tn wm wn bid tid
       (ematrix_subtile
@@ -200,6 +226,10 @@ ghost fn normalize_output
         (MS.mmcomb comb_r rC rA rB)
         bm bn mrow mcol)
       (wm * tm) (wn * tn) warpRow warpCol;
+  assert pure (epilogue_warp_output comb_r rC
+    bm bn tm tn wm wn bid tid rAcc == rOutLocal);
+  rewrite each (epilogue_warp_output comb_r rC
+    bm bn tm tn wm wn bid tid rAcc) as rOutLocal;
   rewrite each
     (SZ.v bid / (SZ.v n / SZ.v bn))
   as SZ.v mrow;
@@ -236,8 +266,23 @@ ghost fn normalize_output
     gwCol * (SZ.v wn * SZ.v tn) ==
     SZ.v mcol * SZ.v bn +
       SZ.v warpCol * (SZ.v wn * SZ.v tn));
-  Kuiper.EMatrix.lemma_equal_intro rOutLocal rOutTarget;
-  Kuiper.Chest.ext rOutLocal rOutTarget;
+  assert pure (
+    warp_tile_i #m #n bm bn bk tm tn tk wm wn
+      nthr bid (tid / warp_size) == gwRow);
+  assert pure (
+    warp_tile_j #m #n bm bn bk tm tn tk wm wn
+      nthr bid (tid / warp_size) == gwCol);
+  let rMatmul = MS.matmul rA rB;
+  assert pure (
+    rAcc == ematrix_subtile rMatmul (wm * tm) (wn * tn) gwRow gwCol);
+  nested_subtile_eq rMatmul bm bn (wm * tm) (wn * tn)
+    mrow mcol warpRow warpCol gwRow gwCol;
+  chest_comb_subtile comb_r rC rMatmul bm bn mrow mcol;
+  chest_comb_subtile comb_r
+    (ematrix_subtile rC bm bn mrow mcol)
+    (ematrix_subtile rMatmul bm bn mrow mcol)
+    (wm * tm) (wn * tn) warpRow warpCol;
+  assert pure (rOutLocal == rOutTarget);
   rewrite
     output_lane_approximates
       gD bm bn tm tn wm wn bid tid rOutLocal

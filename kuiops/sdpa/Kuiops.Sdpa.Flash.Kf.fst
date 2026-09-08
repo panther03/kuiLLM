@@ -282,15 +282,26 @@ fn sdpa_flash_kf
     (SZ.v (tid %^ 32sz)));
 
   let w = sdpa_flash_w nw nthr tid;
+  assert pure (SZ.v w == SZ.v (tid /^ 32sz));
+  FStar.Math.Lemmas.small_mod (SZ.v w) (SZ.v nw);
   let lane = sdpa_flash_lane nw nthr tid;
+  assert pure (SZ.v lane == SZ.v (tid %^ 32sz));
   let irow : szlt 16 = clamp_lt 16sz lane;
+  assert pure (SZ.v lane < 16 ==> SZ.v irow == SZ.v lane);
   let r = r0 +^ irow;
+  assert pure (SZ.v r == SZ.v r0 + SZ.v irow);
   let rr : szlt rows = clamp_lt rows r;
+  assert pure (SZ.v rr == SF.clamp_nat (SZ.v rows) (SZ.v r));
   let qh0 = kvh *^ group +^ (rr /^ sq);
+  assert pure (SZ.v qh0 == SZ.v kvh * SZ.v group + SZ.v rr / SZ.v sq);
   let qh : szlt hq = clamp_lt hq qh0;
+  assert pure (SZ.v qh == SF.clamp_nat (SZ.v hq) (SZ.v qh0));
   let qpos : szlt sq = rr %^ sq;
+  assert pure (SZ.v qpos == SZ.v rr % SZ.v sq);
   let row_active = r <^ rows;
+  assert pure (row_active == (SZ.v r < SZ.v rows));
   let cbound = qpos +^ (sk -^ sq);
+  assert pure (SZ.v cbound == SZ.v qpos + (SZ.v sk - SZ.v sq));
   let nkt = sdpa_flash_causal_mask 16sz 16sz sk sq rows r0 causal;
   assert pure (SZ.v (tid /^ 32sz) < SZ.v nw);
   assert pure (SZ.v (tid %^ 32sz) < 16 ==>

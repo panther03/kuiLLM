@@ -740,14 +740,14 @@ fn reduce
   (#vin : chest (snoc_shape d cols) et_i)
   (#vr : chest (snoc_shape d cols) real)
   (#vout : chest d et_o)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires on gpu_loc (input |-> vin) ** on gpu_loc (output |-> vout)
   requires pure (vin %~ vr)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc (
         (input |-> vin) **
         (exists* (vout' : chest d et_o).
@@ -755,6 +755,6 @@ fn reduce
           pure (out_approx f_r pre_map_r post_map_r vr vout'))))
 {
   let rows = Kuiper.Shape.csizeof cd;
-  Kuiops.Kernel.launch (kernel cd f f_r pre_map pre_map_r post_map post_map_r rows cols nth
+  Kuiper.launch (kernel cd f f_r pre_map pre_map_r post_map post_map_r rows cols nth
     index index_up input output #vin #vr) s;
 }

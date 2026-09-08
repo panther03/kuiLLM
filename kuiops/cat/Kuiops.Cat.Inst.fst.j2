@@ -46,7 +46,7 @@ module SZ = Kuiper.SizeT
 // construction and the three shape side conditions hold (discharged as `()`).
 fn {{ name }}
     {% for k in range(r) %}(a{{ k }} : szp)
-    {% endfor %}(bd : szp { SZ.fits ({{ prod('a') }}) /\ SZ.fits ({{ prod('b') }}) /\ SZ.fits ({{ prod('o') }}) /\ SZ.fits (a{{ dim }} + bd) })
+    {% endfor %}(bd : szp { SZ.fits (a{{ dim }} + bd) /\ SZ.fits ({{ prod('a') }}) /\ SZ.fits ({{ prod('b') }}) /\ SZ.fits ({{ prod('o') }}) })
     (gA : tensor ({{ et }}) ({{ rm('a') }}) {is_global gA})
     (gB : tensor ({{ et }}) ({{ rm('b') }}) {is_global gB})
     (gOut : tensor ({{ et }}) ({{ rm('o') }}) {is_global gOut})
@@ -61,7 +61,7 @@ fn {{ name }}
            on gpu_loc (live gOut)
   ensures
     epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    pledge0 (epoch_done s (epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gOut |-> cat_chest {{ dim }} ({{ shp('a') }}) ({{ shp('b') }}) ({{ shp('o') }}) eA eB (SZ.v a{{ dim }}) () () ())))
 {
