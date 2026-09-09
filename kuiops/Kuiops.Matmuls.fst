@@ -36,10 +36,17 @@ let sizet_rem_spec (a : SZ.t) (b : SZ.t { SZ.v b <> 0 })
   : Lemma (SZ.v (a %^ b) == SZ.v a % SZ.v b)
 = FStar.Math.Lemmas.euclidean_division_definition (SZ.v a) (SZ.v b)
 
+#push-options "--fuel 4 --ifuel 0"
+let batched_row_major_cell
+  (batch rows cols : nat)
+  (p : natlt batch) (i : natlt rows) (j : natlt cols)
+  : Lemma ((l3_batched_row_major batch rows cols).imap.f (idx3 p i j)
+           == p * (rows * cols) + cols * i + j)
+= ()
+#pop-options
+
 (* The batched row-major layout is affine in (page, row, col) with offset 0,
-   page stride rows*cols and row stride cols; [l3_batched_row_major_imap] is the
-   fsti-level characterization, so the instance can be built here rather than
-   reaching into Kuiper's opaque one. *)
+   page stride rows*cols and row stride cols. *)
 inline_for_extraction noextract
 instance srm3_batched
   (batch : erased nat { SZ.fits batch })
@@ -50,9 +57,7 @@ instance srm3_batched
   offset3 = 0sz;
   pstride3 = rows *^ cols;
   rstride3 = cols;
-  pf3 = (fun p i j ->
-           l3_batched_row_major_imap batch rows cols
-             (SZ.uint_to_t p) (SZ.uint_to_t i) (SZ.uint_to_t j));
+  pf3 = (fun p i j -> batched_row_major_cell batch rows cols p i j);
 }
 
 (* The instance is opaque at call sites; expose its affine fields so alignment
@@ -250,6 +255,8 @@ fn tc2d_to_gen_async
   dassert (nblk <=^ SZ.uint_to_t 2097152);
   assert pure (nblk <= max_blocks);
 
+  sizet_rem_spec (bm *^ bk) (chunk et_ab *^ nthr);
+  sizet_rem_spec (bk *^ bn) (chunk et_ab *^ nthr);
   dassert ((bm *^ bk) %^ (chunk et_ab *^ nthr) = 0sz);
   dassert ((bk *^ bn) %^ (chunk et_ab *^ nthr) = 0sz);
 

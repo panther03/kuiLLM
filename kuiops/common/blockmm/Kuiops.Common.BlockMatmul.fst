@@ -57,7 +57,8 @@ let subtile_approx
   let rs = ematrix_subtile r trows tcols tr tc in
   introduce forall (ij : abs (trows @| tcols @| INil)). acc ms ij %~ acc rs ij
   with (let (i, (j, ())) = ij in
-        assert (acc2 ms i j == acc2 m (tr * trows + i) (tc * tcols + j)))
+        subtile_acc2 m trows tcols tr tc i j;
+        subtile_acc2 r trows tcols tr tc i j)
 
 (* [__matmul_single_tile] over reals is the real counterpart of [emma_chain]:
    both are a left-associated accumulation over the chunks of the shared
