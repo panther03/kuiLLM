@@ -28,6 +28,11 @@ module SF = Kuiops.Sdpa.Flash.Spec.Float
 module SS = Kuiops.Sdpa.Flash.Spec.Step
 module FC = Kuiper.Float.Casts
 
+let row_major_cell (rows cols : pos)
+  (i : natlt rows) (j : natlt cols)
+  : Lemma ((l2_row_major rows cols).imap.f (idx2 i j) == i * cols + j)
+= ()
+
 inline_for_extraction noextract
 let flash_scale_cimap
   (nw bm : szp) (lane : szlt bm)
@@ -41,7 +46,18 @@ let flash_scale_cimap
   match x with
   | (i, (j, ())) ->
     assert (SZ.v j == 0);
-    i *^ bm +^ j *^ bm +^ lane
+    assert (up x == idx2 (SZ.v i) (SZ.v j));
+    assert (
+      stride_tile_inj_f #(SZ.v nw) #(SZ.v bm) 1 (SZ.v bm) 0 (SZ.v lane) (up x)
+      == idx2 (SZ.v i) (SZ.v lane));
+    assert (
+      (stride_subtile_layout (l2_row_major (SZ.v nw) (SZ.v bm))
+        1 (SZ.v bm) 0 (SZ.v lane)).imap.f (up x)
+      == (l2_row_major (SZ.v nw) (SZ.v bm)).imap.f (idx2 (SZ.v i) (SZ.v lane)));
+    row_major_cell (SZ.v nw) (SZ.v bm) (SZ.v i) (SZ.v lane);
+    let r = i *^ bm +^ j *^ bm +^ lane in
+    assert (SZ.v r == SZ.v i * SZ.v bm + SZ.v lane);
+    r
 
 noeq inline_for_extraction noextract
 type flash_views
@@ -160,8 +176,13 @@ let stride_gap (nthr : pos) (tid : natlt nthr) (cur f : nat)
           (ensures f < cur \/ f >= cur + nthr)
   = FStar.Math.Lemmas.euclidean_division_definition f nthr;
     FStar.Math.Lemmas.euclidean_division_definition cur nthr;
-    if f > cur && f < cur + nthr then
-      FStar.Math.Lemmas.lemma_mult_lt_right nthr (cur / nthr) (f / nthr)
+    if f > cur then (
+      if f / nthr <= cur / nthr then
+        FStar.Math.Lemmas.lemma_mult_le_right nthr (f / nthr) (cur / nthr);
+      assert (cur / nthr + 1 <= f / nthr);
+      FStar.Math.Lemmas.lemma_mult_le_right nthr (cur / nthr + 1) (f / nthr);
+      FStar.Math.Lemmas.distributivity_add_left (cur / nthr) 1 nthr
+    )
     else ()
 
 (* A flat row-major index determines its cell. *)
@@ -713,26 +734,21 @@ let flash_block_bij
 {
   ff = (fun ((bi, kvh, rt) :
       natlt b & natlt hkv & natlt tiles) ->
+    flat_lt b hkv bi kvh;
+    flat_lt (b * hkv) tiles (bi * hkv + kvh) rt;
     ((bi * hkv + kvh) * tiles + rt
       <: natlt (b * hkv * tiles)));
   gg = (fun bid ->
-    let bh = bid / tiles in
-    ((bh / hkv <: natlt b),
+    let bh = FStar.Matrix.get_i (b * hkv) tiles bid in
+    ((FStar.Matrix.get_i b hkv bh <: natlt b),
       (bh % hkv <: natlt hkv),
       (bid % tiles <: natlt tiles)));
   ff_gg = (fun bid ->
-    FStar.Math.Lemmas.lemma_div_mod (bid <: nat) tiles;
-    FStar.Math.Lemmas.lemma_div_mod
-      ((bid / tiles) <: nat) hkv);
+    FStar.Math.Lemmas.euclidean_division_definition (bid / tiles) hkv;
+    FStar.Math.Lemmas.euclidean_division_definition bid tiles);
   gg_ff = (fun (bi, kvh, rt) ->
-    FStar.Math.Lemmas.lemma_div_plus
-      (rt <: nat) ((bi * hkv + kvh) <: nat) tiles;
-    FStar.Math.Lemmas.small_div (rt <: nat) tiles;
-    FStar.Math.Lemmas.small_mod (rt <: nat) tiles;
-    FStar.Math.Lemmas.lemma_div_plus
-      (kvh <: nat) (bi <: nat) hkv;
-    FStar.Math.Lemmas.small_div (kvh <: nat) hkv;
-    FStar.Math.Lemmas.small_mod (kvh <: nat) hkv);
+    flat_inj tiles (bi * hkv + kvh) rt;
+    flat_inj hkv bi kvh);
 }
 
 let flash_owner_idx

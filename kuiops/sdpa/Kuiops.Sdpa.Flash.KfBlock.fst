@@ -34,6 +34,26 @@ module FC = Kuiper.Float.Casts
 module SF = Kuiops.Sdpa.Flash.Spec.Float
 module FT = Kuiops.Sdpa.Flash.Types
 
+let q_tile_acc2
+  (#et : Type0) {| scalar et |}
+  (#b : nat) (#hq #sq : pos) (#d : nat)
+  (bm : nat) (rows : pos) (group : nat)
+  (eQ : chest (b @| hq @| sq @| d @| INil) et)
+  (bi : natlt b) (kvh r0 : nat) (i : natlt bm) (dd : natlt d)
+  : Lemma (
+      acc2 (SF.q_tile bm rows group eQ bi kvh r0) i dd ==
+      (let r = r0 + i in
+       let rr = SF.clamp_nat rows r in
+       let qh = SF.clamp_nat hq (kvh * group + rr / sq) in
+       if r < rows then acc4 eQ bi qh (rr % sq) dd else zero))
+= macc_mkM
+    (fun i dd ->
+      let r = r0 + i in
+      let rr = SF.clamp_nat rows r in
+      let qh = SF.clamp_nat hq (kvh * group + rr / sq) in
+      if r < rows then acc4 eQ bi qh (rr % sq) dd else zero)
+    i dd
+
 let divup_le_quotient_plus_one (m : nat) (k : pos)
   : Lemma (Kuiper.Divides.divup m k <= m / k + 1)
 = if m = 0 then ()
@@ -201,14 +221,23 @@ fn sdpa_flash_q_load
     let i : szlt bm = flat /^ d;
     let dd : szlt d = flat %^ d;
     let r = r0 +^ i;
+    assert pure (SZ.v r == SZ.v r0 + SZ.v i);
     let rr : szlt rows = clamp_lt rows r;
+    assert pure (SZ.v rr == SF.clamp_nat (SZ.v rows) (SZ.v r));
     let qh0 = kvh *^ group +^ (rr /^ sq);
+    assert pure (SZ.v qh0 == SZ.v kvh * SZ.v group + SZ.v rr / SZ.v sq);
     let qh1 : szlt hq = clamp_lt hq qh0;
+    assert pure (SZ.v qh1 == SF.clamp_nat (SZ.v hq) (SZ.v qh0));
     let qpos : szlt sq = rr %^ sq;
+    assert pure (SZ.v qpos == SZ.v rr % SZ.v sq);
     let qread = tensor_read gQ (cidx4 bi qh1 qpos dd);
+    assert pure (qread == acc4 eQ (SZ.v bi) (SZ.v qh1) (SZ.v qpos) (SZ.v dd));
     let qv : et_ab = q_sel (r <^ rows) qread;
+    assert pure (qv == (if SZ.v r < SZ.v rows then qread else zero));
     FStar.Math.Lemmas.euclidean_division_definition (SZ.v flat) (SZ.v d);
     assert pure (SZ.v i * SZ.v d + SZ.v dd == SZ.v flat);
+    q_tile_acc2 (SZ.v bm) (SZ.v rows) (SZ.v group) eQ
+      (SZ.v bi) (SZ.v kvh) (SZ.v r0) (SZ.v i) (SZ.v dd);
     assert pure (acc2 (SF.q_tile (SZ.v bm) (SZ.v rows) (SZ.v group) eQ (SZ.v bi) (SZ.v kvh) (SZ.v r0)) (SZ.v i) (SZ.v dd) == qv);
     forevery_remove
       #(stride_index2 (SZ.v bm) (SZ.v d) (SZ.v nthr) (SZ.v tid))

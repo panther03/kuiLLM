@@ -525,7 +525,14 @@ let frag_global_cell_eq
   ML.cancel_mul_mod wm tm;
   ML.cancel_mul_mod wn tn;
   output_fragment_cell_convert_eq' gD bm bn tm tn wm wn
-    bid wid mi nj i (j + x) f (Seq.index v x)
+    bid wid mi nj i (j + x) f (Seq.index v x);
+  let frag_col = tiled_cell (wn * tn) tn nj (j + x) in
+  assert (frag_col == nj * tn + j + x);
+  let block_col = tiled_cell bn (wn * tn) (wid % (bn / (wn * tn))) frag_col in
+  assert (block_col == wid % (bn / (wn * tn)) * (wn * tn) + nj * tn + j + x);
+  assert (tiled_cell n bn (bid % (n / bn)) block_col
+    == bid % (n / bn) * bn + block_col);
+  assert (tiled_cell n bn (bid % (n / bn)) block_col == globalCol + x)
 
 ghost
 fn row_cells_frag_to_global

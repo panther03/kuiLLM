@@ -164,9 +164,7 @@ let lemma_gg (rows cols chunk nthr : pos) (tid : natlt nthr) (i j : nat)
   assert (row * cols + col == chunk * ci + x);
   assert (row * cols + col == flat);
   assert (col < cols /\ j < cols);
-  ML.lemma_div_mod (row * cols + col) cols;
-  ML.lemma_div_mod flat cols;
-  ML.euclidean_division_definition flat cols
+  Kuiper.Divides.lemma_eucl_unique cols row col i j
 
 let lemma_ff_inv (rows cols chunk nthr : pos) (tid : natlt nthr) (s x : nat)
   : Lemma (requires geo_ok rows cols chunk nthr /\

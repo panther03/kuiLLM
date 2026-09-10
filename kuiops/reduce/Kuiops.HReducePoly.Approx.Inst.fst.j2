@@ -83,7 +83,7 @@ fn {{ name }}
   requires on gpu_loc (input |-> vin) ** on gpu_loc (live output)
   ensures
     epoch_live s (epoch_next e) **
-    pledge0 (epoch_flushed s (epoch_next e))
+    pledge0 (epoch_done s (epoch_next e))
       (on gpu_loc (
         (input |-> vin) **
         (exists* (vout' : chest ({{ shp(r - 1) }}) ({{ out_et }})).

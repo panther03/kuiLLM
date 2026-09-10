@@ -104,17 +104,17 @@ fn supergemm_mm_splitk_async
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#fA #fB : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
   requires
-    Kuiops.Epoch.epoch_live s e **
+    Kuiper.Epoch.epoch_live s e **
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD) **
     on gpu_loc (live gW)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next (Kuiops.Epoch.epoch_next e)))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next (Kuiper.Epoch.epoch_next e)) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next (Kuiper.Epoch.epoch_next e)))
       (on gpu_loc
         (exists* (eW' : chest2 et_acc (SZ.v mws) (SZ.v cols))
                  (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)).

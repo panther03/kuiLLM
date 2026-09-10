@@ -64,16 +64,16 @@ fn supergemm_mm_async
   (#eA : chest2 et_ab (SZ.v rows) (SZ.v shared))
   (#eB : chest2 et_ab (SZ.v cols) (SZ.v shared))
   (#fA #fB : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     on gpu_loc (gA |-> Frac fA eA) **
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc
         ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
           (exists* (eD' : chest2 et_d (SZ.v rows) (SZ.v cols)). (gD |-> eD') **
@@ -86,7 +86,7 @@ fn supergemm_mm_async
   assert pure (SZ.v nblk == SZ.v rows / SZ.v bm * (SZ.v cols / SZ.v bn));
   assert pure (SZ.v nthr == P.nthr bm bn wm wn);
 
-  Kuiops.Kernel.launch (
+  Kuiper.launch (
     mk_kernel
       gA #eA #(to_real_matrix eA) gB #eB #(to_real_matrix eB) gD post_map post_map_r
       bm bn bk wm wn skew group

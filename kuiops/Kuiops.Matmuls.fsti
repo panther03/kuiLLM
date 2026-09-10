@@ -63,9 +63,9 @@ fn bt2d_async
   (#eB : chest3 et (SZ.v batch) (SZ.v k) (SZ.v n))
   (#eC : chest3 et (SZ.v batch) (SZ.v m) (SZ.v n))
   (#fA #fB : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure (aligned 16 (core gA)) **
     pure (aligned 16 (core gB)) **
@@ -74,8 +74,8 @@ fn bt2d_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> eC)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gC |-> MS.gbmmcomb (fun (x:et) -> x) (fun (x:et) -> x) comb eC eA eB)))
 
@@ -157,9 +157,9 @@ fn tc2d_to_gen_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -168,8 +168,8 @@ fn tc2d_to_gen_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -220,9 +220,9 @@ fn tc2d_to_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -231,8 +231,8 @@ fn tc2d_to_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -283,9 +283,9 @@ fn tc2d_to_bcast_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -294,8 +294,8 @@ fn tc2d_to_bcast_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r

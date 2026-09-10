@@ -36,10 +36,17 @@ let sizet_rem_spec (a : SZ.t) (b : SZ.t { SZ.v b <> 0 })
   : Lemma (SZ.v (a %^ b) == SZ.v a % SZ.v b)
 = FStar.Math.Lemmas.euclidean_division_definition (SZ.v a) (SZ.v b)
 
+#push-options "--fuel 4 --ifuel 0"
+let batched_row_major_cell
+  (batch rows cols : nat)
+  (p : natlt batch) (i : natlt rows) (j : natlt cols)
+  : Lemma ((l3_batched_row_major batch rows cols).imap.f (idx3 p i j)
+           == p * (rows * cols) + cols * i + j)
+= ()
+#pop-options
+
 (* The batched row-major layout is affine in (page, row, col) with offset 0,
-   page stride rows*cols and row stride cols; [l3_batched_row_major_imap] is the
-   fsti-level characterization, so the instance can be built here rather than
-   reaching into Kuiper's opaque one. *)
+   page stride rows*cols and row stride cols. *)
 inline_for_extraction noextract
 instance srm3_batched
   (batch : erased nat { SZ.fits batch })
@@ -50,9 +57,7 @@ instance srm3_batched
   offset3 = 0sz;
   pstride3 = rows *^ cols;
   rstride3 = cols;
-  pf3 = (fun p i j ->
-           l3_batched_row_major_imap batch rows cols
-             (SZ.uint_to_t p) (SZ.uint_to_t i) (SZ.uint_to_t j));
+  pf3 = (fun p i j -> batched_row_major_cell batch rows cols p i j);
 }
 
 (* The instance is opaque at call sites; expose its affine fields so alignment
@@ -106,9 +111,9 @@ fn bt2d_async
   (#eB : chest3 et (SZ.v batch) (SZ.v k) (SZ.v n))
   (#eC : chest3 et (SZ.v batch) (SZ.v m) (SZ.v n))
   (#fA #fB : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure (aligned 16 (core gA)) **
     pure (aligned 16 (core gB)) **
@@ -117,8 +122,8 @@ fn bt2d_async
     on gpu_loc (gB |-> Frac fB eB) **
     on gpu_loc (gC |-> eC)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) **
                    (gC |-> MS.gbmmcomb (fun (x:et) -> x) (fun (x:et) -> x) comb eC eA eB)))
 {
@@ -148,7 +153,7 @@ fn bt2d_async
 
   lemma_srm3_batched_fields (SZ.v batch) m k;
   lemma_srm3_batched_fields (SZ.v batch) k n;
-  Kuiops.Kernel.launch (KB.bmk_kernel (fun (x:et) -> x) (fun (x:et) -> x) comb
+  Kuiper.launch (KB.bmk_kernel (fun (x:et) -> x) (fun (x:et) -> x) comb
             gA gB gC bm bn bk (l2_col_major _ _) (l2_row_major _ _) tm tn sq1 sq2
             (batch *^ (m/^bm *^ (n/^bn))) (bm/^tm *^ (bn/^tn)) ()) s;
 }
@@ -205,9 +210,9 @@ fn tc2d_to_gen_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -216,8 +221,8 @@ fn tc2d_to_gen_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -250,6 +255,8 @@ fn tc2d_to_gen_async
   dassert (nblk <=^ SZ.uint_to_t 2097152);
   assert pure (nblk <= max_blocks);
 
+  sizet_rem_spec (bm *^ bk) (chunk et_ab *^ nthr);
+  sizet_rem_spec (bk *^ bn) (chunk et_ab *^ nthr);
   dassert ((bm *^ bk) %^ (chunk et_ab *^ nthr) = 0sz);
   dassert ((bk *^ bn) %^ (chunk et_ab *^ nthr) = 0sz);
 
@@ -268,7 +275,7 @@ fn tc2d_to_gen_async
   let bk_div_shared : squash (SZ.v bk /?+ SZ.v shared) = ();
 
   #set-options "--fuel 0 --ifuel 0 --z3refresh" {
-  Kuiops.Kernel.launch (
+  Kuiper.launch (
     KTT.mk_kernel comb comb_r
       gA #eA gB #eB
       gC #_ #eC gD #eC
@@ -328,9 +335,9 @@ fn tc2d_to_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -339,8 +346,8 @@ fn tc2d_to_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r
@@ -398,9 +405,9 @@ fn tc2d_to_bcast_async
   (#eB : chest2 et_ab (SZ.v shared) (SZ.v cols))
   (#eC : chest2 et_cd (SZ.v rows) (SZ.v cols))
   (#fA #fB #fC : perm)
-  (#e : Kuiops.Epoch.epoch_t)
+  (#e : Kuiper.Epoch.epoch_t)
   preserves cpu ** stream_live s
-  requires Kuiops.Epoch.epoch_live s e
+  requires Kuiper.Epoch.epoch_live s e
   requires
     pure ((rows/bm) * (cols/bn) <= max_blocks) **
     pure (SZ.fits (rows * cols)) **
@@ -409,8 +416,8 @@ fn tc2d_to_bcast_async
     on gpu_loc (gC |-> Frac fC eC) **
     on gpu_loc (live gD)
   ensures
-    Kuiops.Epoch.epoch_live s (Kuiops.Epoch.epoch_next e) **
-    pledge0 (Kuiops.Epoch.epoch_flushed s (Kuiops.Epoch.epoch_next e))
+    Kuiper.Epoch.epoch_live s (Kuiper.Epoch.epoch_next e) **
+    pledge0 (Kuiper.Epoch.epoch_done s (Kuiper.Epoch.epoch_next e))
       (on gpu_loc ((gA |-> Frac fA eA) ** (gB |-> Frac fB eB) ** (gC |-> Frac fC eC) **
         (exists* eD'. (gD |-> eD') **
           pure (eD' %~ MS.mmcomb comb_r

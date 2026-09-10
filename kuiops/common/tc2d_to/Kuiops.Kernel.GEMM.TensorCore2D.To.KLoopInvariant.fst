@@ -11,6 +11,7 @@ open Kuiper.Spec.GEMM
 open Kuiper.Tensor.Tiling
 
 open Kuiops.Kernel.GEMM.TensorCore2D.KernelDesc { constraints }
+module KLoop = Kuiper.Kernel.GEMM.TensorCore2D.KLoop
 
 [@@"opaque_to_smt"]
 let partial_matmul_step
@@ -140,24 +141,11 @@ let loop_invariant_lemma
     } in
   aux3 ();
   aux4 ();
-  let aux1 () : Lemma (
-    ematrix_subtile rA_sub (wm * tm) bk warpRow 0
-    == acc2 (ematrix_tiled rA (wm * tm) bk) gwRow vk)
-  =
-    macc_ematrix_tiled rA (wm * tm) bk gwRow vk;
-    Kuiper.Chest.ext
-      (ematrix_subtile rA_sub (wm * tm) bk warpRow 0)
-      (acc2 (ematrix_tiled rA (wm * tm) bk) gwRow vk) in
-  let aux2 () : Lemma (
-    ematrix_subtile rB_sub bk (wn * tn) 0 warpCol
-    == acc2 (ematrix_tiled rB bk (wn * tn)) vk gwCol)
-  =
-    macc_ematrix_tiled rB bk (wn * tn) vk gwCol;
-    Kuiper.Chest.ext
-      (ematrix_subtile rB_sub bk (wn * tn) 0 warpCol)
-      (acc2 (ematrix_tiled rB bk (wn * tn)) vk gwCol) in
-  aux1 ();
-  aux2 ();
+  KLoop.zero_tile_offset bk vk ();
+  KLoop.nested_subtile_tiled_cell rA
+    bm bk (wm * tm) bk mrow vk warpRow 0 gwRow vk rA_sub ();
+  KLoop.nested_subtile_tiled_cell rB
+    bk bn bk (wn * tn) vk mcol 0 warpCol vk gwCol rB_sub ();
   partial_matmul_step rAcc0
     (ematrix_tiled rA (wm * tm) bk)
     (ematrix_tiled rB bk (wn * tn))
